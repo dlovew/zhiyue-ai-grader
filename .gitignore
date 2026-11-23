@@ -1,0 +1,15 @@
+# Node / 构建临时产物
+node_modules/
+*.log
+
+# 系统文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 编辑器临时文件
+*.swp
+*~
+
+# CodeBuddy 会话数据
+.codebuddy/

@@ -1,0 +1,237 @@
+  // src/ui/panel.ts
+  var STATUS_LABEL = {
+    legible: "\u53EF\u8FA8\u8BA4",
+    partial: "\u90E8\u5206\u4E0D\u6E05",
+    illegible: "\u65E0\u6CD5\u8FA8\u8BA4",
+    blank: "\u672A\u4F5C\u7B54"
+  };
+  var GraderPanel = class {
+    constructor(callbacks) {
+      this.callbacks = callbacks;
+      this.toastTimer = 0;
+      this.host = document.createElement("div");
+      this.host.className = "zygr-host";
+      this.shadow = this.host.attachShadow({ mode: "open" });
+      this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
+      this.panel = this.q(".zygr-panel");
+      this.bind();
+    }
+    markup() {
+      return `<div class="zygr-panel">
+      <header class="zygr-head">
+        <div class="zygr-brand">
+          <span class="zygr-logo">\u667A</span>
+          <div><strong>\u667A\u9605\u6279\u6539\u52A9\u624B</strong><small id="zygr-subtitle">\u7B49\u5F85\u8BFB\u53D6\u9898\u76EE</small></div>
+        </div>
+        <div class="zygr-head-actions">
+          <button class="zygr-icon" data-act="collapse" title="\u6298\u53E0" aria-label="\u6298\u53E0">\u2014</button>
+          <button class="zygr-icon" data-act="close" title="\u5173\u95ED" aria-label="\u5173\u95ED">\xD7</button>
+        </div>
+      </header>
+      <div class="zygr-body">
+        <div class="zygr-statusbar"><span id="zygr-stage">\u5C31\u7EEA</span><span class="zygr-chip" id="zygr-cache">\u5F85\u914D\u7F6E</span></div>
+        <div class="zygr-progress"><i id="zygr-bar"></i></div>
+        <section class="zygr-card"><div class="zygr-meta" id="zygr-meta">\u5C1A\u672A\u68C0\u6D4B\u5230\u9605\u5377\u9875\u9762</div><div class="zygr-thumbs" id="zygr-thumbs"></div></section>
+        <section class="zygr-card" id="zygr-result"><div class="zygr-reason">\u6279\u6539\u7ED3\u679C\u5C06\u663E\u793A\u5728\u8FD9\u91CC</div></section>
+        <div class="zygr-error" id="zygr-error" hidden></div>
+      </div>
+      <footer class="zygr-actions">
+        <button class="zygr-btn zygr-primary" data-act="grade">\u5F00\u59CB\u6279\u6539</button>
+        <button class="zygr-btn" data-act="continuous">\u8FDE\u7EED\u6279\u9605</button>
+        <div class="zygr-submit-cell">
+          <button class="zygr-btn" data-act="submit">\u63D0\u4EA4\u7ED3\u679C</button>
+          <label class="zygr-mini-check"><input type="checkbox" data-opt="skip-submit-confirm"> \u4E00\u6B21\u63D0\u4EA4\uFF08\u514D\u786E\u8BA4\uFF09</label>
+        </div>
+        <button class="zygr-btn zygr-ghost" data-act="history">\u5386\u53F2</button>
+        <button class="zygr-btn zygr-ghost" data-act="settings">\u8BBE\u7F6E</button>
+      </footer>
+      <div class="zygr-toast" id="zygr-toast" hidden></div>
+    </div>`;
+    }
+    q(selector) {
+      const element = this.shadow.querySelector(selector);
+      if (!element) throw new Error(`\u754C\u9762\u5143\u7D20\u7F3A\u5931\uFF1A${selector}`);
+      return element;
+    }
+    setText(id, value) {
+      this.q(`#${id}`).textContent = value;
+    }
+    bind() {
+      this.shadow.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-act]");
+        if (!button) return;
+        const action = button.dataset.act;
+        if (action === "collapse") {
+          this.panel.classList.toggle("zygr-collapsed");
+        } else if (action === "close") {
+          this.hide();
+        } else if (action === "grade") {
+          this.callbacks.onGrade();
+        } else if (action === "continuous") {
+          this.callbacks.onContinuous();
+        } else if (action === "submit") {
+          const skipConfirm = Boolean(this.shadow.querySelector("[data-opt='skip-submit-confirm']")?.checked);
+          this.callbacks.onSubmit(skipConfirm);
+        } else if (action === "history") {
+          this.callbacks.onHistory();
+        } else if (action === "settings") {
+          this.callbacks.onSettings();
+        }
+      });
+    }
+    mount() {
+      if (!this.host.isConnected) document.body.appendChild(this.host);
+    }
+    show() {
+      this.mount();
+      this.panel.hidden = false;
+    }
+    hide() {
+      this.panel.hidden = true;
+    }
+    setSubtitle(value) {
+      this.setText("zygr-subtitle", value);
+    }
+    setQuestion(question) {
+      this.renderThumbs(question?.images ?? []);
+      if (!question) {
+        this.setText("zygr-meta", "\u5C1A\u672A\u68C0\u6D4B\u5230\u9605\u5377\u9875\u9762");
+        return;
+      }
+      const subs = question.subQuestions.length > 0 ? ` \xB7 ${question.subQuestions.length} \u4E2A\u5C0F\u9898` : "";
+      this.setText("zygr-meta", `\u9898\u53F7 ${question.questionId}${subs} \xB7 \u6EE1\u5206 ${question.maxScore || "\u672A\u6307\u5B9A"} \xB7 \u4F5C\u7B54\u56FE\u7247 ${question.images.length} \u5F20`);
+    }
+    renderThumbs(images) {
+      const container = this.q("#zygr-thumbs");
+      container.replaceChildren();
+      for (const src of images.slice(0, 6)) {
+        if (!/^(data:image\/|https?:\/\/)/i.test(src)) continue;
+        const image = document.createElement("img");
+        image.src = src;
+        image.alt = "\u4F5C\u7B54\u56FE\u7247\u7F29\u7565\u56FE";
+        image.title = "\u4F5C\u7B54\u56FE\u7247\u7F29\u7565\u56FE";
+        image.onerror = () => image.remove();
+        container.appendChild(image);
+      }
+    }
+    setStage(stage, detail) {
+      this.setText("zygr-stage", detail ? `${stage} \xB7 ${detail}` : stage);
+      const progress = this.q("#zygr-bar");
+      progress.style.width = stage.includes("\u7F13\u5B58\u547D\u4E2D") || stage === "\u5B8C\u6210" ? "100%" : stage.includes("\u8BC4\u5206") ? "70%" : "35%";
+    }
+    setCache(label, kind = "idle") {
+      const chip = this.q("#zygr-cache");
+      chip.textContent = label;
+      chip.className = `zygr-chip${kind === "ok" ? " zygr-ok" : kind === "warn" ? " zygr-warn" : ""}`;
+    }
+    setBusy(busy, label = "\u5904\u7406\u4E2D") {
+      this.shadow.querySelectorAll('.zygr-actions .zygr-btn:not([data-act="continuous"])').forEach((button) => {
+        button.disabled = busy;
+      });
+      if (busy) this.setStage(label);
+    }
+    setAutoMode(active) {
+      const button = this.q('[data-act="continuous"]');
+      button.textContent = active ? "\u505C\u6B62\u8FDE\u7EED\u6279\u9605" : "\u8FDE\u7EED\u6279\u9605";
+      button.classList.toggle("zygr-running", active);
+    }
+    showError(message) {
+      const box = this.q("#zygr-error");
+      box.textContent = message;
+      box.hidden = false;
+    }
+    clearError() {
+      const box = this.q("#zygr-error");
+      box.textContent = "";
+      box.hidden = true;
+    }
+    setResult(result) {
+      const container = this.q("#zygr-result");
+      container.replaceChildren();
+      const row = document.createElement("div");
+      row.className = "zygr-score-row";
+      const score = document.createElement("div");
+      score.className = "zygr-score zygr-score-editable";
+      const scoreInput = document.createElement("input");
+      scoreInput.type = "number";
+      scoreInput.className = "zygr-score-input";
+      scoreInput.min = "0";
+      scoreInput.max = String(result.maxScore || 999);
+      scoreInput.step = "0.5";
+      scoreInput.value = String(Math.round(result.score * 10) / 10);
+      scoreInput.title = "\u53EF\u76F4\u63A5\u4FEE\u6539\u603B\u5206";
+      const unit = document.createElement("small");
+      unit.textContent = ` / ${result.maxScore || "\u2014"} \u5206`;
+      score.append(scoreInput, unit);
+      const badge = document.createElement("span");
+      badge.className = `zygr-badge${result.needsReview ? " zygr-risk" : ""}`;
+      badge.textContent = `${STATUS_LABEL[result.status]}${result.needsReview ? " \xB7 \u9700\u590D\u6838" : ""}`;
+      row.append(score, badge);
+      container.appendChild(row);
+      const reason = document.createElement("div");
+      reason.className = "zygr-reason";
+      reason.textContent = result.reason || "\u672A\u8FD4\u56DE\u8BC4\u5206\u4F9D\u636E";
+      container.appendChild(reason);
+      if (result.subScores.length > 0) {
+        const table = document.createElement("table");
+        table.className = "zygr-table";
+        const head = document.createElement("thead");
+        head.innerHTML = "<tr><th>\u5C0F\u9898</th><th>\u5F97\u5206</th><th>\u4F9D\u636E</th></tr>";
+        const body = document.createElement("tbody");
+        result.subScores.forEach((item, index) => {
+          const tr = document.createElement("tr");
+          const labelTd = document.createElement("td");
+          labelTd.textContent = `${item.label}/${item.maxScore}`;
+          const scoreTd = document.createElement("td");
+          const subInput = document.createElement("input");
+          subInput.type = "number";
+          subInput.className = "zygr-score-input zygr-subscore-input";
+          subInput.min = "0";
+          subInput.max = String(item.maxScore || 999);
+          subInput.step = "0.5";
+          subInput.value = String(Math.round(Number(item.score) * 10) / 10);
+          subInput.dataset.scoreIndex = String(index);
+          subInput.title = "\u53EF\u76F4\u63A5\u4FEE\u6539\u8BE5\u5C0F\u9898\u5F97\u5206";
+          scoreTd.appendChild(subInput);
+          const reasonTd = document.createElement("td");
+          reasonTd.textContent = item.reason || "\u2014";
+          tr.append(labelTd, scoreTd, reasonTd);
+          body.appendChild(tr);
+        });
+        table.append(head, body);
+        container.appendChild(table);
+      }
+      const reviews = [...result.reviewReasons];
+      if (reviews.length > 0) {
+        const note = document.createElement("div");
+        note.className = "zygr-reviews";
+        note.textContent = reviews.join("\uFF1B");
+        container.appendChild(note);
+      }
+      const meta = document.createElement("div");
+      meta.className = "zygr-reason";
+      meta.textContent = `\u94FE\u8DEF ${result.pipeline} \xB7 \u6A21\u578B ${result.model} \xB7 \u8017\u65F6 ${(result.elapsedMs / 1e3).toFixed(1)}s`;
+      container.appendChild(meta);
+      this.setCache(result.cacheHit ? "\u7F13\u5B58\u547D\u4E2D" : "\u65B0\u7ED3\u679C", result.cacheHit ? "ok" : result.needsReview ? "warn" : "idle");
+      this.setStage("\u5B8C\u6210");
+    }
+    getScoreEdits() {
+      const total = this.shadow.querySelector(".zygr-score-input[data-score-index=''], .zygr-score-editable .zygr-score-input");
+      const subInputs = [...this.shadow.querySelectorAll(".zygr-subscore-input")];
+      const subScores = subInputs.map((input) => Number(input.value));
+      return {
+        total: total && total.value.trim() !== "" ? Number(total.value) : null,
+        subScores: subInputs.length ? subScores : null
+      };
+    }
+    toast(message) {
+      const element = this.q("#zygr-toast");
+      element.textContent = message;
+      element.hidden = false;
+      window.clearTimeout(this.toastTimer);
+      this.toastTimer = window.setTimeout(() => {
+        element.hidden = true;
+      }, 2400);
+    }
+  };
+
