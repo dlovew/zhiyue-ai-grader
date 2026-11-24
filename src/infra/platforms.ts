@@ -64,6 +64,14 @@
       models: ["Qwen/Qwen2.5-VL-72B-Instruct", "Qwen/Qwen2.5-VL-32B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct"],
       authHeader: "bearer",
       disableThinkingKey: "enable_thinking",
+      // 硅基流动 enable_thinking 只接受布尔值；强度用顶层 reasoning_effort。
+      // 官方文档：枚举 high|max，其中 low/medium 会被服务端映射为 high。
+      thinkingFields: {
+        off: { enable_thinking: false },
+        low: { reasoning_effort: "high" },
+        high: { reasoning_effort: "high" },
+        max: { reasoning_effort: "max" }
+      },
       jsonModeKey: "response_format",
       stream: false
     },

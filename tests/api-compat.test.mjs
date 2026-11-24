@@ -227,6 +227,31 @@ test('Cloudflare 思考强度 low 注入 reasoning_effort 而非 thinking', asyn
   assert.equal(Object.hasOwn(body, 'thinking'), false);
 });
 
+test('硅基流动强度模式用 reasoning_effort，关闭仍用布尔 enable_thinking', async () => {
+  const { api, calls } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] })
+  }, {
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] })
+  }, {
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] })
+  }]);
+  const service = { platform: 'siliconflow', endpoint: '', model: 'Qwen/Qwen2.5-VL-7B-Instruct', apiKey: 'k' };
+  await api.chatCompletion({ ...service, thinkingMode: 'low' }, [{ role: 'user', content: 'hi' }], { retries: 0 });
+  await api.chatCompletion({ ...service, thinkingMode: 'max' }, [{ role: 'user', content: 'hi' }], { retries: 0 });
+  await api.chatCompletion({ ...service, thinkingMode: 'off' }, [{ role: 'user', content: 'hi' }], { retries: 0 });
+  const low = JSON.parse(calls[0].data);
+  const max = JSON.parse(calls[1].data);
+  const off = JSON.parse(calls[2].data);
+  assert.equal(low.reasoning_effort, 'high');
+  assert.equal(Object.hasOwn(low, 'enable_thinking'), false);
+  assert.equal(max.reasoning_effort, 'max');
+  assert.equal(off.enable_thinking, false);
+  assert.equal(Object.hasOwn(off, 'reasoning_effort'), false);
+});
+
 test('平台档案：用户显式填写的端点与模型优先于预设建议', () => {
   const { api } = loadModules();
   const profile = api.resolveProfile({

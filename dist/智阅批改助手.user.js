@@ -637,6 +637,14 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       models: ["Qwen/Qwen2.5-VL-72B-Instruct", "Qwen/Qwen2.5-VL-32B-Instruct", "Qwen/Qwen2.5-VL-7B-Instruct"],
       authHeader: "bearer",
       disableThinkingKey: "enable_thinking",
+      // 硅基流动 enable_thinking 只接受布尔值；强度用顶层 reasoning_effort。
+      // 官方文档：枚举 high|max，其中 low/medium 会被服务端映射为 high。
+      thinkingFields: {
+        off: { enable_thinking: false },
+        low: { reasoning_effort: "high" },
+        high: { reasoning_effort: "high" },
+        max: { reasoning_effort: "max" }
+      },
       jsonModeKey: "response_format",
       stream: false
     },
@@ -2420,7 +2428,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           <p class="zygr-hint">\u8BC4\u5206\u53EA\u4F7F\u7528\u591A\u6A21\u6001\u89C6\u89C9\u6A21\u578B\uFF1A\u76F4\u63A5\u8BFB\u53D6\u4F5C\u7B54\u56FE\u7247\u5E76\u6309\u8BC4\u5206\u6807\u51C6\u8F93\u51FA JSON\u3002\u6A21\u578B\u5FC5\u987B\u652F\u6301\u56FE\u7247\u8F93\u516E\u3002</p>
           ${select("\u601D\u8003\u6A21\u5F0F", "pipeline.thinkingMode", [["off", "\u5173\u95ED\u601D\u8003\uFF08\u7701 Token\u3001\u66F4\u5FEB\uFF09"], ["low", "low \u4F4E\u5F3A\u5EA6"], ["high", "high \u9AD8\u5F3A\u5EA6"], ["max", "max \u6700\u9AD8\u5F3A\u5EA6"], ["auto", "\u4E0D\u5E72\u9884\uFF08\u4F7F\u7528\u6A21\u578B\u9ED8\u8BA4\uFF09"]])}
           <div class="zygr-row"><button class="zygr-btn zygr-ghost" data-act="test-thinking">\u6D4B\u8BD5\u5F53\u524D\u601D\u8003\u6A21\u5F0F\u662F\u5426\u751F\u6548</button><span class="zygr-test-status" data-status="thinking"></span></div>
-          <p class="zygr-hint">\u5173\u95ED\u9002\u7528\u4E8E\u9ED8\u8BA4\u5F00\u601D\u8003\u4E14\u5141\u8BB8\u5173\u95ED\u7684\u6A21\u578B\u3002\u667A\u8C31 glm-5 \u7B49\u300C\u59CB\u7EC8\u601D\u8003\u300D\u6A21\u578B\u4E0D\u652F\u6301\u5173\u95ED\uFF0C\u8BF7\u9009 low / high / max\uFF08\u53D1\u9001 thinking: "low" \u7B49\uFF09\uFF0C\u5426\u5219\u4F1A\u62A5 HTTP 400\u3002\u9009\u300C\u4E0D\u5E72\u9884\u300D\u5219\u4E0D\u53D1\u9001\u4EFB\u4F55\u601D\u8003\u53C2\u6570\u3002\u70B9\u51FB\u6D4B\u8BD5\u4F1A\u53D1\u9001\u4E00\u4E2A\u9700\u8981\u63A8\u7406\u7684\u95EE\u9898\u9A8C\u8BC1\u3002</p>
+          <p class="zygr-hint">\u5173\u95ED\u9002\u7528\u4E8E\u9ED8\u8BA4\u5F00\u601D\u8003\u4E14\u5141\u8BB8\u5173\u95ED\u7684\u6A21\u578B\u3002\u667A\u8C31 glm-5 \u7B49\u300C\u59CB\u7EC8\u601D\u8003\u300D\u6A21\u578B\u4E0D\u652F\u6301\u5173\u95ED\uFF0C\u8BF7\u9009 low / high / max\u3002\u7845\u57FA\u6D41\u52A8 enable_thinking \u53EA\u63A5\u53D7\u5E03\u5C14\u503C\uFF0C\u5F3A\u5EA6\u7528 reasoning_effort\uFF08low/high \u670D\u52A1\u7AEF\u6620\u5C04\u4E3A high\uFF0Cmax \u539F\u6837\u53D1\u9001\uFF09\u3002\u9009\u300C\u4E0D\u5E72\u9884\u300D\u5219\u4E0D\u53D1\u9001\u4EFB\u4F55\u601D\u8003\u53C2\u6570\uFF0C\u90E8\u5206\u6A21\u578B\u9ED8\u8BA4\u5F00\u601D\u8003\u4F1A\u4EA7\u751F\u957F\u94FE\u601D\u8003\u800C\u8D85\u65F6\uFF0C\u53EF\u5728\u300C\u9AD8\u7EA7\u300D\u8C03\u5927\u8BF7\u6C42\u8D85\u65F6\u6216\u6362\u7528\u66F4\u5C0F\u6A21\u578B\u3002\u70B9\u51FB\u6D4B\u8BD5\u4F1A\u53D1\u9001\u4E00\u4E2A\u9700\u8981\u63A8\u7406\u7684\u95EE\u9898\u9A8C\u8BC1\u3002</p>
 
           ${platformSelect("\u5E73\u53F0\u9884\u8BBE", "pipeline.vlm.platform")}
           <h3>\u591A\u6A21\u6001\u670D\u52A1</h3>
