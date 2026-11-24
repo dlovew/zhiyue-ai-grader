@@ -98,11 +98,20 @@
   }
 
   // 按思考模式注入字段：off 为关闭，low/high/max 为强度，auto 不干预。
-  // 具体值优先取平台预设的 thinkingValues 映射，未映射时按字段名给出通用值。
+  // 优先用 thinkingFields 展开多个字段（如智谱 thinking.type=enabled + reasoning_effort=low）；
+  // 其次用 thinkingValues 单字段映射；都未命中时按字段名给出通用值。
   function thinkingControl(payload, profile, mode) {
     const injected = [];
     const normalized = normalizeThinkingMode(mode);
     if (normalized === "auto") return injected;
+    const fields = profile.thinkingFields || {};
+    if (Object.prototype.hasOwnProperty.call(fields, normalized)) {
+      for (const [fieldKey, fieldValue] of Object.entries(fields[normalized] || {})) {
+        payload[fieldKey] = fieldValue;
+        injected.push(fieldKey);
+      }
+      return injected;
+    }
     const key = profile.disableThinkingKey;
     if (!key) return injected;
     const values = profile.thinkingValues || {};
@@ -114,7 +123,6 @@
       else if (key === "reasoning") value = { effort: "none" };
       else value = false;
     } else if (key === "thinking") {
-      // 智谱/火山的 thinking 是对象字段：{type:"low"}，裸字符串会触发 400。
       value = { type: normalized };
     } else if (key === "reasoning") {
       value = { effort: normalized };

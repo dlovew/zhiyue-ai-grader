@@ -94,9 +94,14 @@
       models: ["glm-4v-flash", "glm-4-plus", "glm-4-air", "glm-5.3-flash"],
       authHeader: "bearer",
       disableThinkingKey: "thinking",
-      // glm-5.x 始终思考，只接受 low/high/max；关闭仅对 glm-4.x 有效。
-      // thinking 字段在智谱是对象结构 {type:...}，裸字符串会触发 JSON 反序列化 400。
-      thinkingValues: { low: { type: "low" }, high: { type: "high" }, max: { type: "max" } },
+      // 智谱官方格式：thinking.type 只接受 enabled（glm-5.x 强制思考），
+      // 强度由独立的 reasoning_effort 字段控制（low/high/max，默认 max）。
+      // 关闭写了 disabled 会触发错误码 1210「该模型始终思考，不支持关闭思考」。
+      thinkingFields: {
+        low: { thinking: { type: "enabled" }, reasoning_effort: "low" },
+        high: { thinking: { type: "enabled" }, reasoning_effort: "high" },
+        max: { thinking: { type: "enabled" }, reasoning_effort: "max" }
+      },
       jsonModeKey: "response_format",
       stream: false
     },
@@ -116,7 +121,7 @@
     if (!isRecord(value)) return {};
     const result = {};
     for (const mode of ["off", "low", "high", "max"]) {
-      if (Object.prototype.hasOwnProperty.call(value, mode)) result[mode] = value[mode];
+      if (Object.prototype.hasOwnProperty.call(value, mode) && isRecord(value[mode])) result[mode] = value[mode];
     }
     return result;
   }
@@ -132,6 +137,7 @@
       authHeader: ["bearer", "api-key", "none"].includes(item.authHeader) ? item.authHeader : "bearer",
       disableThinkingKey: typeof item.disableThinkingKey === "string" && item.disableThinkingKey ? item.disableThinkingKey : null,
       thinkingValues: normalizeThinkingValues(item.thinkingValues),
+      thinkingFields: normalizeThinkingValues(item.thinkingFields),
       jsonModeKey: item.jsonModeKey === null ? null : "response_format",
       stream: Boolean(item.stream)
     }));
@@ -164,6 +170,7 @@
       authHeader: ["bearer", "api-key", "none"].includes(preset.authHeader) ? preset.authHeader : "bearer",
       disableThinkingKey: typeof preset.disableThinkingKey === "string" && preset.disableThinkingKey.trim() ? preset.disableThinkingKey.trim() : null,
       thinkingValues: normalizeThinkingValues(preset.thinkingValues),
+      thinkingFields: normalizeThinkingValues(preset.thinkingFields),
       jsonModeKey: preset.jsonModeKey === null ? null : "response_format",
       stream: Boolean(preset.stream)
     };
@@ -269,6 +276,7 @@
       authHeader: "bearer",
       disableThinkingKey: null,
       thinkingValues: {},
+      thinkingFields: {},
       jsonModeKey: "response_format",
       stream: false
     };
@@ -292,6 +300,7 @@
       authHeaderName: authHeader === "api-key" ? "api-key" : "Authorization",
       disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (preset.disableThinkingKey ?? null),
       thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(preset.thinkingValues),
+      thinkingFields: Object.prototype.hasOwnProperty.call(compat, "thinkingFields") ? normalizeThinkingValues(compat.thinkingFields) : normalizeThinkingValues(preset.thinkingFields),
       jsonModeKey: Object.prototype.hasOwnProperty.call(compat, "jsonModeKey") ? compat.jsonModeKey : (preset.jsonModeKey ?? "response_format"),
       stream: typeof compat.stream === "boolean" ? compat.stream : Boolean(preset.stream)
     };

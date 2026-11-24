@@ -647,9 +647,14 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       models: ["glm-4v-flash", "glm-4-plus", "glm-4-air", "glm-5.3-flash"],
       authHeader: "bearer",
       disableThinkingKey: "thinking",
-      // glm-5.x 始终思考，只接受 low/high/max；关闭仅对 glm-4.x 有效。
-      // thinking 字段在智谱是对象结构 {type:...}，裸字符串会触发 JSON 反序列化 400。
-      thinkingValues: { low: { type: "low" }, high: { type: "high" }, max: { type: "max" } },
+      // 智谱官方格式：thinking.type 只接受 enabled（glm-5.x 强制思考），
+      // 强度由独立的 reasoning_effort 字段控制（low/high/max，默认 max）。
+      // 关闭写了 disabled 会触发错误码 1210「该模型始终思考，不支持关闭思考」。
+      thinkingFields: {
+        low: { thinking: { type: "enabled" }, reasoning_effort: "low" },
+        high: { thinking: { type: "enabled" }, reasoning_effort: "high" },
+        max: { thinking: { type: "enabled" }, reasoning_effort: "max" }
+      },
       jsonModeKey: "response_format",
       stream: false
     },
@@ -669,7 +674,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     if (!isRecord(value)) return {};
     const result = {};
     for (const mode of ["off", "low", "high", "max"]) {
-      if (Object.prototype.hasOwnProperty.call(value, mode)) result[mode] = value[mode];
+      if (Object.prototype.hasOwnProperty.call(value, mode) && isRecord(value[mode])) result[mode] = value[mode];
     }
     return result;
   }
@@ -685,6 +690,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       authHeader: ["bearer", "api-key", "none"].includes(item.authHeader) ? item.authHeader : "bearer",
       disableThinkingKey: typeof item.disableThinkingKey === "string" && item.disableThinkingKey ? item.disableThinkingKey : null,
       thinkingValues: normalizeThinkingValues(item.thinkingValues),
+      thinkingFields: normalizeThinkingValues(item.thinkingFields),
       jsonModeKey: item.jsonModeKey === null ? null : "response_format",
       stream: Boolean(item.stream)
     }));
@@ -717,6 +723,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       authHeader: ["bearer", "api-key", "none"].includes(preset.authHeader) ? preset.authHeader : "bearer",
       disableThinkingKey: typeof preset.disableThinkingKey === "string" && preset.disableThinkingKey.trim() ? preset.disableThinkingKey.trim() : null,
       thinkingValues: normalizeThinkingValues(preset.thinkingValues),
+      thinkingFields: normalizeThinkingValues(preset.thinkingFields),
       jsonModeKey: preset.jsonModeKey === null ? null : "response_format",
       stream: Boolean(preset.stream)
     };
@@ -822,6 +829,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       authHeader: "bearer",
       disableThinkingKey: null,
       thinkingValues: {},
+      thinkingFields: {},
       jsonModeKey: "response_format",
       stream: false
     };
@@ -845,6 +853,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       authHeaderName: authHeader === "api-key" ? "api-key" : "Authorization",
       disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (preset.disableThinkingKey ?? null),
       thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(preset.thinkingValues),
+      thinkingFields: Object.prototype.hasOwnProperty.call(compat, "thinkingFields") ? normalizeThinkingValues(compat.thinkingFields) : normalizeThinkingValues(preset.thinkingFields),
       jsonModeKey: Object.prototype.hasOwnProperty.call(compat, "jsonModeKey") ? compat.jsonModeKey : (preset.jsonModeKey ?? "response_format"),
       stream: typeof compat.stream === "boolean" ? compat.stream : Boolean(preset.stream)
     };
@@ -949,11 +958,20 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
   }
 
   // 按思考模式注入字段：off 为关闭，low/high/max 为强度，auto 不干预。
-  // 具体值优先取平台预设的 thinkingValues 映射，未映射时按字段名给出通用值。
+  // 优先用 thinkingFields 展开多个字段（如智谱 thinking.type=enabled + reasoning_effort=low）；
+  // 其次用 thinkingValues 单字段映射；都未命中时按字段名给出通用值。
   function thinkingControl(payload, profile, mode) {
     const injected = [];
     const normalized = normalizeThinkingMode(mode);
     if (normalized === "auto") return injected;
+    const fields = profile.thinkingFields || {};
+    if (Object.prototype.hasOwnProperty.call(fields, normalized)) {
+      for (const [fieldKey, fieldValue] of Object.entries(fields[normalized] || {})) {
+        payload[fieldKey] = fieldValue;
+        injected.push(fieldKey);
+      }
+      return injected;
+    }
     const key = profile.disableThinkingKey;
     if (!key) return injected;
     const values = profile.thinkingValues || {};
@@ -965,7 +983,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       else if (key === "reasoning") value = { effort: "none" };
       else value = false;
     } else if (key === "thinking") {
-      // 智谱/火山的 thinking 是对象字段：{type:"low"}，裸字符串会触发 400。
       value = { type: normalized };
     } else if (key === "reasoning") {
       value = { effort: normalized };
@@ -2332,7 +2349,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
               <div class="zygr-field"><label>\u63A8\u8350\u6A21\u578B\uFF08\u9017\u53F7\u5206\u9694\uFF09</label><input data-preset-field="models"></div>
               <div class="zygr-field"><label>\u9274\u6743\u65B9\u5F0F</label><select data-preset-field="authHeader"><option value="bearer">Authorization: Bearer</option><option value="api-key">api-key</option><option value="none">\u65E0\u9700\u9274\u6743</option></select></div>
               <div class="zygr-field"><label>\u601D\u8003\u63A7\u5236\u5B57\u6BB5\u540D</label><input data-preset-field="disableThinkingKey" placeholder="\u7559\u7A7A\u8868\u793A\u4E0D\u6CE8\u5165\uFF0C\u5982 enable_thinking"></div>
-              <div class="zygr-field"><label>low/high/max \u503C\u6620\u5C04\uFF08JSON\uFF0C\u53EF\u9009\uFF09</label><input data-preset-field="thinkingValues" placeholder='\u5982 {"low":{"type":"low"},"high":{"type":"high"},"max":{"type":"max"}}'></div>
+              <div class="zygr-field"><label>\u601D\u8003\u591A\u5B57\u6BB5\u6620\u5C04\uFF08JSON\uFF0C\u53EF\u9009\uFF09</label><input data-preset-field="thinkingFields" placeholder='\u5982 {"low":{"thinking":{"type":"enabled"},"reasoning_effort":"low"}}'></div>
               <div class="zygr-field"><label>\u6D41\u5F0F\u8F93\u51FA</label><select data-preset-field="stream"><option value="false">\u5173\u95ED\uFF08\u63A8\u8350\uFF09</option><option value="true">\u5F00\u542F</option></select></div>
             </div>
             <div class="zygr-row">
@@ -2627,15 +2644,15 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       set("models", Array.isArray(preset?.models) ? preset.models.join(", ") : "");
       set("authHeader", value("authHeader", "bearer"));
       set("disableThinkingKey", preset?.disableThinkingKey || "");
-      set("thinkingValues", preset?.thinkingValues && Object.keys(preset.thinkingValues).length ? JSON.stringify(preset.thinkingValues) : "");
+      set("thinkingFields", preset?.thinkingFields && Object.keys(preset.thinkingFields).length ? JSON.stringify(preset.thinkingFields) : "");
       set("stream", String(Boolean(preset?.stream)));
     }
     collectPresetForm() {
       const value = (key) => String(this.shadow.querySelector(`[data-preset-field="${key}"]`)?.value ?? "").trim();
-      let thinkingValues = {};
+      let thinkingFields = {};
       try {
-        const parsed = JSON.parse(value("thinkingValues") || "{}");
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) thinkingValues = parsed;
+        const parsed = JSON.parse(value("thinkingFields") || "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) thinkingFields = parsed;
       } catch { /* 无效 JSON 时忽略映射 */ }
       return {
         id: value("id"),
@@ -2644,7 +2661,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         models: value("models").split(/[,，]/).map((item) => item.trim()).filter(Boolean),
         authHeader: ["bearer", "api-key", "none"].includes(value("authHeader")) ? value("authHeader") : "bearer",
         disableThinkingKey: value("disableThinkingKey"),
-        thinkingValues,
+        thinkingValues: {},
+        thinkingFields,
         jsonModeKey: "response_format",
         stream: value("stream") === "true"
       };
