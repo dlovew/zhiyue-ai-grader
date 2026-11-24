@@ -3,7 +3,7 @@
     version: 1,
     pipeline: {
       vlm: { endpoint: "", apiKey: "", model: "", platform: "custom", compat: {} },
-      disableThinking: true,
+      thinkingMode: "off",
       maxConcurrent: 2,
       maxRpm: 60,
       maxTpm: 6e4,
@@ -59,7 +59,12 @@
   function loadConfig() {
     const raw = readJson(STORAGE_KEYS.config, {});
     if (!isRecord(raw) || raw.version !== 1) return clone(DEFAULT_CONFIG);
-    return merge(DEFAULT_CONFIG, raw);
+    const config = merge(DEFAULT_CONFIG, raw);
+    const oldPipeline = isRecord(raw.pipeline) ? raw.pipeline : {};
+    if (Object.prototype.hasOwnProperty.call(oldPipeline, "disableThinking") && !Object.prototype.hasOwnProperty.call(oldPipeline, "thinkingMode")) {
+      config.pipeline.thinkingMode = normalizeThinkingMode(oldPipeline.disableThinking);
+    }
+    return config;
   }
   function saveConfig(config) {
     return writeJson(STORAGE_KEYS.config, config);

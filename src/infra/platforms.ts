@@ -91,9 +91,11 @@
       id: "zhipu",
       label: "智谱 GLM",
       endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-      models: ["glm-4v-flash", "glm-4-plus", "glm-4-air"],
+      models: ["glm-4v-flash", "glm-4-plus", "glm-4-air", "glm-5.3-flash"],
       authHeader: "bearer",
       disableThinkingKey: "thinking",
+      // glm-5.x 始终思考，只接受 low/high/max；关闭仅对 glm-4.x 有效。
+      thinkingValues: { low: "low", high: "high", max: "max" },
       jsonModeKey: "response_format",
       stream: false
     },
@@ -109,6 +111,15 @@
     },
   ];
 
+  function normalizeThinkingValues(value) {
+    if (!isRecord(value)) return {};
+    const result = {};
+    for (const mode of ["off", "low", "high", "max"]) {
+      if (Object.prototype.hasOwnProperty.call(value, mode)) result[mode] = value[mode];
+    }
+    return result;
+  }
+
   function loadCustomPresets() {
     const raw = readJson(PRESET_STORAGE_KEY, []);
     if (!Array.isArray(raw)) return [];
@@ -119,6 +130,7 @@
       models: Array.isArray(item.models) ? item.models.filter((m) => typeof m === "string" && m.trim()) : [],
       authHeader: ["bearer", "api-key", "none"].includes(item.authHeader) ? item.authHeader : "bearer",
       disableThinkingKey: typeof item.disableThinkingKey === "string" && item.disableThinkingKey ? item.disableThinkingKey : null,
+      thinkingValues: normalizeThinkingValues(item.thinkingValues),
       jsonModeKey: item.jsonModeKey === null ? null : "response_format",
       stream: Boolean(item.stream)
     }));
@@ -150,6 +162,7 @@
       models: Array.isArray(preset.models) ? preset.models.filter((m) => String(m).trim()) : [],
       authHeader: ["bearer", "api-key", "none"].includes(preset.authHeader) ? preset.authHeader : "bearer",
       disableThinkingKey: typeof preset.disableThinkingKey === "string" && preset.disableThinkingKey.trim() ? preset.disableThinkingKey.trim() : null,
+      thinkingValues: normalizeThinkingValues(preset.thinkingValues),
       jsonModeKey: preset.jsonModeKey === null ? null : "response_format",
       stream: Boolean(preset.stream)
     };
@@ -254,6 +267,7 @@
       models: String(service?.model || "").trim() ? [String(service.model).trim()] : [],
       authHeader: "bearer",
       disableThinkingKey: null,
+      thinkingValues: {},
       jsonModeKey: "response_format",
       stream: false
     };
@@ -276,6 +290,7 @@
       authHeader,
       authHeaderName: authHeader === "api-key" ? "api-key" : "Authorization",
       disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (preset.disableThinkingKey ?? null),
+      thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(preset.thinkingValues),
       jsonModeKey: Object.prototype.hasOwnProperty.call(compat, "jsonModeKey") ? compat.jsonModeKey : (preset.jsonModeKey ?? "response_format"),
       stream: typeof compat.stream === "boolean" ? compat.stream : Boolean(preset.stream)
     };

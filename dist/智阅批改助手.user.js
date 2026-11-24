@@ -307,7 +307,7 @@
     version: 1,
     pipeline: {
       vlm: { endpoint: "", apiKey: "", model: "", platform: "custom", compat: {} },
-      disableThinking: true,
+      thinkingMode: "off",
       maxConcurrent: 2,
       maxRpm: 60,
       maxTpm: 6e4,
@@ -363,7 +363,12 @@
   function loadConfig() {
     const raw = readJson(STORAGE_KEYS.config, {});
     if (!isRecord(raw) || raw.version !== 1) return clone(DEFAULT_CONFIG);
-    return merge(DEFAULT_CONFIG, raw);
+    const config = merge(DEFAULT_CONFIG, raw);
+    const oldPipeline = isRecord(raw.pipeline) ? raw.pipeline : {};
+    if (Object.prototype.hasOwnProperty.call(oldPipeline, "disableThinking") && !Object.prototype.hasOwnProperty.call(oldPipeline, "thinkingMode")) {
+      config.pipeline.thinkingMode = normalizeThinkingMode(oldPipeline.disableThinking);
+    }
+    return config;
   }
   function saveConfig(config) {
     return writeJson(STORAGE_KEYS.config, config);
@@ -639,9 +644,11 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       id: "zhipu",
       label: "智谱 GLM",
       endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-      models: ["glm-4v-flash", "glm-4-plus", "glm-4-air"],
+      models: ["glm-4v-flash", "glm-4-plus", "glm-4-air", "glm-5.3-flash"],
       authHeader: "bearer",
       disableThinkingKey: "thinking",
+      // glm-5.x 始终思考，只接受 low/high/max；关闭仅对 glm-4.x 有效。
+      thinkingValues: { low: "low", high: "high", max: "max" },
       jsonModeKey: "response_format",
       stream: false
     },
@@ -657,6 +664,15 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     },
   ];
 
+  function normalizeThinkingValues(value) {
+    if (!isRecord(value)) return {};
+    const result = {};
+    for (const mode of ["off", "low", "high", "max"]) {
+      if (Object.prototype.hasOwnProperty.call(value, mode)) result[mode] = value[mode];
+    }
+    return result;
+  }
+
   function loadCustomPresets() {
     const raw = readJson(PRESET_STORAGE_KEY, []);
     if (!Array.isArray(raw)) return [];
@@ -667,6 +683,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       models: Array.isArray(item.models) ? item.models.filter((m) => typeof m === "string" && m.trim()) : [],
       authHeader: ["bearer", "api-key", "none"].includes(item.authHeader) ? item.authHeader : "bearer",
       disableThinkingKey: typeof item.disableThinkingKey === "string" && item.disableThinkingKey ? item.disableThinkingKey : null,
+      thinkingValues: normalizeThinkingValues(item.thinkingValues),
       jsonModeKey: item.jsonModeKey === null ? null : "response_format",
       stream: Boolean(item.stream)
     }));
@@ -698,6 +715,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       models: Array.isArray(preset.models) ? preset.models.filter((m) => String(m).trim()) : [],
       authHeader: ["bearer", "api-key", "none"].includes(preset.authHeader) ? preset.authHeader : "bearer",
       disableThinkingKey: typeof preset.disableThinkingKey === "string" && preset.disableThinkingKey.trim() ? preset.disableThinkingKey.trim() : null,
+      thinkingValues: normalizeThinkingValues(preset.thinkingValues),
       jsonModeKey: preset.jsonModeKey === null ? null : "response_format",
       stream: Boolean(preset.stream)
     };
@@ -802,6 +820,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       models: String(service?.model || "").trim() ? [String(service.model).trim()] : [],
       authHeader: "bearer",
       disableThinkingKey: null,
+      thinkingValues: {},
       jsonModeKey: "response_format",
       stream: false
     };
@@ -824,6 +843,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       authHeader,
       authHeaderName: authHeader === "api-key" ? "api-key" : "Authorization",
       disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (preset.disableThinkingKey ?? null),
+      thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(preset.thinkingValues),
       jsonModeKey: Object.prototype.hasOwnProperty.call(compat, "jsonModeKey") ? compat.jsonModeKey : (preset.jsonModeKey ?? "response_format"),
       stream: typeof compat.stream === "boolean" ? compat.stream : Boolean(preset.stream)
     };
@@ -918,15 +938,35 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     return value;
   }
 
-  // 关闭思考模式：字段由平台档案决定；不支持该字段的平台（档案为 null）不注入。
-  function thinkingControl(payload, profile, disable) {
+  var THINKING_MODES = ["off", "low", "high", "max", "auto"];
+  // 兼容旧布尔字段：true=关闭，false=不干预；其余按模式枚举原样保留。
+  function normalizeThinkingMode(value) {
+    if (value === true || value === "true" || value === "disabled" || value === "close") return "off";
+    if (value === false || value === "false" || value === "none" || value === "") return "auto";
+    const mode = String(value || "").trim().toLowerCase();
+    return THINKING_MODES.indexOf(mode) >= 0 ? mode : "auto";
+  }
+
+  // 按思考模式注入字段：off 为关闭，low/high/max 为强度，auto 不干预。
+  // 具体值优先取平台预设的 thinkingValues 映射，未映射时按字段名给出通用值。
+  function thinkingControl(payload, profile, mode) {
     const injected = [];
-    if (!disable) return injected;
+    const normalized = normalizeThinkingMode(mode);
+    if (normalized === "auto") return injected;
     const key = profile.disableThinkingKey;
     if (!key) return injected;
-    if (key === "thinking") payload.thinking = { type: "disabled" };
-    else if (key === "reasoning") payload.reasoning = { effort: "none" };
-    else payload[key] = false;
+    const values = profile.thinkingValues || {};
+    let value;
+    if (Object.prototype.hasOwnProperty.call(values, normalized)) {
+      value = values[normalized];
+    } else if (normalized === "off") {
+      if (key === "thinking") value = { type: "disabled" };
+      else if (key === "reasoning") value = { effort: "none" };
+      else value = false;
+    } else {
+      value = normalized;
+    }
+    payload[key] = value;
     injected.push(key);
     return injected;
   }
@@ -949,7 +989,12 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     const profile = resolveProfile(service);
     const endpoint = profile.endpoint;
     const payload = { model: profile.model, messages, stream: profile.stream };
-    const thinkingKeys = thinkingControl(payload, profile, options.disableThinking ?? service.disableThinking);
+    const thinkingMode = normalizeThinkingMode(
+      options.thinkingMode !== void 0 ? options.thinkingMode
+        : (options.disableThinking !== void 0 ? options.disableThinking
+          : (service.thinkingMode !== void 0 ? service.thinkingMode : service.disableThinking))
+    );
+    const thinkingKeys = thinkingControl(payload, profile, thinkingMode);
     const temperature = options.temperature === void 0 ? 0.2 : options.temperature;
     if (temperature !== null) payload.temperature = temperature;
     let jsonInjectedKey = null;
@@ -984,7 +1029,8 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
             jsonInjectedKey = null;
             relaxed = true;
           }
-          if (thinkingKeys.length) {
+          // 仅「关闭」模式可降级重试；low/high/max 是用户明确选择，降级会静默改变意图。
+          if (thinkingKeys.length && thinkingMode === "off") {
             for (const key of thinkingKeys) delete payload[key];
             thinkingKeys.length = 0;
             relaxed = true;
@@ -1048,7 +1094,8 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       messages: [{ role: "user", content: "\u7B3C\u5B50\u91CC\u6709\u9E21\u548C\u5154\u5171 35 \u4E2A\u5934\u300194 \u53EA\u811A\u3002\u8BF7\u7ED9\u51FA\u63A8\u7406\u8FC7\u7A0B\u548C\u6700\u7EC8\u7B54\u6848\uFF1A\u9E21\u548C\u5154\u5404\u591A\u5C11\u53EA\uFF1F" }],
       stream: false
     };
-    const thinkingKeys = thinkingControl(payload, profile, service.disableThinking);
+    const thinkingMode = normalizeThinkingMode(service.thinkingMode !== void 0 ? service.thinkingMode : service.disableThinking);
+    const thinkingKeys = thinkingControl(payload, profile, thinkingMode);
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
     else if (profile.authHeader === "bearer") headers.Authorization = `Bearer ${profile.apiKey}`;
@@ -1059,21 +1106,34 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     const hasThinking = reasoning.fields.length > 0 || reasoning.tokens > 0;
     const injected = thinkingKeys.length ? thinkingKeys.join(" / ") : "";
     let verdict;
-    if (!injected) {
-      verdict = hasThinking
-        ? "\u8BE5\u5E73\u53F0\u672A\u914D\u7F6E\u5173\u95ED\u5B57\u6BB5\uFF0C\u65E0\u6CD5\u5173\u95ED\u601D\u8003\uFF0C\u4E14\u54CD\u5E94\u4E2D\u68C0\u6D4B\u5230\u601D\u8003\u5185\u5BB9"
-        : "\u672A\u914D\u7F6E\u5173\u95ED\u5B57\u6BB5\uFF0C\u54CD\u5E94\u4E2D\u4E5F\u672A\u68C0\u6D4B\u5230\u601D\u8003\u5185\u5BB9\uFF08\u6A21\u578B\u53EF\u80FD\u672C\u8EAB\u65E0\u601D\u8003\u6A21\u5F0F\uFF09";
+    let ok;
+    if (thinkingMode === "auto") {
+      ok = true;
+      verdict = "未干预思考模式，将使用模型默认设置";
+    } else if (thinkingMode === "off") {
+      ok = !hasThinking;
+      if (!injected) {
+        verdict = hasThinking
+          ? "该平台未配置关闭字段，无法关闭思考，且响应中检测到思考内容"
+          : "未配置关闭字段，响应中也未检测到思考内容（模型可能本身无思考模式）";
+      } else {
+        verdict = hasThinking
+          ? `已发送关闭参数（${injected}），但响应中仍检测到思考内容，可能未生效`
+          : `已发送关闭参数（${injected}），响应中未检测到思考内容，关闭生效`;
+      }
     } else {
-      verdict = hasThinking
-        ? `\u5DF2\u53D1\u9001\u5173\u95ED\u53C2\u6570\uFF08${injected}\uFF09\uFF0C\u4F46\u54CD\u5E94\u4E2D\u4ECD\u68C0\u6D4B\u5230\u601D\u8003\u5185\u5BB9\uFF0C\u53EF\u80FD\u672A\u751F\u6548`
-        : `\u5DF2\u53D1\u9001\u5173\u95ED\u53C2\u6570\uFF08${injected}\uFF09\uFF0C\u54CD\u5E94\u4E2D\u672A\u68C0\u6D4B\u5230\u601D\u8003\u5185\u5BB9\uFF0C\u5173\u95ED\u751F\u6548`;
+      ok = Boolean(injected);
+      verdict = injected
+        ? `已发送 ${thinkingMode} 思考强度参数（${injected}），请求被接受；该模式下响应含思考内容属正常现象`
+        : `当前平台未配置思考强度字段，无法设置 ${thinkingMode} 模式`;
     }
     const detail = reasoning.fields.length ? `\u68C0\u6D4B\u5B57\u6BB5\uFF1A${reasoning.fields.join(", ")}` : reasoning.tokens > 0 ? `\u63A8\u7406 Token\uFF1A${reasoning.tokens}` : "";
     return {
-      ok: !hasThinking,
+      ok,
       verdict,
       detail,
       injected,
+      mode: thinkingMode,
       bodySample: sampleText(response.responseText)
     };
   }
@@ -1536,7 +1596,7 @@ ${subQuestionLines(question)}`,
   }
   async function gradeQuestion(options) {
     const { config, question, cache, rateLimiter } = options;
-    config.pipeline.vlm.disableThinking = config.pipeline.disableThinking !== false;
+    config.pipeline.vlm.thinkingMode = normalizeThinkingMode(config.pipeline.thinkingMode !== void 0 ? config.pipeline.thinkingMode : config.pipeline.disableThinking);
     const startedAt = Date.now();
     const stage = (name, detail) => options.events?.onStage?.(name, detail);
     const reviewReasons = [];
@@ -2265,7 +2325,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
               <div class="zygr-field"><label>\u63A5\u53E3\u5730\u5740</label><input data-preset-field="endpoint"></div>
               <div class="zygr-field"><label>\u63A8\u8350\u6A21\u578B\uFF08\u9017\u53F7\u5206\u9694\uFF09</label><input data-preset-field="models"></div>
               <div class="zygr-field"><label>\u9274\u6743\u65B9\u5F0F</label><select data-preset-field="authHeader"><option value="bearer">Authorization: Bearer</option><option value="api-key">api-key</option><option value="none">\u65E0\u9700\u9274\u6743</option></select></div>
-              <div class="zygr-field"><label>\u5173\u95ED\u601D\u8003\u5B57\u6BB5\u540D</label><input data-preset-field="disableThinkingKey" placeholder="\u7559\u7A7A\u8868\u793A\u4E0D\u6CE8\u5165\uFF0C\u5982 enable_thinking"></div>
+              <div class="zygr-field"><label>\u601D\u8003\u63A7\u5236\u5B57\u6BB5\u540D</label><input data-preset-field="disableThinkingKey" placeholder="\u7559\u7A7A\u8868\u793A\u4E0D\u6CE8\u5165\uFF0C\u5982 enable_thinking"></div>
+              <div class="zygr-field"><label>low/high/max \u503C\u6620\u5C04\uFF08JSON\uFF0C\u53EF\u9009\uFF09</label><input data-preset-field="thinkingValues" placeholder='\u5982 {"low":"low","high":"high","max":"max"}'></div>
               <div class="zygr-field"><label>\u6D41\u5F0F\u8F93\u51FA</label><select data-preset-field="stream"><option value="false">\u5173\u95ED\uFF08\u63A8\u8350\uFF09</option><option value="true">\u5F00\u542F</option></select></div>
             </div>
             <div class="zygr-row">
@@ -2278,9 +2339,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 
           <h3>\u591A\u6A21\u6001\u76F4\u8BC4</h3>
           <p class="zygr-hint">\u8BC4\u5206\u53EA\u4F7F\u7528\u591A\u6A21\u6001\u89C6\u89C9\u6A21\u578B\uFF1A\u76F4\u63A5\u8BFB\u53D6\u4F5C\u7B54\u56FE\u7247\u5E76\u6309\u8BC4\u5206\u6807\u51C6\u8F93\u51FA JSON\u3002\u6A21\u578B\u5FC5\u987B\u652F\u6301\u56FE\u7247\u8F93\u516E\u3002</p>
-          <label class="zygr-row"><input type="checkbox" data-field="pipeline.disableThinking"> \u5173\u95ED\u601D\u8003\u6A21\u5F0F\uFF08\u63A8\u8350\uFF1A\u7701 Token\u3001\u66F4\u5FEB\uFF09</label>
-          <div class="zygr-row"><button class="zygr-btn zygr-ghost" data-act="test-thinking">\u6D4B\u8BD5\u662F\u5426\u771F\u7684\u5173\u95ED\u4E86\u601D\u8003</button><span class="zygr-test-status" data-status="thinking"></span></div>
-          <p class="zygr-hint">\u5BF9\u9ED8\u8BA4\u5F00\u601D\u8003\u7684\u6A21\u578B\u751F\u6548\uFF0C\u81EA\u52A8\u6309\u670D\u52A1\u5546\u53D1\u9001\u5173\u95ED\u53C2\u6570\u3002\u82E5\u67D0\u6A21\u578B\u4E0D\u652F\u6301\u8BE5\u5B57\u6BB5\u4F1A\u81EA\u52A8\u5218\u9664\u91CD\u8BD5\u3002\u70B9\u51FB\u6D4B\u8BD5\u4F1A\u53D1\u9001\u4E00\u4E2A\u9700\u8981\u63A8\u7406\u7684\u95EE\u9898\uFF0C\u68C0\u67E5\u54CD\u5E94\u4E2D\u662F\u5426\u4ECD\u6709\u601D\u8003\u5185\u5BB9\u3002</p>
+          ${select("\u601D\u8003\u6A21\u5F0F", "pipeline.thinkingMode", [["off", "\u5173\u95ED\u601D\u8003\uFF08\u7701 Token\u3001\u66F4\u5FEB\uFF09"], ["low", "low \u4F4E\u5F3A\u5EA6"], ["high", "high \u9AD8\u5F3A\u5EA6"], ["max", "max \u6700\u9AD8\u5F3A\u5EA6"], ["auto", "\u4E0D\u5E72\u9884\uFF08\u4F7F\u7528\u6A21\u578B\u9ED8\u8BA4\uFF09"]])}
+          <div class="zygr-row"><button class="zygr-btn zygr-ghost" data-act="test-thinking">\u6D4B\u8BD5\u5F53\u524D\u601D\u8003\u6A21\u5F0F\u662F\u5426\u751F\u6548</button><span class="zygr-test-status" data-status="thinking"></span></div>
+          <p class="zygr-hint">\u5173\u95ED\u9002\u7528\u4E8E\u9ED8\u8BA4\u5F00\u601D\u8003\u4E14\u5141\u8BB8\u5173\u95ED\u7684\u6A21\u578B\u3002\u667A\u8C31 glm-5 \u7B49\u300C\u59CB\u7EC8\u601D\u8003\u300D\u6A21\u578B\u4E0D\u652F\u6301\u5173\u95ED\uFF0C\u8BF7\u9009 low / high / max\uFF08\u53D1\u9001 thinking: "low" \u7B49\uFF09\uFF0C\u5426\u5219\u4F1A\u62A5 HTTP 400\u3002\u9009\u300C\u4E0D\u5E72\u9884\u300D\u5219\u4E0D\u53D1\u9001\u4EFB\u4F55\u601D\u8003\u53C2\u6570\u3002\u70B9\u51FB\u6D4B\u8BD5\u4F1A\u53D1\u9001\u4E00\u4E2A\u9700\u8981\u63A8\u7406\u7684\u95EE\u9898\u9A8C\u8BC1\u3002</p>
 
           ${platformSelect("\u5E73\u53F0\u9884\u8BBE", "pipeline.vlm.platform")}
           <h3>\u591A\u6A21\u6001\u670D\u52A1</h3>
@@ -2560,10 +2621,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       set("models", Array.isArray(preset?.models) ? preset.models.join(", ") : "");
       set("authHeader", value("authHeader", "bearer"));
       set("disableThinkingKey", preset?.disableThinkingKey || "");
+      set("thinkingValues", preset?.thinkingValues && Object.keys(preset.thinkingValues).length ? JSON.stringify(preset.thinkingValues) : "");
       set("stream", String(Boolean(preset?.stream)));
     }
     collectPresetForm() {
       const value = (key) => String(this.shadow.querySelector(`[data-preset-field="${key}"]`)?.value ?? "").trim();
+      let thinkingValues = {};
+      try {
+        const parsed = JSON.parse(value("thinkingValues") || "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) thinkingValues = parsed;
+      } catch { /* 无效 JSON 时忽略映射 */ }
       return {
         id: value("id"),
         label: value("label") || value("id"),
@@ -2571,6 +2638,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         models: value("models").split(/[,，]/).map((item) => item.trim()).filter(Boolean),
         authHeader: ["bearer", "api-key", "none"].includes(value("authHeader")) ? value("authHeader") : "bearer",
         disableThinkingKey: value("disableThinkingKey"),
+        thinkingValues,
         jsonModeKey: "response_format",
         stream: value("stream") === "true"
       };
@@ -2838,11 +2906,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       onFetchModels: (draft) => fetchModels(draft.pipeline.vlm),
       onGenerateRubric: (draft, payload) => {
         const service = draft.pipeline.vlm;
-        service.disableThinking = draft.pipeline.disableThinking !== false;
+        service.thinkingMode = normalizeThinkingMode(draft.pipeline.thinkingMode !== void 0 ? draft.pipeline.thinkingMode : draft.pipeline.disableThinking);
         return generateRubric(payload, service, buildLimiter(draft), draft.image);
       },
       onTestThinking: (draft) => {
-        draft.pipeline.vlm.disableThinking = draft.pipeline.disableThinking !== false;
+        draft.pipeline.vlm.thinkingMode = normalizeThinkingMode(draft.pipeline.thinkingMode !== void 0 ? draft.pipeline.thinkingMode : draft.pipeline.disableThinking);
         return probeThinking(draft.pipeline.vlm, buildLimiter(draft));
       },
       onImport: (data) => {
@@ -2897,7 +2965,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     }
     async function testService(draft) {
       const serviceLimiter = buildLimiter(draft);
-      draft.pipeline.vlm.disableThinking = draft.pipeline.disableThinking !== false;
+      draft.pipeline.vlm.thinkingMode = normalizeThinkingMode(draft.pipeline.thinkingMode !== void 0 ? draft.pipeline.thinkingMode : draft.pipeline.disableThinking);
       const service = draft.pipeline.vlm;
       if (!service.endpoint.trim() || !service.model.trim()) return false;
       return testConnection(service, serviceLimiter);

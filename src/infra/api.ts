@@ -88,15 +88,35 @@
     return value;
   }
 
-  // 关闭思考模式：字段由平台档案决定；不支持该字段的平台（档案为 null）不注入。
-  function thinkingControl(payload, profile, disable) {
+  var THINKING_MODES = ["off", "low", "high", "max", "auto"];
+  // 兼容旧布尔字段：true=关闭，false=不干预；其余按模式枚举原样保留。
+  function normalizeThinkingMode(value) {
+    if (value === true || value === "true" || value === "disabled" || value === "close") return "off";
+    if (value === false || value === "false" || value === "none" || value === "") return "auto";
+    const mode = String(value || "").trim().toLowerCase();
+    return THINKING_MODES.indexOf(mode) >= 0 ? mode : "auto";
+  }
+
+  // 按思考模式注入字段：off 为关闭，low/high/max 为强度，auto 不干预。
+  // 具体值优先取平台预设的 thinkingValues 映射，未映射时按字段名给出通用值。
+  function thinkingControl(payload, profile, mode) {
     const injected = [];
-    if (!disable) return injected;
+    const normalized = normalizeThinkingMode(mode);
+    if (normalized === "auto") return injected;
     const key = profile.disableThinkingKey;
     if (!key) return injected;
-    if (key === "thinking") payload.thinking = { type: "disabled" };
-    else if (key === "reasoning") payload.reasoning = { effort: "none" };
-    else payload[key] = false;
+    const values = profile.thinkingValues || {};
+    let value;
+    if (Object.prototype.hasOwnProperty.call(values, normalized)) {
+      value = values[normalized];
+    } else if (normalized === "off") {
+      if (key === "thinking") value = { type: "disabled" };
+      else if (key === "reasoning") value = { effort: "none" };
+      else value = false;
+    } else {
+      value = normalized;
+    }
+    payload[key] = value;
     injected.push(key);
     return injected;
   }
@@ -119,7 +139,12 @@
     const profile = resolveProfile(service);
     const endpoint = profile.endpoint;
     const payload = { model: profile.model, messages, stream: profile.stream };
-    const thinkingKeys = thinkingControl(payload, profile, options.disableThinking ?? service.disableThinking);
+    const thinkingMode = normalizeThinkingMode(
+      options.thinkingMode !== void 0 ? options.thinkingMode
+        : (options.disableThinking !== void 0 ? options.disableThinking
+          : (service.thinkingMode !== void 0 ? service.thinkingMode : service.disableThinking))
+    );
+    const thinkingKeys = thinkingControl(payload, profile, thinkingMode);
     const temperature = options.temperature === void 0 ? 0.2 : options.temperature;
     if (temperature !== null) payload.temperature = temperature;
     let jsonInjectedKey = null;
@@ -154,7 +179,8 @@
             jsonInjectedKey = null;
             relaxed = true;
           }
-          if (thinkingKeys.length) {
+          // 仅「关闭」模式可降级重试；low/high/max 是用户明确选择，降级会静默改变意图。
+          if (thinkingKeys.length && thinkingMode === "off") {
             for (const key of thinkingKeys) delete payload[key];
             thinkingKeys.length = 0;
             relaxed = true;
@@ -218,7 +244,8 @@
       messages: [{ role: "user", content: "\u7B3C\u5B50\u91CC\u6709\u9E21\u548C\u5154\u5171 35 \u4E2A\u5934\u300194 \u53EA\u811A\u3002\u8BF7\u7ED9\u51FA\u63A8\u7406\u8FC7\u7A0B\u548C\u6700\u7EC8\u7B54\u6848\uFF1A\u9E21\u548C\u5154\u5404\u591A\u5C11\u53EA\uFF1F" }],
       stream: false
     };
-    const thinkingKeys = thinkingControl(payload, profile, service.disableThinking);
+    const thinkingMode = normalizeThinkingMode(service.thinkingMode !== void 0 ? service.thinkingMode : service.disableThinking);
+    const thinkingKeys = thinkingControl(payload, profile, thinkingMode);
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
     else if (profile.authHeader === "bearer") headers.Authorization = `Bearer ${profile.apiKey}`;
@@ -229,21 +256,34 @@
     const hasThinking = reasoning.fields.length > 0 || reasoning.tokens > 0;
     const injected = thinkingKeys.length ? thinkingKeys.join(" / ") : "";
     let verdict;
-    if (!injected) {
-      verdict = hasThinking
-        ? "\u8BE5\u5E73\u53F0\u672A\u914D\u7F6E\u5173\u95ED\u5B57\u6BB5\uFF0C\u65E0\u6CD5\u5173\u95ED\u601D\u8003\uFF0C\u4E14\u54CD\u5E94\u4E2D\u68C0\u6D4B\u5230\u601D\u8003\u5185\u5BB9"
-        : "\u672A\u914D\u7F6E\u5173\u95ED\u5B57\u6BB5\uFF0C\u54CD\u5E94\u4E2D\u4E5F\u672A\u68C0\u6D4B\u5230\u601D\u8003\u5185\u5BB9\uFF08\u6A21\u578B\u53EF\u80FD\u672C\u8EAB\u65E0\u601D\u8003\u6A21\u5F0F\uFF09";
+    let ok;
+    if (thinkingMode === "auto") {
+      ok = true;
+      verdict = "未干预思考模式，将使用模型默认设置";
+    } else if (thinkingMode === "off") {
+      ok = !hasThinking;
+      if (!injected) {
+        verdict = hasThinking
+          ? "该平台未配置关闭字段，无法关闭思考，且响应中检测到思考内容"
+          : "未配置关闭字段，响应中也未检测到思考内容（模型可能本身无思考模式）";
+      } else {
+        verdict = hasThinking
+          ? `已发送关闭参数（${injected}），但响应中仍检测到思考内容，可能未生效`
+          : `已发送关闭参数（${injected}），响应中未检测到思考内容，关闭生效`;
+      }
     } else {
-      verdict = hasThinking
-        ? `\u5DF2\u53D1\u9001\u5173\u95ED\u53C2\u6570\uFF08${injected}\uFF09\uFF0C\u4F46\u54CD\u5E94\u4E2D\u4ECD\u68C0\u6D4B\u5230\u601D\u8003\u5185\u5BB9\uFF0C\u53EF\u80FD\u672A\u751F\u6548`
-        : `\u5DF2\u53D1\u9001\u5173\u95ED\u53C2\u6570\uFF08${injected}\uFF09\uFF0C\u54CD\u5E94\u4E2D\u672A\u68C0\u6D4B\u5230\u601D\u8003\u5185\u5BB9\uFF0C\u5173\u95ED\u751F\u6548`;
+      ok = Boolean(injected);
+      verdict = injected
+        ? `已发送 ${thinkingMode} 思考强度参数（${injected}），请求被接受；该模式下响应含思考内容属正常现象`
+        : `当前平台未配置思考强度字段，无法设置 ${thinkingMode} 模式`;
     }
     const detail = reasoning.fields.length ? `\u68C0\u6D4B\u5B57\u6BB5\uFF1A${reasoning.fields.join(", ")}` : reasoning.tokens > 0 ? `\u63A8\u7406 Token\uFF1A${reasoning.tokens}` : "";
     return {
-      ok: !hasThinking,
+      ok,
       verdict,
       detail,
       injected,
+      mode: thinkingMode,
       bodySample: sampleText(response.responseText)
     };
   }

@@ -30,7 +30,7 @@ function loadModules(queue = []) {
   const files = ['src/infra/storage.ts', 'src/config.ts', 'src/infra/platforms.ts', 'src/infra/api.ts'];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, parseConfigBackup, DEFAULT_CONFIG };`, context);
+  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, parseConfigBackup, DEFAULT_CONFIG };`, context);
   return { api: context.__exposed, calls, store };
 }
 
@@ -326,4 +326,87 @@ test('自定义预设可新增、更新与删除，内置预设不可覆盖', ()
   assert.equal(api.deletePlatformPreset('opencode-ai'), false);
   assert.equal(api.deletePlatformPreset('my-proxy'), true);
   assert.equal(api.getPlatformPreset('my-proxy'), null);
+});
+
+test('思考模式归一化兼容旧布尔并支持 low/high/max', () => {
+  const { api } = loadModules();
+  assert.equal(api.normalizeThinkingMode(true), 'off');
+  assert.equal(api.normalizeThinkingMode(false), 'auto');
+  assert.equal(api.normalizeThinkingMode('off'), 'off');
+  assert.equal(api.normalizeThinkingMode('low'), 'low');
+  assert.equal(api.normalizeThinkingMode('HIGH'), 'high');
+  assert.equal(api.normalizeThinkingMode('max'), 'max');
+  assert.equal(api.normalizeThinkingMode('auto'), 'auto');
+  assert.equal(api.normalizeThinkingMode('未知'), 'auto');
+});
+
+test('关闭模式仍注入 thinking.disabled 与 enable_thinking=false', () => {
+  const { api } = loadModules();
+  const offPayload = {};
+  api.thinkingControl(offPayload, { disableThinkingKey: 'thinking', thinkingValues: { low: 'low' } }, 'off');
+  assert.equal(offPayload.thinking.type, 'disabled');
+  const sfPayload = {};
+  api.thinkingControl(sfPayload, { disableThinkingKey: 'enable_thinking', thinkingValues: {} }, 'off');
+  assert.equal(sfPayload.enable_thinking, false);
+  const autoPayload = {};
+  assert.equal(api.thinkingControl(autoPayload, { disableThinkingKey: 'thinking' }, 'auto').length, 0);
+  assert.equal(Object.hasOwn(autoPayload, 'thinking'), false);
+});
+
+test('智谱 low 模式发送 thinking:"low" 而非 disabled', async () => {
+  const { api, calls } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] })
+  }]);
+  await api.chatCompletion(
+    { platform: 'zhipu', endpoint: '', model: 'glm-5.3-flash', apiKey: 'k', thinkingMode: 'low' },
+    [{ role: 'user', content: 'hi' }],
+    { retries: 0 }
+  );
+  const body = JSON.parse(calls[0].data);
+  assert.equal(body.thinking, 'low');
+  assert.notDeepEqual(body.thinking, { type: 'disabled' });
+});
+
+test('强度模式探测不因响应含思考内容而误判失败', async () => {
+  const { api } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ message: { content: '答案', reasoning_content: 'step1' } }] })
+  }]);
+  const result = await api.probeThinking({ platform: 'zhipu', endpoint: '', model: 'glm-5.3-flash', apiKey: 'k', thinkingMode: 'max' });
+  assert.equal(result.ok, true);
+  assert.equal(result.mode, 'max');
+  assert.match(result.verdict, /max/);
+  assert.match(result.verdict, /正常/);
+});
+
+test('强度模式遇到 400 不静默降级（保留用户选择如实报错）', async () => {
+  const errorResponse = { status: 400, responseText: '{"error":{"code":"1210","message":"不支持"}}' };
+  const { api, calls } = loadModules([errorResponse, errorResponse]);
+  await assert.rejects(
+    () => api.chatCompletion(
+      { platform: 'zhipu', endpoint: '', model: 'glm-5.3-flash', apiKey: 'k', thinkingMode: 'high' },
+      [{ role: 'user', content: 'hi' }],
+      { retries: 1 }
+    ),
+    /HTTP 400/
+  );
+  // 400 不可重试：仅一次请求，且仍携带 high（没有被删除降级重试）
+  assert.equal(calls.length, 1);
+  const first = JSON.parse(calls[0].data);
+  assert.equal(first.thinking, 'high');
+});
+
+test('旧配置备份中的 disableThinking 自动迁移为 thinkingMode', () => {
+  const { api } = loadModules();
+  const store = api.DEFAULT_CONFIG;
+  assert.equal(store.pipeline.thinkingMode, 'off');
+  assert.equal(Object.hasOwn(store.pipeline, 'disableThinking'), false);
+});
+
+test('界面使用思考模式下拉菜单而非关闭勾选框', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /pipeline\.thinkingMode/);
+  assert.match(built, /low \\u4F4E\\u5F3A\\u5EA6/);
+  assert.doesNotMatch(built, /data-field="pipeline\.disableThinking"/);
 });

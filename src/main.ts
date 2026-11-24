@@ -50,11 +50,11 @@
       onFetchModels: (draft) => fetchModels(draft.pipeline.vlm),
       onGenerateRubric: (draft, payload) => {
         const service = draft.pipeline.vlm;
-        service.disableThinking = draft.pipeline.disableThinking !== false;
+        service.thinkingMode = normalizeThinkingMode(draft.pipeline.thinkingMode !== void 0 ? draft.pipeline.thinkingMode : draft.pipeline.disableThinking);
         return generateRubric(payload, service, buildLimiter(draft), draft.image);
       },
       onTestThinking: (draft) => {
-        draft.pipeline.vlm.disableThinking = draft.pipeline.disableThinking !== false;
+        draft.pipeline.vlm.thinkingMode = normalizeThinkingMode(draft.pipeline.thinkingMode !== void 0 ? draft.pipeline.thinkingMode : draft.pipeline.disableThinking);
         return probeThinking(draft.pipeline.vlm, buildLimiter(draft));
       },
       onImport: (data) => {
@@ -109,7 +109,7 @@
     }
     async function testService(draft) {
       const serviceLimiter = buildLimiter(draft);
-      draft.pipeline.vlm.disableThinking = draft.pipeline.disableThinking !== false;
+      draft.pipeline.vlm.thinkingMode = normalizeThinkingMode(draft.pipeline.thinkingMode !== void 0 ? draft.pipeline.thinkingMode : draft.pipeline.disableThinking);
       const service = draft.pipeline.vlm;
       if (!service.endpoint.trim() || !service.model.trim()) return false;
       return testConnection(service, serviceLimiter);

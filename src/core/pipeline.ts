@@ -22,7 +22,7 @@
   }
   async function gradeQuestion(options) {
     const { config, question, cache, rateLimiter } = options;
-    config.pipeline.vlm.disableThinking = config.pipeline.disableThinking !== false;
+    config.pipeline.vlm.thinkingMode = normalizeThinkingMode(config.pipeline.thinkingMode !== void 0 ? config.pipeline.thinkingMode : config.pipeline.disableThinking);
     const startedAt = Date.now();
     const stage = (name, detail) => options.events?.onStage?.(name, detail);
     const reviewReasons = [];
