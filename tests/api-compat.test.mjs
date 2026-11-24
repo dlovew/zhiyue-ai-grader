@@ -132,6 +132,27 @@ test('平台档案：opencode.ai 不注入思考字段、Azure 使用 api-key �
   assert.equal(azure.authHeader, 'api-key');
 });
 
+test('Cloudflare Workers AI 预设端点、鉴权与不注入 response_format', async () => {
+  const { api, calls } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] })
+  }]);
+  const profile = api.resolveProfile({ platform: 'cloudflare-workers-ai', endpoint: '', model: '', apiKey: 'cf-token' });
+  assert.match(profile.endpoint, /cloudflare\.com\/client\/v4\/accounts\/\{account_id\}\/ai\/v1\/chat\/completions$/);
+  assert.equal(profile.authHeaderName, 'Authorization');
+  assert.equal(profile.model, '@cf/meta/llama-3.1-8b-instruct-fp8');
+  assert.equal(profile.jsonModeKey, null);
+
+  await api.chatCompletion(
+    { platform: 'cloudflare-workers-ai', endpoint: 'https://api.cloudflare.com/client/v4/accounts/abc/ai/v1/chat/completions', model: '@cf/meta/llama-3.1-8b-instruct-fp8', apiKey: 'cf-token' },
+    [{ role: 'user', content: 'hi' }],
+    { retries: 0, jsonMode: true }
+  );
+  assert.equal(calls[0].headers.Authorization, 'Bearer cf-token');
+  const body = JSON.parse(calls[0].data);
+  assert.equal(Object.hasOwn(body, 'response_format'), false);
+});
+
 test('平台档案：用户显式填写的端点与模型优先于预设建议', () => {
   const { api } = loadModules();
   const profile = api.resolveProfile({

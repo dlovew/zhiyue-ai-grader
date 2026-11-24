@@ -115,6 +115,18 @@
       jsonModeKey: "response_format",
       stream: false
     },
+    {
+      // Cloudflare 端点含账户 ID：请把 {account_id} 替换为 Cloudflare 账户 ID。
+      // 鉴权用 Cloudflare API Token（需 Workers AI - Read 权限），走标准 Authorization: Bearer。
+      id: "cloudflare-workers-ai",
+      label: "Cloudflare Workers AI",
+      endpoint: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions",
+      models: ["@cf/meta/llama-3.1-8b-instruct-fp8", "@cf/openai/gpt-oss-20b", "@cf/moondream3.1-9B-A2B", "@cf/llava-hf/llava-1.5-7b-hf"],
+      authHeader: "bearer",
+      disableThinkingKey: null,
+      jsonModeKey: null,
+      stream: false
+    },
   ];
 
   function normalizeThinkingValues(value) {
@@ -301,7 +313,9 @@
       disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (preset.disableThinkingKey ?? null),
       thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(preset.thinkingValues),
       thinkingFields: Object.prototype.hasOwnProperty.call(compat, "thinkingFields") ? normalizeThinkingValues(compat.thinkingFields) : normalizeThinkingValues(preset.thinkingFields),
-      jsonModeKey: Object.prototype.hasOwnProperty.call(compat, "jsonModeKey") ? compat.jsonModeKey : (preset.jsonModeKey ?? "response_format"),
+      jsonModeKey: Object.prototype.hasOwnProperty.call(compat, "jsonModeKey")
+        ? compat.jsonModeKey
+        : (Object.prototype.hasOwnProperty.call(preset, "jsonModeKey") ? preset.jsonModeKey : "response_format"),
       stream: typeof compat.stream === "boolean" ? compat.stream : Boolean(preset.stream)
     };
   }

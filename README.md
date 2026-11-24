@@ -111,7 +111,9 @@
 
 ## 支持的服务平台
 
-内置预设包含：`自定义`、`opencode.ai`、`OpenAI 官方`、`Azure OpenAI`、`DeepSeek`、`硅基流动`、`Kimi / Moonshot`、`通义千问 / DashScope`、`智谱 GLM`、`火山方舟（Chat）`。
+内置预设包含：`自定义`、`opencode.ai`、`OpenAI 官方`、`Azure OpenAI`、`DeepSeek`、`硅基流动`、`Kimi / Moonshot`、`通义千问 / DashScope`、`智谱 GLM`、`火山方舟（Chat）`、`Cloudflare Workers AI`。
+
+Cloudflare Workers AI 使用说明：端点是 `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions`，请把 `{account_id}` 替换为自己的 Cloudflare 账户 ID；API Key 填具备 `Workers AI - Read` 权限的 Cloudflare API Token；模型选支持图片输入的视觉模型（预设推荐了 `@cf/meta/llama-3.1-8b-instruct-fp8`、`@cf/moondream3.1-9B-A2B` 等）。该平台默认不注入 `response_format` 字段以提升兼容性。
 
 选择平台仅填充建议的接口地址、模型与协议参数，**你填写的 endpoint / model / apiKey 始终优先**。需要注意的是：
 

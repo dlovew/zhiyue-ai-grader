@@ -93,7 +93,7 @@
             ${field("\u63A5\u53E3\u5730\u5740", "pipeline.vlm.endpoint")}${field("API Key", "pipeline.vlm.apiKey", "password")}
             ${field("\u6A21\u578B", "pipeline.vlm.model")}
           </div>
-          <p class="zygr-hint">\u63A5\u53E3\u5730\u5740\u4E3A OpenAI \u517C\u5BB9 Chat Completions \u5730\u5740\uFF08\u5982 https://api.siliconflow.cn/v1/chat/completions\uFF09\u3002\u6A21\u578B\u5FC5\u987B\u662F\u652F\u6301\u56FE\u7247\u8F93\u5165\u7684\u89C6\u89C9\u6A21\u578B\u3002</p>
+          <p class="zygr-hint">\u63A5\u53E3\u5730\u5740\u4E3A OpenAI \u517C\u5BB9 Chat Completions \u5730\u5740\uFF08\u5982 https://api.siliconflow.cn/v1/chat/completions\uFF09\u3002\u6A21\u578B\u5FC5\u987B\u662F\u652F\u6301\u56FE\u7247\u8F93\u5165\u7684\u89C6\u89C9\u6A21\u578B\u3002Cloudflare Workers AI \u9700\u628A\u63A5\u53E3\u5730\u5740\u4E2D\u7684 {account_id} \u66FF\u6362\u4E3A\u81EA\u5DF1\u7684 Cloudflare \u8D26\u6237 ID\uFF0CAPI Key \u586B\u5177\u5907 Workers AI \u6743\u9650\u7684 API Token\u3002</p>
           <div class="zygr-row"><button class="zygr-btn" data-act="fetch-models">\u83B7\u53D6\u6A21\u578B\u5217\u8868</button><span class="zygr-test-status" data-status="models"></span></div>
           <div data-model-options hidden><select data-field-model-picker aria-label="\u9009\u62E9\u6A21\u578B"></select><button class="zygr-btn" data-act="apply-model">\u4F7F\u7528\u6240\u9009\u6A21\u578B</button></div>
           <div class="zygr-row"><button class="zygr-btn" data-test="vlm">\u6D4B\u8BD5\u591A\u6A21\u6001</button><span class="zygr-test-status" data-status="vlm"></span></div>
