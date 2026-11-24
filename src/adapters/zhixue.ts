@@ -15,12 +15,25 @@
   function mainDoc() {
     return typeof unsafeWindow !== "undefined" ? unsafeWindow.document : document;
   }
+  // 后台标签页 / 最小化窗口时浏览器不做布局，getClientRects() 恒为空。
+  // 此时改按样式判断可见性，避免把作答图误判为隐藏导致换卷检测失败。
+  function isHiddenView(element) {
+    const doc = element.ownerDocument || mainDoc();
+    return Boolean(doc?.defaultView && doc.visibilityState === "hidden") || typeof document !== "undefined" && document.visibilityState === "hidden";
+  }
   function visible(element) {
-    if (element.getClientRects && !element.getClientRects().length) return false;
     const view = element.ownerDocument?.defaultView;
     if (!view) return true;
-    const style = view.getComputedStyle(element);
-    return style.visibility !== "hidden" && style.display !== "none";
+    let style;
+    try {
+      style = view.getComputedStyle(element);
+    } catch {
+      return true;
+    }
+    if (style.visibility === "hidden" || style.display === "none") return false;
+    if (isHiddenView(element)) return true;
+    if (element.getClientRects && !element.getClientRects().length) return false;
+    return true;
   }
   function getIframeDoc() {
     const iframe = mainDoc().querySelector("iframe");
@@ -231,12 +244,19 @@
   }
   async function waitForNextPaper(oldIdentity, timeout = 25e3) {
     if (!oldIdentity) return false;
-    const deadline = Date.now() + timeout;
+    let remaining = timeout;
+    let lastTick = Date.now();
     let candidate = null;
     let stable = 0;
-    while (Date.now() < deadline) {
+    while (remaining > 0) {
+      const now = Date.now();
+      const hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+      // 页面不可见（切到其它标签页/最小化）时暂停倒计时，避免切走一会儿就判定换卷失败。
+      if (!hidden) remaining -= now - lastTick;
+      lastTick = now;
       const snapshot = answerSnapshot();
-      if (snapshot.ready && snapshot.identity && snapshot.identity !== oldIdentity) {
+      // 换卷只需图片 URL 集合变化，不要求图片已加载完成（后台标签页图片常处于未 complete 状态）。
+      if (snapshot.identity && snapshot.identity !== oldIdentity) {
         stable = candidate === snapshot.identity ? stable + 1 : 1;
         candidate = snapshot.identity;
         if (stable >= 2) return true;

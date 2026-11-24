@@ -105,6 +105,55 @@ test('构建产物包含全部模块边界且顺序正确', () => {
   assert.equal(markers[markers.length - 1], 'src/main.ts');
 });
 
+function loadZhixue({ visibility = 'visible', imageSrc = 'https://img.example/a.png', imageReady = true } = {}) {
+  const image = {
+    src: imageSrc,
+    currentSrc: imageSrc,
+    complete: imageReady,
+    naturalWidth: imageReady ? 800 : 0,
+    naturalHeight: imageReady ? 600 : 0,
+    getClientRects: () => (visibility === 'hidden' ? [] : [{ width: 100, height: 100 }]),
+    ownerDocument: null
+  };
+  const view = { getComputedStyle: () => ({ visibility: 'visible', display: 'block' }) };
+  image.ownerDocument = { visibilityState: visibility, defaultView: view };
+  const docRoot = { querySelectorAll: (sel) => (sel.includes('topicImg') || sel.includes('enhance-definition') ? [image] : []) };
+  const mainDocument = { visibilityState: visibility, querySelectorAll: () => [], ownerDocument: null };
+  const context = {
+    console: { log() {}, warn() {}, error() {} },
+    window: { setTimeout: (fn) => setTimeout(fn, 0), location: { href: 'https://www.zhixue.com/', hostname: 'www.zhixue.com', search: '' } },
+    document: mainDocument,
+    URL,
+    URLSearchParams,
+    MutationObserver: class { observe() {} disconnect() {} },
+    unsafeWindow: { document: mainDocument }
+  };
+  context.globalThis = context;
+  const code = readFileSync(join(root, 'src', 'adapters', 'zhixue.ts'), 'utf8').replace(/\r\n/g, '\n');
+  vm.createContext(context);
+  vm.runInContext(`${code}\n;globalThis.__api = { visible, snapshotFrom, answerSnapshot };`, context);
+  return { api: context.__api, image, docRoot, mainDocument };
+}
+
+test('后台标签页（visibility=hidden）图片虽无 getClientRects 仍判定可见', () => {
+  const { api, image } = loadZhixue({ visibility: 'hidden' });
+  assert.equal(api.visible(image), true);
+});
+
+test('换卷 identity 在图片未加载完成时仍可计算（ready=false 但有 identity）', () => {
+  const { api, docRoot } = loadZhixue({ visibility: 'visible', imageSrc: 'https://img.example/old.png', imageReady: false });
+  const snap = api.snapshotFrom(docRoot);
+  assert.ok(snap.identity);
+  assert.equal(snap.ready, false);
+});
+
+test('换卷等待在后台暂停计时的源码逻辑存在', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /visibilityState === "hidden"/);
+  assert.match(built, /if \(!hidden\) remaining -= now - lastTick/);
+  assert.match(built, /snapshot\.identity && snapshot\.identity !== oldIdentity/);
+});
+
 test('端点归一化覆盖 opencode.ai 基础地址与 Azure 完整地址', () => {
   const { api } = loadModules();
   assert.equal(

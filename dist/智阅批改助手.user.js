@@ -35,12 +35,25 @@
   function mainDoc() {
     return typeof unsafeWindow !== "undefined" ? unsafeWindow.document : document;
   }
+  // 后台标签页 / 最小化窗口时浏览器不做布局，getClientRects() 恒为空。
+  // 此时改按样式判断可见性，避免把作答图误判为隐藏导致换卷检测失败。
+  function isHiddenView(element) {
+    const doc = element.ownerDocument || mainDoc();
+    return Boolean(doc?.defaultView && doc.visibilityState === "hidden") || typeof document !== "undefined" && document.visibilityState === "hidden";
+  }
   function visible(element) {
-    if (element.getClientRects && !element.getClientRects().length) return false;
     const view = element.ownerDocument?.defaultView;
     if (!view) return true;
-    const style = view.getComputedStyle(element);
-    return style.visibility !== "hidden" && style.display !== "none";
+    let style;
+    try {
+      style = view.getComputedStyle(element);
+    } catch {
+      return true;
+    }
+    if (style.visibility === "hidden" || style.display === "none") return false;
+    if (isHiddenView(element)) return true;
+    if (element.getClientRects && !element.getClientRects().length) return false;
+    return true;
   }
   function getIframeDoc() {
     const iframe = mainDoc().querySelector("iframe");
@@ -251,12 +264,19 @@
   }
   async function waitForNextPaper(oldIdentity, timeout = 25e3) {
     if (!oldIdentity) return false;
-    const deadline = Date.now() + timeout;
+    let remaining = timeout;
+    let lastTick = Date.now();
     let candidate = null;
     let stable = 0;
-    while (Date.now() < deadline) {
+    while (remaining > 0) {
+      const now = Date.now();
+      const hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+      // 页面不可见（切到其它标签页/最小化）时暂停倒计时，避免切走一会儿就判定换卷失败。
+      if (!hidden) remaining -= now - lastTick;
+      lastTick = now;
       const snapshot = answerSnapshot();
-      if (snapshot.ready && snapshot.identity && snapshot.identity !== oldIdentity) {
+      // 换卷只需图片 URL 集合变化，不要求图片已加载完成（后台标签页图片常处于未 complete 状态）。
+      if (snapshot.identity && snapshot.identity !== oldIdentity) {
         stable = candidate === snapshot.identity ? stable + 1 : 1;
         candidate = snapshot.identity;
         if (stable >= 2) return true;
@@ -3179,9 +3199,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         if (!graded || !autoMode || autoStopRequested) break;
         const submitted = await submitResult({ silent: true });
         if (!submitted.ok || !autoMode || autoStopRequested) break;
+        panel.setSubtitle(`\u8FDE\u7EED\u6279\u9605\u4E2D \xB7 \u7B2C ${count} \u4EFD\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377\uFF08\u53EF\u5207\u6362\u5230\u5176\u4ED6\u6807\u7B7E\u9875\uFF09`);
         const changed = await waitForNextPaper(submitted.oldIdentity);
         if (!changed || !autoMode || autoStopRequested) {
-          if (autoMode) panel.showError("\u672A\u68C0\u6D4B\u5230\u6362\u5377\uFF0C\u8FDE\u7EED\u6279\u9605\u5DF2\u505C\u6B62");
+          if (autoMode) panel.showError("\u7B49\u5F85\u6362\u5377\u8D85\u65F6\uFF0C\u8FDE\u7EED\u6279\u9605\u5DF2\u505C\u6B62\u3002\u82E5\u521A\u624D\u5207\u6362\u4E86\u754C\u9762\uFF0C\u8BF7\u786E\u8BA4\u9605\u5377\u9875\u4ECD\u6253\u5F00\u4E14\u5DF2\u663E\u793A\u65B0\u4F5C\u7B54\u56FE\u540E\u91CD\u65B0\u5F00\u59CB");
           break;
         }
         await detect();
