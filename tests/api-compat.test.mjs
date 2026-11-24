@@ -153,6 +153,31 @@ test('Cloudflare Workers AI 预设端点、鉴权与不注入 response_format', 
   assert.equal(Object.hasOwn(body, 'response_format'), false);
 });
 
+test('Cloudflare 405 时回退到预设内置模型并带 fallback 标记', async () => {
+  const { api, calls } = loadModules([{ status: 405, responseText: '{"success":false,"errors":[{"code":7001,"message":"GET not supported"}]}' }]);
+  const models = await api.fetchModels({ platform: 'cloudflare-workers-ai', endpoint: '', model: '', apiKey: 'k' });
+  assert.ok(Array.isArray(models));
+  assert.equal(models.fallback, true);
+  assert.ok(models.length > 0);
+  assert.ok(models[0].startsWith('@cf/'));
+  assert.match(calls[0].url, /ai\/v1\/models$/);
+});
+
+test('Cloudflare 思考强度 low 注入 reasoning_effort 而非 thinking', async () => {
+  const { api, calls } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] })
+  }]);
+  await api.chatCompletion(
+    { platform: 'cloudflare-workers-ai', endpoint: 'https://api.cloudflare.com/client/v4/accounts/abc/ai/v1/chat/completions', model: '@cf/openai/gpt-oss-20b', apiKey: 'k', thinkingMode: 'low' },
+    [{ role: 'user', content: 'hi' }],
+    { retries: 0 }
+  );
+  const body = JSON.parse(calls[0].data);
+  assert.equal(body.reasoning_effort, 'low');
+  assert.equal(Object.hasOwn(body, 'thinking'), false);
+});
+
 test('平台档案：用户显式填写的端点与模型优先于预设建议', () => {
   const { api } = loadModules();
   const profile = api.resolveProfile({

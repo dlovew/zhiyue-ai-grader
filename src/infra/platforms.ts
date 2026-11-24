@@ -124,6 +124,13 @@
       models: ["@cf/meta/llama-3.1-8b-instruct-fp8", "@cf/openai/gpt-oss-20b", "@cf/moondream3.1-9B-A2B", "@cf/llava-hf/llava-1.5-7b-hf"],
       authHeader: "bearer",
       disableThinkingKey: null,
+      // gpt-oss 等推理模型用顶层 reasoning_effort 控制强度（low/medium/high）。
+      // 本插件下拉无 medium，故把 max 归到 high；非推理模型会拒绝该参数，选「不干预」即可。
+      thinkingFields: {
+        low: { reasoning_effort: "low" },
+        high: { reasoning_effort: "high" },
+        max: { reasoning_effort: "high" }
+      },
       jsonModeKey: null,
       stream: false
     },
@@ -307,6 +314,7 @@
       label: preset.label || "自定义",
       endpoint: normalizeEndpoint(String(src.endpoint || preset.endpoint || "")),
       model: String(src.model || suggestedModel || ""),
+      models: Array.isArray(preset.models) ? preset.models : [],
       apiKey: String(src.apiKey || ""),
       authHeader,
       authHeaderName: authHeader === "api-key" ? "api-key" : "Authorization",

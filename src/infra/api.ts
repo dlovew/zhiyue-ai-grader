@@ -216,7 +216,8 @@
     return normalized.replace(/\/chat\/completions$/i, "/models").replace(/\/messages$/i, "/models");
   }
 
-  // 拉取平台可用模型列表；返回模型 ID 字符串数组。
+  // 拉取平台可用模型列表；返回模型 ID 字符串数组（数组可带 fallback 标记）。
+  // 部分平台（如 Cloudflare Workers AI）没有 /models 端点，GET 会返回 405，此时回退到预设内置模型。
   async function fetchModels(service, timeoutMs = 15e3) {
     const profile = resolveProfile(service);
     const url = modelsEndpoint(profile.endpoint);
@@ -224,11 +225,24 @@
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
     else if (profile.authHeader === "bearer") headers.Authorization = `Bearer ${profile.apiKey}`;
-    const response = await gmRequest({ method: "GET", url, headers, timeout: timeoutMs });
+    const usePreset = (why) => {
+      const presetModels = Array.isArray(profile.models) ? profile.models.filter((id) => typeof id === "string" && id.trim()) : [];
+      if (!presetModels.length) throw new Error(why);
+      const result = presetModels.slice();
+      result.fallback = true;
+      return result;
+    };
+    let response;
+    try {
+      response = await gmRequest({ method: "GET", url, headers, timeout: timeoutMs });
+    } catch (error) {
+      if (error?.status === 405 || error?.status === 404 || error?.status === 400) return usePreset("\u8BE5\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u62C9\u53D6\u6A21\u578B\u5217\u8868\uFF0C\u4E14\u9884\u8BBE\u672A\u63D0\u4F9B\u53EF\u9009\u6A21\u578B");
+      throw error;
+    }
     const body = parseJsonResponse(response.responseText);
-    const list = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+    const list = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : Array.isArray(body?.result) ? body.result : [];
     const ids = list.map((item) => (typeof item === "string" ? item : item?.id)).filter((id) => typeof id === "string" && id.trim());
-    if (!ids.length) throw new Error("\u63A5\u53E3\u672A\u8FD4\u56DE\u53EF\u7528\u6A21\u578B\u5217\u8868");
+    if (!ids.length) return usePreset("\u63A5\u53E3\u672A\u8FD4\u56DE\u53EF\u7528\u6A21\u578B\u5217\u8868\uFF0C\u4E14\u9884\u8BBE\u672A\u63D0\u4F9B\u53EF\u9009\u6A21\u578B");
     return ids;
   }
 

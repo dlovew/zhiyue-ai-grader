@@ -93,7 +93,7 @@
             ${field("\u63A5\u53E3\u5730\u5740", "pipeline.vlm.endpoint")}${field("API Key", "pipeline.vlm.apiKey", "password")}
             ${field("\u6A21\u578B", "pipeline.vlm.model")}
           </div>
-          <p class="zygr-hint">\u63A5\u53E3\u5730\u5740\u4E3A OpenAI \u517C\u5BB9 Chat Completions \u5730\u5740\uFF08\u5982 https://api.siliconflow.cn/v1/chat/completions\uFF09\u3002\u6A21\u578B\u5FC5\u987B\u662F\u652F\u6301\u56FE\u7247\u8F93\u5165\u7684\u89C6\u89C9\u6A21\u578B\u3002Cloudflare Workers AI \u9700\u628A\u63A5\u53E3\u5730\u5740\u4E2D\u7684 {account_id} \u66FF\u6362\u4E3A\u81EA\u5DF1\u7684 Cloudflare \u8D26\u6237 ID\uFF0CAPI Key \u586B\u5177\u5907 Workers AI \u6743\u9650\u7684 API Token\u3002</p>
+          <p class="zygr-hint">\u63A5\u53E3\u5730\u5740\u4E3A OpenAI \u517C\u5BB9 Chat Completions \u5730\u5740\uFF08\u5982 https://api.siliconflow.cn/v1/chat/completions\uFF09\u3002\u6A21\u578B\u5FC5\u987B\u662F\u652F\u6301\u56FE\u7247\u8F93\u5165\u7684\u89C6\u89C9\u6A21\u578B\u3002Cloudflare Workers AI \u9700\u628A\u63A5\u53E3\u5730\u5740\u4E2D\u7684 {account_id} \u66FF\u6362\u4E3A\u81EA\u5DF1\u7684 Cloudflare \u8D26\u6237 ID\uFF0CAPI Key \u586B\u5177\u5907 Workers AI \u6743\u9650\u7684 API Token\u3002\u8BE5\u5E73\u53F0\u65E0 /models \u7AEF\u70B9\uFF0C\u83B7\u53D6\u6A21\u578B\u4F1A\u5217\u51FA\u9884\u8BBE\u63A8\u8350\u503C\uFF1B\u601D\u8003\u5F3A\u5EA6\u4EC5\u5BF9 gpt-oss \u63A8\u7406\u6A21\u578B\u751F\u6548\uFF08reasoning_effort\uFF09\uFF0C\u5176\u4ED6\u6A21\u578B\u8BF7\u9009\u300C\u4E0D\u5E72\u9884\u300D\u3002</p>
           <div class="zygr-row"><button class="zygr-btn" data-act="fetch-models">\u83B7\u53D6\u6A21\u578B\u5217\u8868</button><span class="zygr-test-status" data-status="models"></span></div>
           <div data-model-options hidden><select data-field-model-picker aria-label="\u9009\u62E9\u6A21\u578B"></select><button class="zygr-btn" data-act="apply-model">\u4F7F\u7528\u6240\u9009\u6A21\u578B</button></div>
           <div class="zygr-row"><button class="zygr-btn" data-test="vlm">\u6D4B\u8BD5\u591A\u6A21\u6001</button><span class="zygr-test-status" data-status="vlm"></span></div>
@@ -433,8 +433,11 @@
           picker.innerHTML = models.map((id) => `<option value="${String(id).replace(/"/g, "&quot;")}">${String(id).replace(/</g, "&lt;")}</option>`).join("");
         }
         if (pickerWrap) pickerWrap.hidden = false;
-        setStatus(`\u83B7\u53D6\u5230 ${models.length} \u4E2A\u6A21\u578B`, "ok");
-        this.toast(`\u83B7\u53D6\u5230 ${models.length} \u4E2A\u6A21\u578B\uFF0C\u8BF7\u9009\u62E9`);
+        const label = models.fallback
+          ? `\u8BE5\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u62C9\u53D6\uFF0C\u5DF2\u5217\u51FA\u9884\u8BBE\u63A8\u8350\u7684 ${models.length} \u4E2A\u6A21\u578B`
+          : `\u83B7\u53D6\u5230 ${models.length} \u4E2A\u6A21\u578B`;
+        setStatus(label, "ok");
+        this.toast(`${label}\uFF0C\u8BF7\u9009\u62E9`);
       } catch (error) {
         const message = error instanceof Error ? error.message : "\u83B7\u53D6\u5931\u8D25";
         setStatus(message, "bad");
