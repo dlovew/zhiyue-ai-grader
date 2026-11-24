@@ -374,7 +374,8 @@
         config: data.config,
         presets: Array.isArray(data.presets) ? data.presets : [],
         keys: isRecord(data.keys) ? data.keys : {},
-        models: isRecord(data.models) ? data.models : {}
+        models: isRecord(data.models) ? data.models : {},
+        thinkingModes: isRecord(data.thinkingModes) ? data.thinkingModes : {}
       };
     } catch {
       return null;
@@ -420,6 +421,7 @@
     removeKey(PRESET_STORAGE_KEY);
     removeKey(PLATFORM_KEYS_KEY);
     removeKey(PLATFORM_MODELS_KEY);
+    removeKey(PLATFORM_THINKING_KEY);
   }
 
   // src/core/cache.ts
@@ -575,6 +577,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
   var PRESET_STORAGE_KEY = "zygr.presets.v1";
   var PLATFORM_KEYS_KEY = "zygr.platform.keys.v1";
   var PLATFORM_MODELS_KEY = "zygr.platform.models.v1";
+  var PLATFORM_THINKING_KEY = "zygr.platform.thinking.v1";
 
   // 内置预设只提供建议端点/模型与协议档案；用户已填写的 endpoint / model / apiKey 始终优先。
   // authHeader: bearer | api-key | none；全部请求统一为 Chat Completions。
@@ -864,6 +867,40 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     const previous = getPlatformModel(service.platform);
     if (!model || previous === model) return true;
     return setPlatformModel(service.platform, model);
+  }
+
+  function loadPlatformThinkingModes() {
+    const raw = readJson(PLATFORM_THINKING_KEY, {});
+    return isRecord(raw) ? raw : {};
+  }
+
+  function savePlatformThinkingModes(map) {
+    return writeJson(PLATFORM_THINKING_KEY, isRecord(map) ? map : {});
+  }
+
+  function getPlatformThinkingMode(id) {
+    if (!id) return "";
+    const value = loadPlatformThinkingModes()[id];
+    return typeof value === "string" ? value : "";
+  }
+
+  // 空串表示清除记忆，切换时回落到预设默认值（off）。
+  function setPlatformThinkingMode(id, mode) {
+    if (!id) return false;
+    const map = loadPlatformThinkingModes();
+    const value = String(mode || "");
+    if (value) map[id] = value;
+    else delete map[id];
+    return writeJson(PLATFORM_THINKING_KEY, map);
+  }
+
+  function syncThinkingModesFromConfig(config) {
+    const pipeline = isRecord(config?.pipeline) ? config.pipeline : null;
+    const service = pipeline && isRecord(pipeline.vlm) ? pipeline.vlm : null;
+    if (!service || !service.platform) return true;
+    const mode = String(pipeline.thinkingMode || "off");
+    if (getPlatformThinkingMode(service.platform) === mode) return true;
+    return setPlatformThinkingMode(service.platform, mode);
   }
 
   // 从某个服务的当前配置生成一个可复用预设（用于"存为预设"）。
@@ -1186,7 +1223,9 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
     else if (profile.authHeader === "bearer") headers.Authorization = `Bearer ${profile.apiKey}`;
-    const execute = () => gmRequest({ method: "POST", url: profile.endpoint, headers, data: JSON.stringify(payload), timeout: 2e4 });
+    // 推理模型（如 Qwen3.5-27B）默认长链思考，20 秒常不够；跟随配置超时（默认 120 秒）。
+    const probeTimeout = Math.max(2e4, Number(service.timeoutMs) || 12e4);
+    const execute = () => gmRequest({ method: "POST", url: profile.endpoint, headers, data: JSON.stringify(payload), timeout: probeTimeout });
     const response = rateLimiter ? await rateLimiter.run(execute, 120) : await execute();
     const body = parseJsonResponse(response.responseText);
     const reasoning = detectReasoning(body);
@@ -2679,11 +2718,14 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       };
       const keyElement = getField(`${base}.apiKey`);
       const modelElement = getField(`${base}.model`);
+      const thinkingElement = getField("pipeline.thinkingMode");
       const oldPlatform = keyElement?.dataset.platformBound || getPath(this.config, path) || "custom";
       if (keyElement?.value?.trim()) setPlatformKey(oldPlatform, keyElement.value.trim());
       if (modelElement?.value?.trim()) setPlatformModel(oldPlatform, modelElement.value.trim());
+      if (thinkingElement?.value) setPlatformThinkingMode(oldPlatform, thinkingElement.value);
       const rememberedKey = getPlatformKey(id);
       const rememberedModel = getPlatformModel(id);
+      const rememberedThinking = getPlatformThinkingMode(id);
       if (keyElement) {
         keyElement.value = rememberedKey;
         keyElement.dataset.platformBound = id;
@@ -2692,8 +2734,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         modelElement.value = rememberedModel || (preset.models && preset.models.length ? preset.models[0] : "");
         modelElement.dataset.platformBound = id;
       }
+      if (thinkingElement && rememberedThinking) thinkingElement.value = rememberedThinking;
       if (preset.endpoint) setField(`${base}.endpoint`, preset.endpoint);
-      this.toast(`\u5DF2\u5207\u6362\u5230\u300C${preset.label}\u300D\uFF0C\u5DF2\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 API Key \u4E0E\u6A21\u578B`);
+      this.toast(`\u5DF2\u5207\u6362\u5230\u300C${preset.label}\u300D\uFF0C\u5DF2\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 API Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F`);
     }
     loadPresetIntoForm(id) {
       const preset = id ? getPlatformPreset(id) : null;
@@ -2739,7 +2782,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         config: this.getDraft(),
         presets: loadCustomPresets(),
         keys: loadPlatformKeys(),
-        models: loadPlatformModels()
+        models: loadPlatformModels(),
+        thinkingModes: loadPlatformThinkingModes()
       };
       const now = new Date();
       const pad = (value) => String(value).padStart(2, "0");
@@ -2988,6 +3032,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         saveConfig(config);
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
+        syncThinkingModesFromConfig(config);
         cache = new CacheStore(config.cacheTtlDays);
         limiter = buildLimiter(config);
         panel.setCache(pipelineLabel(config));
@@ -3002,6 +3047,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       },
       onTestThinking: (draft) => {
         draft.pipeline.vlm.thinkingMode = normalizeThinkingMode(draft.pipeline.thinkingMode !== void 0 ? draft.pipeline.thinkingMode : draft.pipeline.disableThinking);
+        draft.pipeline.vlm.timeoutMs = draft.pipeline.timeoutMs;
         return probeThinking(draft.pipeline.vlm, buildLimiter(draft));
       },
       onImport: (data) => {
@@ -3010,8 +3056,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         if (Array.isArray(data.presets)) saveCustomPresets(data.presets);
         if (isRecord(data.keys)) savePlatformKeys(data.keys);
         if (isRecord(data.models)) savePlatformModels(data.models);
+        if (isRecord(data.thinkingModes)) savePlatformThinkingModes(data.thinkingModes);
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
+        syncThinkingModesFromConfig(config);
         cache = new CacheStore(config.cacheTtlDays);
         limiter = buildLimiter(config);
         panel.setCache(pipelineLabel(config));

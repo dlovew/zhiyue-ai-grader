@@ -2,6 +2,7 @@
   var PRESET_STORAGE_KEY = "zygr.presets.v1";
   var PLATFORM_KEYS_KEY = "zygr.platform.keys.v1";
   var PLATFORM_MODELS_KEY = "zygr.platform.models.v1";
+  var PLATFORM_THINKING_KEY = "zygr.platform.thinking.v1";
 
   // 内置预设只提供建议端点/模型与协议档案；用户已填写的 endpoint / model / apiKey 始终优先。
   // authHeader: bearer | api-key | none；全部请求统一为 Chat Completions。
@@ -291,6 +292,40 @@
     const previous = getPlatformModel(service.platform);
     if (!model || previous === model) return true;
     return setPlatformModel(service.platform, model);
+  }
+
+  function loadPlatformThinkingModes() {
+    const raw = readJson(PLATFORM_THINKING_KEY, {});
+    return isRecord(raw) ? raw : {};
+  }
+
+  function savePlatformThinkingModes(map) {
+    return writeJson(PLATFORM_THINKING_KEY, isRecord(map) ? map : {});
+  }
+
+  function getPlatformThinkingMode(id) {
+    if (!id) return "";
+    const value = loadPlatformThinkingModes()[id];
+    return typeof value === "string" ? value : "";
+  }
+
+  // 空串表示清除记忆，切换时回落到预设默认值（off）。
+  function setPlatformThinkingMode(id, mode) {
+    if (!id) return false;
+    const map = loadPlatformThinkingModes();
+    const value = String(mode || "");
+    if (value) map[id] = value;
+    else delete map[id];
+    return writeJson(PLATFORM_THINKING_KEY, map);
+  }
+
+  function syncThinkingModesFromConfig(config) {
+    const pipeline = isRecord(config?.pipeline) ? config.pipeline : null;
+    const service = pipeline && isRecord(pipeline.vlm) ? pipeline.vlm : null;
+    if (!service || !service.platform) return true;
+    const mode = String(pipeline.thinkingMode || "off");
+    if (getPlatformThinkingMode(service.platform) === mode) return true;
+    return setPlatformThinkingMode(service.platform, mode);
   }
 
   // 从某个服务的当前配置生成一个可复用预设（用于"存为预设"）。

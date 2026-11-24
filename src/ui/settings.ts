@@ -336,11 +336,14 @@
       };
       const keyElement = getField(`${base}.apiKey`);
       const modelElement = getField(`${base}.model`);
+      const thinkingElement = getField("pipeline.thinkingMode");
       const oldPlatform = keyElement?.dataset.platformBound || getPath(this.config, path) || "custom";
       if (keyElement?.value?.trim()) setPlatformKey(oldPlatform, keyElement.value.trim());
       if (modelElement?.value?.trim()) setPlatformModel(oldPlatform, modelElement.value.trim());
+      if (thinkingElement?.value) setPlatformThinkingMode(oldPlatform, thinkingElement.value);
       const rememberedKey = getPlatformKey(id);
       const rememberedModel = getPlatformModel(id);
+      const rememberedThinking = getPlatformThinkingMode(id);
       if (keyElement) {
         keyElement.value = rememberedKey;
         keyElement.dataset.platformBound = id;
@@ -349,8 +352,9 @@
         modelElement.value = rememberedModel || (preset.models && preset.models.length ? preset.models[0] : "");
         modelElement.dataset.platformBound = id;
       }
+      if (thinkingElement && rememberedThinking) thinkingElement.value = rememberedThinking;
       if (preset.endpoint) setField(`${base}.endpoint`, preset.endpoint);
-      this.toast(`\u5DF2\u5207\u6362\u5230\u300C${preset.label}\u300D\uFF0C\u5DF2\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 API Key \u4E0E\u6A21\u578B`);
+      this.toast(`\u5DF2\u5207\u6362\u5230\u300C${preset.label}\u300D\uFF0C\u5DF2\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 API Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F`);
     }
     loadPresetIntoForm(id) {
       const preset = id ? getPlatformPreset(id) : null;
@@ -396,7 +400,8 @@
         config: this.getDraft(),
         presets: loadCustomPresets(),
         keys: loadPlatformKeys(),
-        models: loadPlatformModels()
+        models: loadPlatformModels(),
+        thinkingModes: loadPlatformThinkingModes()
       };
       const now = new Date();
       const pad = (value) => String(value).padStart(2, "0");

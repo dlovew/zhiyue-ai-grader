@@ -276,7 +276,9 @@
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
     else if (profile.authHeader === "bearer") headers.Authorization = `Bearer ${profile.apiKey}`;
-    const execute = () => gmRequest({ method: "POST", url: profile.endpoint, headers, data: JSON.stringify(payload), timeout: 2e4 });
+    // 推理模型（如 Qwen3.5-27B）默认长链思考，20 秒常不够；跟随配置超时（默认 120 秒）。
+    const probeTimeout = Math.max(2e4, Number(service.timeoutMs) || 12e4);
+    const execute = () => gmRequest({ method: "POST", url: profile.endpoint, headers, data: JSON.stringify(payload), timeout: probeTimeout });
     const response = rateLimiter ? await rateLimiter.run(execute, 120) : await execute();
     const body = parseJsonResponse(response.responseText);
     const reasoning = detectReasoning(body);

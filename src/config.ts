@@ -50,7 +50,8 @@
         config: data.config,
         presets: Array.isArray(data.presets) ? data.presets : [],
         keys: isRecord(data.keys) ? data.keys : {},
-        models: isRecord(data.models) ? data.models : {}
+        models: isRecord(data.models) ? data.models : {},
+        thinkingModes: isRecord(data.thinkingModes) ? data.thinkingModes : {}
       };
     } catch {
       return null;
@@ -96,5 +97,6 @@
     removeKey(PRESET_STORAGE_KEY);
     removeKey(PLATFORM_KEYS_KEY);
     removeKey(PLATFORM_MODELS_KEY);
+    removeKey(PLATFORM_THINKING_KEY);
   }
 

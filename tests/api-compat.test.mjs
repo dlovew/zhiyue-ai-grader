@@ -30,7 +30,7 @@ function loadModules(queue = []) {
   const files = ['src/infra/storage.ts', 'src/config.ts', 'src/infra/platforms.ts', 'src/infra/api.ts'];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, parseConfigBackup, DEFAULT_CONFIG };`, context);
+  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG };`, context);
   return { api: context.__exposed, calls, store };
 }
 
@@ -250,6 +250,29 @@ test('硅基流动强度模式用 reasoning_effort，关闭仍用布尔 enable_t
   assert.equal(max.reasoning_effort, 'max');
   assert.equal(off.enable_thinking, false);
   assert.equal(Object.hasOwn(off, 'reasoning_effort'), false);
+});
+
+test('思考模式按平台记忆：写入、读取、清除与配置同步', () => {
+  const { api } = loadModules();
+  assert.equal(api.setPlatformThinkingMode('zhipu', 'low'), true);
+  assert.equal(api.getPlatformThinkingMode('zhipu'), 'low');
+  assert.equal(api.getPlatformThinkingMode('openai'), '');
+  assert.equal(api.setPlatformThinkingMode('zhipu', ''), true);
+  assert.equal(api.getPlatformThinkingMode('zhipu'), '');
+  assert.equal(api.syncThinkingModesFromConfig({ pipeline: { vlm: { platform: 'siliconflow' }, thinkingMode: 'max' } }), true);
+  assert.equal(api.getPlatformThinkingMode('siliconflow'), 'max');
+  const backup = api.parseConfigBackup(JSON.stringify({ app: 'zygr', config: {}, thinkingModes: { moonshot: 'high' } }));
+  assert.equal(backup.thinkingModes.moonshot, 'high');
+});
+
+test('思考模式探测超时跟随配置，至少 20 秒', async () => {
+  const { api } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ message: { content: '鸡 23 兔 12' } }] })
+  }]);
+  await api.probeThinking({ platform: 'siliconflow', endpoint: 'https://api.siliconflow.cn/v1/chat/completions', model: 'Qwen/Qwen3.5-27B', apiKey: 'k', thinkingMode: 'auto', timeoutMs: 3e5 });
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /Math\.max\(2e4, Number\(service\.timeoutMs\) \|\| 12e4\)/);
 });
 
 test('平台档案：用户显式填写的端点与模型优先于预设建议', () => {

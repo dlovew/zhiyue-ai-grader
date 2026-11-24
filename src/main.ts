@@ -41,6 +41,7 @@
         saveConfig(config);
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
+        syncThinkingModesFromConfig(config);
         cache = new CacheStore(config.cacheTtlDays);
         limiter = buildLimiter(config);
         panel.setCache(pipelineLabel(config));
@@ -55,6 +56,7 @@
       },
       onTestThinking: (draft) => {
         draft.pipeline.vlm.thinkingMode = normalizeThinkingMode(draft.pipeline.thinkingMode !== void 0 ? draft.pipeline.thinkingMode : draft.pipeline.disableThinking);
+        draft.pipeline.vlm.timeoutMs = draft.pipeline.timeoutMs;
         return probeThinking(draft.pipeline.vlm, buildLimiter(draft));
       },
       onImport: (data) => {
@@ -63,8 +65,10 @@
         if (Array.isArray(data.presets)) saveCustomPresets(data.presets);
         if (isRecord(data.keys)) savePlatformKeys(data.keys);
         if (isRecord(data.models)) savePlatformModels(data.models);
+        if (isRecord(data.thinkingModes)) savePlatformThinkingModes(data.thinkingModes);
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
+        syncThinkingModesFromConfig(config);
         cache = new CacheStore(config.cacheTtlDays);
         limiter = buildLimiter(config);
         panel.setCache(pipelineLabel(config));
