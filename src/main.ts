@@ -56,8 +56,7 @@
       },
       onTestThinking: (draft) => {
         draft.pipeline.vlm.thinkingMode = normalizeThinkingMode(draft.pipeline.thinkingMode !== void 0 ? draft.pipeline.thinkingMode : draft.pipeline.disableThinking);
-        draft.pipeline.vlm.timeoutMs = draft.pipeline.timeoutMs;
-        return probeThinking(draft.pipeline.vlm, buildLimiter(draft));
+        return probeThinking(draft.pipeline.vlm);
       },
       onImport: (data) => {
         config = merge(DEFAULT_CONFIG, data.config);

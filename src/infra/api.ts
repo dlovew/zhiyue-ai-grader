@@ -60,15 +60,29 @@
 
   function gmRequest(details) {
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
+      let settled = false;
+      let timer = 0;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        if (timer) window.clearTimeout(timer);
+        fn(value);
+      };
+      const request = GM_xmlhttpRequest({
         ...details,
         onload: (response) => {
-          if (response.status >= 200 && response.status < 300) return resolve(response);
-          reject(createApiError(response.status, response.responseText, response));
+          if (response.status >= 200 && response.status < 300) return finish(resolve, response);
+          finish(reject, createApiError(response.status, response.responseText, response));
         },
-        onerror: (response) => reject(new Error(`\u7F51\u7EDC\u9519\u8BEF\uFF08HTTP ${response.status || 0}\uFF09`)),
-        ontimeout: () => reject(new Error("\u8BF7\u6C42\u8D85\u65F6"))
+        onerror: (response) => finish(reject, new Error(`\u7F51\u7EDC\u9519\u8BEF\uFF08HTTP ${response.status || 0}\uFF09`)),
+        ontimeout: () => finish(reject, new Error("\u8BF7\u6C42\u8D85\u65F6"))
       });
+      // 本地硬超时兜底：油猴少数实现不回调 ontimeout 时，仍保证 promise 结束、按钮不卡在"测试中"。
+      const limit = Number(details.timeout) || 12e4;
+      timer = window.setTimeout(() => {
+        finish(reject, new Error("\u8BF7\u6C42\u8D85\u65F6\uFF08\u672C\u5730\u4FDD\u62A4\uFF09"));
+        try { request?.abort?.(); } catch { /* 忽略中止失败 */ }
+      }, limit + 2e3);
     });
   }
 
@@ -276,10 +290,10 @@
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
     else if (profile.authHeader === "bearer") headers.Authorization = `Bearer ${profile.apiKey}`;
-    // 推理模型（如 Qwen3.5-27B）默认长链思考，20 秒常不够；跟随配置超时（默认 120 秒）。
-    const probeTimeout = Math.max(2e4, Number(service.timeoutMs) || 12e4);
-    const execute = () => gmRequest({ method: "POST", url: profile.endpoint, headers, data: JSON.stringify(payload), timeout: probeTimeout });
-    const response = rateLimiter ? await rateLimiter.run(execute, 120) : await execute();
+    // 推理模型（如 Qwen3.5-27B）默认长链思考需要时间，但不跟随可能设得很大的批改超时：
+    // 测试走独立固定超时（最多 60 秒），且不经过限流器（限流 acquire 在低 TPM 预算下会无限等待，卡住按钮）。
+    const probeTimeout = 6e4;
+    const response = await gmRequest({ method: "POST", url: profile.endpoint, headers, data: JSON.stringify(payload), timeout: probeTimeout });
     const body = parseJsonResponse(response.responseText);
     const reasoning = detectReasoning(body);
     const hasThinking = reasoning.fields.length > 0 || reasoning.tokens > 0;

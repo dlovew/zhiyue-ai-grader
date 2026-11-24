@@ -265,14 +265,28 @@ test('思考模式按平台记忆：写入、读取、清除与配置同步', ()
   assert.equal(backup.thinkingModes.moonshot, 'high');
 });
 
-test('思考模式探测超时跟随配置，至少 20 秒', async () => {
-  const { api } = loadModules([{
+test('思考模式探测用固定 60 秒超时且绕开限流器，不会被大配置超时拖住', async () => {
+  const { api, calls } = loadModules([{
     status: 200,
     responseText: JSON.stringify({ choices: [{ message: { content: '鸡 23 兔 12' } }] })
   }]);
-  await api.probeThinking({ platform: 'siliconflow', endpoint: 'https://api.siliconflow.cn/v1/chat/completions', model: 'Qwen/Qwen3.5-27B', apiKey: 'k', thinkingMode: 'auto', timeoutMs: 3e5 });
+  const result = await api.probeThinking({ platform: 'siliconflow', endpoint: 'https://api.siliconflow.cn/v1/chat/completions', model: 'Qwen/Qwen3.5-27B', apiKey: 'k', thinkingMode: 'auto', timeoutMs: 3e5 });
+  assert.equal(result.ok, true);
+  assert.equal(calls[0].timeout, 6e4);
+});
+
+test('gmRequest 有本地硬超时兜底，油猴不回调时按钮不永久挂起', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
-  assert.match(built, /Math\.max\(2e4, Number\(service\.timeoutMs\) \|\| 12e4\)/);
+  assert.match(built, /settled/);
+  assert.match(built, /\\u672C\\u5730\\u4FDD\\u62A4/);
+  assert.match(built, /request\?\.abort\?\.\(\)/);
+});
+
+test('思考模式测试按钮显示进行秒数', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /setInterval\(\(\) =>/);
+  assert.match(built, /Math\.round\(\(Date\.now\(\) - startedAt\) \/ 1000\)/);
+  assert.match(built, /clearInterval\(ticker\)/);
 });
 
 test('一次提交勾选状态记忆：构造恢复与变更持久化', () => {

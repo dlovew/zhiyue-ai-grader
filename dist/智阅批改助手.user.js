@@ -1008,15 +1008,29 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
 
   function gmRequest(details) {
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
+      let settled = false;
+      let timer = 0;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        if (timer) window.clearTimeout(timer);
+        fn(value);
+      };
+      const request = GM_xmlhttpRequest({
         ...details,
         onload: (response) => {
-          if (response.status >= 200 && response.status < 300) return resolve(response);
-          reject(createApiError(response.status, response.responseText, response));
+          if (response.status >= 200 && response.status < 300) return finish(resolve, response);
+          finish(reject, createApiError(response.status, response.responseText, response));
         },
-        onerror: (response) => reject(new Error(`\u7F51\u7EDC\u9519\u8BEF\uFF08HTTP ${response.status || 0}\uFF09`)),
-        ontimeout: () => reject(new Error("\u8BF7\u6C42\u8D85\u65F6"))
+        onerror: (response) => finish(reject, new Error(`\u7F51\u7EDC\u9519\u8BEF\uFF08HTTP ${response.status || 0}\uFF09`)),
+        ontimeout: () => finish(reject, new Error("\u8BF7\u6C42\u8D85\u65F6"))
       });
+      // 本地硬超时兜底：油猴少数实现不回调 ontimeout 时，仍保证 promise 结束、按钮不卡在"测试中"。
+      const limit = Number(details.timeout) || 12e4;
+      timer = window.setTimeout(() => {
+        finish(reject, new Error("\u8BF7\u6C42\u8D85\u65F6\uFF08\u672C\u5730\u4FDD\u62A4\uFF09"));
+        try { request?.abort?.(); } catch { /* 忽略中止失败 */ }
+      }, limit + 2e3);
     });
   }
 
@@ -1224,10 +1238,10 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
     else if (profile.authHeader === "bearer") headers.Authorization = `Bearer ${profile.apiKey}`;
-    // 推理模型（如 Qwen3.5-27B）默认长链思考，20 秒常不够；跟随配置超时（默认 120 秒）。
-    const probeTimeout = Math.max(2e4, Number(service.timeoutMs) || 12e4);
-    const execute = () => gmRequest({ method: "POST", url: profile.endpoint, headers, data: JSON.stringify(payload), timeout: probeTimeout });
-    const response = rateLimiter ? await rateLimiter.run(execute, 120) : await execute();
+    // 推理模型（如 Qwen3.5-27B）默认长链思考需要时间，但不跟随可能设得很大的批改超时：
+    // 测试走独立固定超时（最多 60 秒），且不经过限流器（限流 acquire 在低 TPM 预算下会无限等待，卡住按钮）。
+    const probeTimeout = 6e4;
+    const response = await gmRequest({ method: "POST", url: profile.endpoint, headers, data: JSON.stringify(payload), timeout: probeTimeout });
     const body = parseJsonResponse(response.responseText);
     const reasoning = detectReasoning(body);
     const hasThinking = reasoning.fields.length > 0 || reasoning.tokens > 0;
@@ -2913,8 +2927,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         status.textContent = text;
         status.className = `zygr-test-status${state ? ` zygr-${state}` : ""}`;
       };
-      setStatus("\u6D4B\u8BD5\u4E2D\u2026");
+      const startedAt = Date.now();
+      setStatus("\u6D4B\u8BD5\u4E2D\u2026 0s\uFF08\u957F\u94FE\u63A8\u7406\u6A21\u578B\u53EF\u80FD\u9700\u6570\u5341\u79D2\uFF09");
       if (button) button.disabled = true;
+      const ticker = window.setInterval(() => {
+        setStatus(`\u6D4B\u8BD5\u4E2D\u2026 ${Math.round((Date.now() - startedAt) / 1000)}s\uFF08\u957F\u94FE\u63A8\u7406\u6A21\u578B\u53EF\u80FD\u9700\u6570\u5341\u79D2\uFF09`);
+      }, 1000);
       try {
         const result = await this.callbacks.onTestThinking(draft);
         setStatus(`${result.verdict}${result.detail ? ` | ${result.detail}` : ""}`, result.ok ? "ok" : "bad");
@@ -2925,6 +2943,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         setStatus(message + detail, "bad");
         this.toast(error?.providerMessage ? String(error.providerMessage).slice(0, 120) : message.slice(0, 120));
       } finally {
+        window.clearInterval(ticker);
         if (button) button.disabled = false;
       }
     }
@@ -3057,8 +3076,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       },
       onTestThinking: (draft) => {
         draft.pipeline.vlm.thinkingMode = normalizeThinkingMode(draft.pipeline.thinkingMode !== void 0 ? draft.pipeline.thinkingMode : draft.pipeline.disableThinking);
-        draft.pipeline.vlm.timeoutMs = draft.pipeline.timeoutMs;
-        return probeThinking(draft.pipeline.vlm, buildLimiter(draft));
+        return probeThinking(draft.pipeline.vlm);
       },
       onImport: (data) => {
         config = merge(DEFAULT_CONFIG, data.config);

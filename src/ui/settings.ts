@@ -521,8 +521,12 @@
         status.textContent = text;
         status.className = `zygr-test-status${state ? ` zygr-${state}` : ""}`;
       };
-      setStatus("\u6D4B\u8BD5\u4E2D\u2026");
+      const startedAt = Date.now();
+      setStatus("\u6D4B\u8BD5\u4E2D\u2026 0s\uFF08\u957F\u94FE\u63A8\u7406\u6A21\u578B\u53EF\u80FD\u9700\u6570\u5341\u79D2\uFF09");
       if (button) button.disabled = true;
+      const ticker = window.setInterval(() => {
+        setStatus(`\u6D4B\u8BD5\u4E2D\u2026 ${Math.round((Date.now() - startedAt) / 1000)}s\uFF08\u957F\u94FE\u63A8\u7406\u6A21\u578B\u53EF\u80FD\u9700\u6570\u5341\u79D2\uFF09`);
+      }, 1000);
       try {
         const result = await this.callbacks.onTestThinking(draft);
         setStatus(`${result.verdict}${result.detail ? ` | ${result.detail}` : ""}`, result.ok ? "ok" : "bad");
@@ -533,6 +537,7 @@
         setStatus(message + detail, "bad");
         this.toast(error?.providerMessage ? String(error.providerMessage).slice(0, 120) : message.slice(0, 120));
       } finally {
+        window.clearInterval(ticker);
         if (button) button.disabled = false;
       }
     }
