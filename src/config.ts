@@ -98,5 +98,6 @@
     removeKey(PLATFORM_KEYS_KEY);
     removeKey(PLATFORM_MODELS_KEY);
     removeKey(PLATFORM_THINKING_KEY);
+    removeKey("zygr.submit.skipConfirm.v1");
   }
 

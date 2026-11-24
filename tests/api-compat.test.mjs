@@ -275,6 +275,14 @@ test('思考模式探测超时跟随配置，至少 20 秒', async () => {
   assert.match(built, /Math\.max\(2e4, Number\(service\.timeoutMs\) \|\| 12e4\)/);
 });
 
+test('一次提交勾选状态记忆：构造恢复与变更持久化', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /zygr\.submit\.skipConfirm\.v1/);
+  assert.match(built, /readJson\(SKIP_CONFIRM_KEY, false\) === true/);
+  assert.match(built, /writeJson\(SKIP_CONFIRM_KEY, Boolean\(target\.checked\)\)/);
+  assert.match(built, /removeKey\("zygr\.submit\.skipConfirm\.v1"\)/);
+});
+
 test('平台档案：用户显式填写的端点与模型优先于预设建议', () => {
   const { api } = loadModules();
   const profile = api.resolveProfile({

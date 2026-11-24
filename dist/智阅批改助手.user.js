@@ -422,6 +422,7 @@
     removeKey(PLATFORM_KEYS_KEY);
     removeKey(PLATFORM_MODELS_KEY);
     removeKey(PLATFORM_THINKING_KEY);
+    removeKey("zygr.submit.skipConfirm.v1");
   }
 
   // src/core/cache.ts
@@ -2022,6 +2023,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     illegible: "\u65E0\u6CD5\u8FA8\u8BA4",
     blank: "\u672A\u4F5C\u7B54"
   };
+  var SKIP_CONFIRM_KEY = "zygr.submit.skipConfirm.v1";
   var GraderPanel = class {
     constructor(callbacks) {
       this.callbacks = callbacks;
@@ -2031,6 +2033,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.shadow = this.host.attachShadow({ mode: "open" });
       this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
       this.panel = this.q(".zygr-panel");
+      const skipConfirm = this.shadow.querySelector("[data-opt='skip-submit-confirm']");
+      if (skipConfirm) skipConfirm.checked = readJson(SKIP_CONFIRM_KEY, false) === true;
       this.bind();
     }
     markup() {
@@ -2074,6 +2078,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.q(`#${id}`).textContent = value;
     }
     bind() {
+      this.shadow.addEventListener("change", (event) => {
+        const target = event.target;
+        if (target?.matches?.("[data-opt='skip-submit-confirm']")) {
+          writeJson(SKIP_CONFIRM_KEY, Boolean(target.checked));
+        }
+      });
       this.shadow.addEventListener("click", (event) => {
         const button = event.target.closest("[data-act]");
         if (!button) return;
