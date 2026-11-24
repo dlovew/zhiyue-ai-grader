@@ -353,7 +353,7 @@ test('关闭模式仍注入 thinking.disabled 与 enable_thinking=false', () => 
   assert.equal(Object.hasOwn(autoPayload, 'thinking'), false);
 });
 
-test('智谱 low 模式发送 thinking:"low" 而非 disabled', async () => {
+test('智谱 low 模式发送 thinking:{type:"low"} 对象而非裸字符串', async () => {
   const { api, calls } = loadModules([{
     status: 200,
     responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] })
@@ -364,8 +364,9 @@ test('智谱 low 模式发送 thinking:"low" 而非 disabled', async () => {
     { retries: 0 }
   );
   const body = JSON.parse(calls[0].data);
-  assert.equal(body.thinking, 'low');
-  assert.notDeepEqual(body.thinking, { type: 'disabled' });
+  assert.equal(typeof body.thinking, 'object');
+  assert.equal(body.thinking.type, 'low');
+  assert.notEqual(body.thinking.type, 'disabled');
 });
 
 test('强度模式探测不因响应含思考内容而误判失败', async () => {
@@ -394,7 +395,7 @@ test('强度模式遇到 400 不静默降级（保留用户选择如实报错）
   // 400 不可重试：仅一次请求，且仍携带 high（没有被删除降级重试）
   assert.equal(calls.length, 1);
   const first = JSON.parse(calls[0].data);
-  assert.equal(first.thinking, 'high');
+  assert.equal(first.thinking.type, 'high');
 });
 
 test('旧配置备份中的 disableThinking 自动迁移为 thinkingMode', () => {

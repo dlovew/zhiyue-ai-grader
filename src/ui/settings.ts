@@ -70,7 +70,7 @@
               <div class="zygr-field"><label>\u63A8\u8350\u6A21\u578B\uFF08\u9017\u53F7\u5206\u9694\uFF09</label><input data-preset-field="models"></div>
               <div class="zygr-field"><label>\u9274\u6743\u65B9\u5F0F</label><select data-preset-field="authHeader"><option value="bearer">Authorization: Bearer</option><option value="api-key">api-key</option><option value="none">\u65E0\u9700\u9274\u6743</option></select></div>
               <div class="zygr-field"><label>\u601D\u8003\u63A7\u5236\u5B57\u6BB5\u540D</label><input data-preset-field="disableThinkingKey" placeholder="\u7559\u7A7A\u8868\u793A\u4E0D\u6CE8\u5165\uFF0C\u5982 enable_thinking"></div>
-              <div class="zygr-field"><label>low/high/max \u503C\u6620\u5C04\uFF08JSON\uFF0C\u53EF\u9009\uFF09</label><input data-preset-field="thinkingValues" placeholder='\u5982 {"low":"low","high":"high","max":"max"}'></div>
+              <div class="zygr-field"><label>low/high/max \u503C\u6620\u5C04\uFF08JSON\uFF0C\u53EF\u9009\uFF09</label><input data-preset-field="thinkingValues" placeholder='\u5982 {"low":{"type":"low"},"high":{"type":"high"},"max":{"type":"max"}}'></div>
               <div class="zygr-field"><label>\u6D41\u5F0F\u8F93\u51FA</label><select data-preset-field="stream"><option value="false">\u5173\u95ED\uFF08\u63A8\u8350\uFF09</option><option value="true">\u5F00\u542F</option></select></div>
             </div>
             <div class="zygr-row">

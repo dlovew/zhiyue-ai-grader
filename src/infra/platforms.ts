@@ -95,7 +95,8 @@
       authHeader: "bearer",
       disableThinkingKey: "thinking",
       // glm-5.x 始终思考，只接受 low/high/max；关闭仅对 glm-4.x 有效。
-      thinkingValues: { low: "low", high: "high", max: "max" },
+      // thinking 字段在智谱是对象结构 {type:...}，裸字符串会触发 JSON 反序列化 400。
+      thinkingValues: { low: { type: "low" }, high: { type: "high" }, max: { type: "max" } },
       jsonModeKey: "response_format",
       stream: false
     },

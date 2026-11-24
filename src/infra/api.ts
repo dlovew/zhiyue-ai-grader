@@ -113,6 +113,11 @@
       if (key === "thinking") value = { type: "disabled" };
       else if (key === "reasoning") value = { effort: "none" };
       else value = false;
+    } else if (key === "thinking") {
+      // 智谱/火山的 thinking 是对象字段：{type:"low"}，裸字符串会触发 400。
+      value = { type: normalized };
+    } else if (key === "reasoning") {
+      value = { effort: normalized };
     } else {
       value = normalized;
     }
