@@ -29,26 +29,6 @@
       stream: false
     },
     {
-      id: "openai",
-      label: "OpenAI 官方",
-      endpoint: "https://api.openai.com/v1/chat/completions",
-      models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
-      authHeader: "bearer",
-      disableThinkingKey: null,
-      jsonModeKey: "response_format",
-      stream: false
-    },
-    {
-      id: "azure-openai",
-      label: "Azure OpenAI",
-      endpoint: "https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT/chat/completions?api-version=2024-10-21",
-      models: ["gpt-4o"],
-      authHeader: "api-key",
-      disableThinkingKey: null,
-      jsonModeKey: "response_format",
-      stream: false
-    },
-    {
       id: "deepseek",
       label: "DeepSeek",
       endpoint: "https://api.deepseek.com/chat/completions",
@@ -325,13 +305,17 @@
     };
   }
 
+  // 已下线的内置平台：预设条目已删除，这里只保留鉴权方式，避免历史配置静默退回 bearer 而失效。
+  var LEGACY_PLATFORM_AUTH = { "azure-openai": "api-key" };
+
   // 把平台预设与服务上的手动覆盖合并成统一的请求档案。
   // 显式字段（service.endpoint / service.model）优先，预设只在其为空时提供建议值。
   function resolveProfile(service) {
     const src = isRecord(service) ? service : {};
     const preset = getPlatformPreset(src.platform) || getPlatformPreset("custom") || {};
     const compat = isRecord(src.compat) ? src.compat : {};
-    const authHeader = ["bearer", "api-key", "none"].includes(compat.authHeader) ? compat.authHeader : (preset.authHeader || "bearer");
+    const legacyAuth = LEGACY_PLATFORM_AUTH[String(src.platform || "")];
+    const authHeader = ["bearer", "api-key", "none"].includes(compat.authHeader) ? compat.authHeader : (legacyAuth || preset.authHeader || "bearer");
     return {
       id: preset.id || "custom",
       label: preset.label || "自定义",

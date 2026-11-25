@@ -330,13 +330,20 @@
       setStatus("\u83B7\u53D6\u4E2D\u2026");
       try {
         const models = await this.callbacks.onFetchModels(draft);
+        // 平台不支持在线列表时不提供任何候选，只提示手动填写模型名称。
+        if (models.manual) {
+          if (picker) picker.innerHTML = "";
+          if (pickerWrap) pickerWrap.hidden = true;
+          const message = models.message || "\u8BE5\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u83B7\u53D6\u6A21\u578B\u5217\u8868\uFF0C\u8BF7\u624B\u52A8\u586B\u5199\u6A21\u578B\u540D\u79F0";
+          setStatus(message);
+          this.toast(message);
+          return;
+        }
         if (picker) {
           picker.innerHTML = models.map((id) => `<option value="${String(id).replace(/"/g, "&quot;")}">${String(id).replace(/</g, "&lt;")}</option>`).join("");
         }
         if (pickerWrap) pickerWrap.hidden = false;
-        const label = models.fallback
-          ? `\u8BE5\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u62C9\u53D6\uFF0C\u5DF2\u5217\u51FA\u9884\u8BBE\u63A8\u8350\u7684 ${models.length} \u4E2A\u6A21\u578B`
-          : `\u83B7\u53D6\u5230 ${models.length} \u4E2A\u6A21\u578B`;
+        const label = `\u83B7\u53D6\u5230 ${models.length} \u4E2A\u6A21\u578B`;
         setStatus(label, "ok");
         this.toast(`${label}\uFF0C\u8BF7\u9009\u62E9`);
       } catch (error) {

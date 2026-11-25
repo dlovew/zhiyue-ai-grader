@@ -605,26 +605,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       stream: false
     },
     {
-      id: "openai",
-      label: "OpenAI 官方",
-      endpoint: "https://api.openai.com/v1/chat/completions",
-      models: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
-      authHeader: "bearer",
-      disableThinkingKey: null,
-      jsonModeKey: "response_format",
-      stream: false
-    },
-    {
-      id: "azure-openai",
-      label: "Azure OpenAI",
-      endpoint: "https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT/chat/completions?api-version=2024-10-21",
-      models: ["gpt-4o"],
-      authHeader: "api-key",
-      disableThinkingKey: null,
-      jsonModeKey: "response_format",
-      stream: false
-    },
-    {
       id: "deepseek",
       label: "DeepSeek",
       endpoint: "https://api.deepseek.com/chat/completions",
@@ -901,13 +881,17 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     };
   }
 
+  // 已下线的内置平台：预设条目已删除，这里只保留鉴权方式，避免历史配置静默退回 bearer 而失效。
+  var LEGACY_PLATFORM_AUTH = { "azure-openai": "api-key" };
+
   // 把平台预设与服务上的手动覆盖合并成统一的请求档案。
   // 显式字段（service.endpoint / service.model）优先，预设只在其为空时提供建议值。
   function resolveProfile(service) {
     const src = isRecord(service) ? service : {};
     const preset = getPlatformPreset(src.platform) || getPlatformPreset("custom") || {};
     const compat = isRecord(src.compat) ? src.compat : {};
-    const authHeader = ["bearer", "api-key", "none"].includes(compat.authHeader) ? compat.authHeader : (preset.authHeader || "bearer");
+    const legacyAuth = LEGACY_PLATFORM_AUTH[String(src.platform || "")];
+    const authHeader = ["bearer", "api-key", "none"].includes(compat.authHeader) ? compat.authHeader : (legacyAuth || preset.authHeader || "bearer");
     return {
       id: preset.id || "custom",
       label: preset.label || "自定义",
@@ -1158,8 +1142,10 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     return normalized.replace(/\/chat\/completions$/i, "/models").replace(/\/messages$/i, "/models");
   }
 
-  // 拉取平台可用模型列表；返回模型 ID 字符串数组（数组可带 fallback 标记）。
-  // 部分平台没有 /models 端点，GET 会返回 405，此时回退到预设内置模型。
+  // 拉取平台可用模型列表；返回模型 ID 字符串数组。
+  // 平台没有 /models 端点（GET 返回 405 等）或返回空列表时不做预设回退：
+  // 返回空数组并带 manual 标记与提示文案，由界面提示用户手动填写模型名称。
+  var MODELS_UNSUPPORTED_MESSAGE = "\u8BE5\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u83B7\u53D6\u6A21\u578B\u5217\u8868\uFF0C\u8BF7\u624B\u52A8\u586B\u5199\u6A21\u578B\u540D\u79F0";
   async function fetchModels(service, timeoutMs = 15e3) {
     const profile = resolveProfile(service);
     const url = modelsEndpoint(profile.endpoint);
@@ -1167,24 +1153,23 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
     else if (profile.authHeader === "bearer") headers.Authorization = `Bearer ${profile.apiKey}`;
-    const usePreset = (why) => {
-      const presetModels = Array.isArray(profile.models) ? profile.models.filter((id) => typeof id === "string" && id.trim()) : [];
-      if (!presetModels.length) throw new Error(why);
-      const result = presetModels.slice();
-      result.fallback = true;
+    const manualOnly = (message) => {
+      const result = [];
+      result.manual = true;
+      result.message = message;
       return result;
     };
     let response;
     try {
       response = await gmRequest({ method: "GET", url, headers, timeout: timeoutMs });
     } catch (error) {
-      if (error?.status === 405 || error?.status === 404 || error?.status === 400) return usePreset("\u8BE5\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u62C9\u53D6\u6A21\u578B\u5217\u8868\uFF0C\u4E14\u9884\u8BBE\u672A\u63D0\u4F9B\u53EF\u9009\u6A21\u578B");
+      if (error?.status === 405 || error?.status === 404 || error?.status === 400) return manualOnly(MODELS_UNSUPPORTED_MESSAGE);
       throw error;
     }
     const body = parseJsonResponse(response.responseText);
     const list = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : Array.isArray(body?.result) ? body.result : [];
     const ids = list.map((item) => (typeof item === "string" ? item : item?.id)).filter((id) => typeof id === "string" && id.trim());
-    if (!ids.length) return usePreset("\u63A5\u53E3\u672A\u8FD4\u56DE\u53EF\u7528\u6A21\u578B\u5217\u8868\uFF0C\u4E14\u9884\u8BBE\u672A\u63D0\u4F9B\u53EF\u9009\u6A21\u578B");
+    if (!ids.length) return manualOnly("\u63A5\u53E3\u672A\u8FD4\u56DE\u53EF\u7528\u6A21\u578B\u5217\u8868\uFF0C\u8BF7\u624B\u52A8\u586B\u5199\u6A21\u578B\u540D\u79F0");
     return ids;
   }
 
@@ -2716,13 +2701,20 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       setStatus("\u83B7\u53D6\u4E2D\u2026");
       try {
         const models = await this.callbacks.onFetchModels(draft);
+        // 平台不支持在线列表时不提供任何候选，只提示手动填写模型名称。
+        if (models.manual) {
+          if (picker) picker.innerHTML = "";
+          if (pickerWrap) pickerWrap.hidden = true;
+          const message = models.message || "\u8BE5\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u83B7\u53D6\u6A21\u578B\u5217\u8868\uFF0C\u8BF7\u624B\u52A8\u586B\u5199\u6A21\u578B\u540D\u79F0";
+          setStatus(message);
+          this.toast(message);
+          return;
+        }
         if (picker) {
           picker.innerHTML = models.map((id) => `<option value="${String(id).replace(/"/g, "&quot;")}">${String(id).replace(/</g, "&lt;")}</option>`).join("");
         }
         if (pickerWrap) pickerWrap.hidden = false;
-        const label = models.fallback
-          ? `\u8BE5\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u62C9\u53D6\uFF0C\u5DF2\u5217\u51FA\u9884\u8BBE\u63A8\u8350\u7684 ${models.length} \u4E2A\u6A21\u578B`
-          : `\u83B7\u53D6\u5230 ${models.length} \u4E2A\u6A21\u578B`;
+        const label = `\u83B7\u53D6\u5230 ${models.length} \u4E2A\u6A21\u578B`;
         setStatus(label, "ok");
         this.toast(`${label}\uFF0C\u8BF7\u9009\u62E9`);
       } catch (error) {

@@ -168,7 +168,7 @@ test('端点归一化覆盖 opencode.ai 基础地址与 Azure 完整地址', () 
   assert.equal(api.normalizeEndpoint(azure), azure);
 });
 
-test('平台档案：opencode.ai 不注入思考字段、Azure 使用 api-key 头', () => {
+test('平台档案：opencode.ai 不注入思考字段、旧 Azure 配置仍用 api-key 头', () => {
   const { api } = loadModules();
   const opencode = api.resolveProfile({ platform: 'opencode-ai', endpoint: '', model: '', apiKey: 'k1' });
   assert.equal(opencode.endpoint, 'https://opencode.ai/inference/openai/v1/chat/completions');
@@ -176,6 +176,9 @@ test('平台档案：opencode.ai 不注入思考字段、Azure 使用 api-key �
   assert.equal(opencode.disableThinkingKey, null);
   assert.equal(opencode.authHeaderName, 'Authorization');
 
+  // 内置的 OpenAI 官方 / Azure OpenAI 预设已移除，历史配置只保留鉴权兼容。
+  assert.equal(api.getPlatformPreset('openai'), null);
+  assert.equal(api.getPlatformPreset('azure-openai'), null);
   const azure = api.resolveProfile({ platform: 'azure-openai', endpoint: '', model: '', apiKey: 'k2' });
   assert.equal(azure.authHeaderName, 'api-key');
   assert.equal(azure.authHeader, 'api-key');
@@ -210,7 +213,7 @@ test('思考模式按平台记忆：写入、读取、清除与配置同步', ()
   const { api } = loadModules();
   assert.equal(api.setPlatformThinkingMode('zhipu', 'low'), true);
   assert.equal(api.getPlatformThinkingMode('zhipu'), 'low');
-  assert.equal(api.getPlatformThinkingMode('openai'), '');
+  assert.equal(api.getPlatformThinkingMode('dashscope'), '');
   assert.equal(api.setPlatformThinkingMode('zhipu', ''), true);
   assert.equal(api.getPlatformThinkingMode('zhipu'), '');
   assert.equal(api.syncThinkingModesFromConfig({ pipeline: { vlm: { platform: 'siliconflow' }, thinkingMode: 'max' } }), true);
@@ -382,6 +385,20 @@ test('获取模型列表解析 data 数组中的模型 ID', async () => {
   assert.equal(Array.from(models).join(','), 'model-a,model-b');
 });
 
+test('平台不支持在线列表时只提示手动填写，不回退预设模型', async () => {
+  const { api } = loadModules([{ status: 405, responseText: '' }]);
+  const models = await api.fetchModels({ platform: 'siliconflow', endpoint: 'https://api.siliconflow.cn/v1/chat/completions', apiKey: 'k' });
+  assert.equal(models.length, 0);
+  assert.equal(models.manual, true);
+  assert.match(models.message, /不支持在线获取模型列表，请手动填写模型名称/);
+
+  const empty = loadModules([{ status: 200, responseText: JSON.stringify({ data: [] }) }]);
+  const none = await empty.api.fetchModels({ platform: 'siliconflow', endpoint: 'https://api.siliconflow.cn/v1/chat/completions', apiKey: 'k' });
+  assert.equal(none.length, 0);
+  assert.equal(none.manual, true);
+  assert.match(none.message, /请手动填写模型名称/);
+});
+
 test('平台模型可记忆并随配置归集', () => {
   const { api } = loadModules();
   assert.equal(api.getPlatformModel('opencode-ai'), '');
@@ -430,9 +447,11 @@ test('配置备份校验接受合法结构并拒绝错误格式', () => {
 test('平台列表只含内置预设，且内置预设不再提供默认模型', () => {
   const { api } = loadModules();
   const presets = api.listPlatformPresets();
-  assert.ok(presets.length >= 10);
+  assert.ok(presets.length >= 8);
   assert.ok(presets.some((p) => p.id === 'custom'));
   assert.equal(presets.some((p) => p.id === 'cloudflare-workers-ai'), false);
+  assert.equal(presets.some((p) => p.id === 'openai'), false);
+  assert.equal(presets.some((p) => p.id === 'azure-openai'), false);
   // 用户未填模型时档案的 model 为空，不再回落到预设推荐值
   const profile = api.resolveProfile({ platform: 'siliconflow', endpoint: '', model: '', apiKey: 'k' });
   assert.equal(profile.model, '');
