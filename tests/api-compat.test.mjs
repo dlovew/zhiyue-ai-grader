@@ -172,7 +172,7 @@ test('平台档案：opencode.ai 不注入思考字段、Azure 使用 api-key �
   const { api } = loadModules();
   const opencode = api.resolveProfile({ platform: 'opencode-ai', endpoint: '', model: '', apiKey: 'k1' });
   assert.equal(opencode.endpoint, 'https://opencode.ai/inference/openai/v1/chat/completions');
-  assert.equal(opencode.model, 'hy4-flash-free');
+  assert.equal(opencode.model, '');
   assert.equal(opencode.disableThinkingKey, null);
   assert.equal(opencode.authHeaderName, 'Authorization');
 
@@ -189,7 +189,8 @@ test('Cloudflare Workers AI 预设端点、鉴权与不注入 response_format', 
   const profile = api.resolveProfile({ platform: 'cloudflare-workers-ai', endpoint: '', model: '', apiKey: 'cf-token' });
   assert.match(profile.endpoint, /cloudflare\.com\/client\/v4\/accounts\/\{account_id\}\/ai\/v1\/chat\/completions$/);
   assert.equal(profile.authHeaderName, 'Authorization');
-  assert.equal(profile.model, '@cf/meta/llama-3.1-8b-instruct-fp8');
+  assert.equal(profile.model, '');
+  assert.ok(profile.models.includes('@cf/meta/llama-3.1-8b-instruct-fp8'));
   assert.equal(profile.jsonModeKey, null);
 
   await api.chatCompletion(
@@ -360,7 +361,7 @@ test('opencode.ai 请求不注入 enable_thinking，保留 Bearer 鉴权', async
     responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] })
   }]);
   const text = await api.chatCompletion(
-    { platform: 'opencode-ai', apiKey: 'test-key' },
+    { platform: 'opencode-ai', apiKey: 'test-key', model: 'hy4-flash-free' },
     [{ role: 'user', content: 'hi' }],
     { disableThinking: true, retries: 0 }
   );
@@ -395,7 +396,7 @@ test('429 只重试一次且错误含服务商原始信息', async () => {
   const { api, calls } = loadModules([rateLimited, rateLimited, rateLimited]);
   await assert.rejects(
     api.chatCompletion(
-      { platform: 'opencode-ai', apiKey: 'k' },
+      { platform: 'opencode-ai', apiKey: 'k', model: 'hy4-flash-free' },
       [{ role: 'user', content: 'hi' }],
       { retries: 1 }
     ),
@@ -473,24 +474,23 @@ test('配置备份校验接受合法结构并拒绝错误格式', () => {
   assert.equal(api.parseConfigBackup('not json'), null);
 });
 
-test('自定义预设可新增、更新与删除，内置预设不可覆盖', () => {
+test('平台列表只含内置预设，且内置预设不再提供默认模型', () => {
   const { api } = loadModules();
-  const preset = {
-    id: 'my-proxy',
-    label: '我的中转',
-    endpoint: 'https://proxy.example/v1/chat/completions',
-    models: ['model-a'],
-    authHeader: 'api-key',
-    disableThinkingKey: null,
-    jsonModeKey: 'response_format',
-    stream: false
-  };
-  assert.equal(api.upsertPlatformPreset(preset), true);
-  assert.equal(api.getPlatformPreset('my-proxy').label, '我的中转');
-  assert.equal(api.upsertPlatformPreset({ ...preset, label: '内置覆盖测试', id: 'opencode-ai' }), false);
-  assert.equal(api.deletePlatformPreset('opencode-ai'), false);
-  assert.equal(api.deletePlatformPreset('my-proxy'), true);
-  assert.equal(api.getPlatformPreset('my-proxy'), null);
+  const presets = api.listPlatformPresets();
+  assert.ok(presets.length >= 10);
+  assert.ok(presets.some((p) => p.id === 'custom'));
+  assert.ok(presets.some((p) => p.id === 'cloudflare-workers-ai'));
+  // 用户未填模型时档案的 model 为空，不再回落到预设推荐值
+  const profile = api.resolveProfile({ platform: 'siliconflow', endpoint: '', model: '', apiKey: 'k' });
+  assert.equal(profile.model, '');
+  assert.ok(profile.models.length > 0);
+});
+
+test('界面已移除管理自定义预设入口', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.doesNotMatch(built, /data-act="preset-toggle"/);
+  assert.doesNotMatch(built, /data-preset-editor/);
+  assert.doesNotMatch(built, /collectPresetForm\(\)/);
 });
 
 test('思考模式归一化兼容旧布尔并支持 low/high/max', () => {

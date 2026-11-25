@@ -176,7 +176,7 @@
   }
 
   function listPlatformPresets() {
-    return BUILTIN_PLATFORM_PRESETS.concat(loadCustomPresets());
+    return BUILTIN_PLATFORM_PRESETS.slice();
   }
 
   function getPlatformPreset(id) {
@@ -351,12 +351,11 @@
     const preset = getPlatformPreset(src.platform) || getPlatformPreset("custom") || {};
     const compat = isRecord(src.compat) ? src.compat : {};
     const authHeader = ["bearer", "api-key", "none"].includes(compat.authHeader) ? compat.authHeader : (preset.authHeader || "bearer");
-    const suggestedModel = Array.isArray(preset.models) && preset.models.length ? preset.models[0] : "";
     return {
       id: preset.id || "custom",
       label: preset.label || "自定义",
       endpoint: normalizeEndpoint(String(src.endpoint || preset.endpoint || "")),
-      model: String(src.model || suggestedModel || ""),
+      model: String(src.model || ""),
       models: Array.isArray(preset.models) ? preset.models : [],
       apiKey: String(src.apiKey || ""),
       authHeader,
