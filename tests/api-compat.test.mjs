@@ -181,53 +181,6 @@ test('平台档案：opencode.ai 不注入思考字段、Azure 使用 api-key �
   assert.equal(azure.authHeader, 'api-key');
 });
 
-test('Cloudflare Workers AI 预设端点、鉴权与不注入 response_format', async () => {
-  const { api, calls } = loadModules([{
-    status: 200,
-    responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] })
-  }]);
-  const profile = api.resolveProfile({ platform: 'cloudflare-workers-ai', endpoint: '', model: '', apiKey: 'cf-token' });
-  assert.match(profile.endpoint, /cloudflare\.com\/client\/v4\/accounts\/\{account_id\}\/ai\/v1\/chat\/completions$/);
-  assert.equal(profile.authHeaderName, 'Authorization');
-  assert.equal(profile.model, '');
-  assert.ok(profile.models.includes('@cf/meta/llama-3.1-8b-instruct-fp8'));
-  assert.equal(profile.jsonModeKey, null);
-
-  await api.chatCompletion(
-    { platform: 'cloudflare-workers-ai', endpoint: 'https://api.cloudflare.com/client/v4/accounts/abc/ai/v1/chat/completions', model: '@cf/meta/llama-3.1-8b-instruct-fp8', apiKey: 'cf-token' },
-    [{ role: 'user', content: 'hi' }],
-    { retries: 0, jsonMode: true }
-  );
-  assert.equal(calls[0].headers.Authorization, 'Bearer cf-token');
-  const body = JSON.parse(calls[0].data);
-  assert.equal(Object.hasOwn(body, 'response_format'), false);
-});
-
-test('Cloudflare 405 时回退到预设内置模型并带 fallback 标记', async () => {
-  const { api, calls } = loadModules([{ status: 405, responseText: '{"success":false,"errors":[{"code":7001,"message":"GET not supported"}]}' }]);
-  const models = await api.fetchModels({ platform: 'cloudflare-workers-ai', endpoint: '', model: '', apiKey: 'k' });
-  assert.ok(Array.isArray(models));
-  assert.equal(models.fallback, true);
-  assert.ok(models.length > 0);
-  assert.ok(models[0].startsWith('@cf/'));
-  assert.match(calls[0].url, /ai\/v1\/models$/);
-});
-
-test('Cloudflare 思考强度 low 注入 reasoning_effort 而非 thinking', async () => {
-  const { api, calls } = loadModules([{
-    status: 200,
-    responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] })
-  }]);
-  await api.chatCompletion(
-    { platform: 'cloudflare-workers-ai', endpoint: 'https://api.cloudflare.com/client/v4/accounts/abc/ai/v1/chat/completions', model: '@cf/openai/gpt-oss-20b', apiKey: 'k', thinkingMode: 'low' },
-    [{ role: 'user', content: 'hi' }],
-    { retries: 0 }
-  );
-  const body = JSON.parse(calls[0].data);
-  assert.equal(body.reasoning_effort, 'low');
-  assert.equal(Object.hasOwn(body, 'thinking'), false);
-});
-
 test('硅基流动强度模式用 reasoning_effort，关闭仍用布尔 enable_thinking', async () => {
   const { api, calls } = loadModules([{
     status: 200,
@@ -479,7 +432,7 @@ test('平台列表只含内置预设，且内置预设不再提供默认模型',
   const presets = api.listPlatformPresets();
   assert.ok(presets.length >= 10);
   assert.ok(presets.some((p) => p.id === 'custom'));
-  assert.ok(presets.some((p) => p.id === 'cloudflare-workers-ai'));
+  assert.equal(presets.some((p) => p.id === 'cloudflare-workers-ai'), false);
   // 用户未填模型时档案的 model 为空，不再回落到预设推荐值
   const profile = api.resolveProfile({ platform: 'siliconflow', endpoint: '', model: '', apiKey: 'k' });
   assert.equal(profile.model, '');

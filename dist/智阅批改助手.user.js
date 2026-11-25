@@ -700,25 +700,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       jsonModeKey: "response_format",
       stream: false
     },
-    {
-      // Cloudflare 端点含账户 ID：请把 {account_id} 替换为 Cloudflare 账户 ID。
-      // 鉴权用 Cloudflare API Token（需 Workers AI - Read 权限），走标准 Authorization: Bearer。
-      id: "cloudflare-workers-ai",
-      label: "Cloudflare Workers AI",
-      endpoint: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions",
-      models: ["@cf/meta/llama-3.1-8b-instruct-fp8", "@cf/openai/gpt-oss-20b", "@cf/moondream3.1-9B-A2B", "@cf/llava-hf/llava-1.5-7b-hf"],
-      authHeader: "bearer",
-      disableThinkingKey: null,
-      // gpt-oss 等推理模型用顶层 reasoning_effort 控制强度（low/medium/high）。
-      // 本插件下拉无 medium，故把 max 归到 high；非推理模型会拒绝该参数，选「不干预」即可。
-      thinkingFields: {
-        low: { reasoning_effort: "low" },
-        high: { reasoning_effort: "high" },
-        max: { reasoning_effort: "high" }
-      },
-      jsonModeKey: null,
-      stream: false
-    },
   ];
 
   function normalizeThinkingValues(value) {
@@ -1178,7 +1159,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
   }
 
   // 拉取平台可用模型列表；返回模型 ID 字符串数组（数组可带 fallback 标记）。
-  // 部分平台（如 Cloudflare Workers AI）没有 /models 端点，GET 会返回 405，此时回退到预设内置模型。
+  // 部分平台没有 /models 端点，GET 会返回 405，此时回退到预设内置模型。
   async function fetchModels(service, timeoutMs = 15e3) {
     const profile = resolveProfile(service);
     const url = modelsEndpoint(profile.endpoint);
@@ -2479,7 +2460,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
             ${field("\u63A5\u53E3\u5730\u5740", "pipeline.vlm.endpoint")}${field("API Key", "pipeline.vlm.apiKey", "password")}
             ${field("\u6A21\u578B", "pipeline.vlm.model")}
           </div>
-          <p class="zygr-hint">\u586B OpenAI \u517C\u5BB9 Chat Completions \u5730\u5740\u4E0E\u89C6\u89C9\u6A21\u578B\u540D\u3002Cloudflare \u9700\u5C06 {account_id} \u66FF\u6362\u4E3A\u81EA\u5DF1\u8D26\u6237 ID\u3002</p>
+          <p class="zygr-hint">\u586B OpenAI \u517C\u5BB9 Chat Completions \u5730\u5740\u4E0E\u89C6\u89C9\u6A21\u578B\u540D\u3002</p>
           <div class="zygr-row"><button class="zygr-btn" data-act="fetch-models">\u83B7\u53D6\u6A21\u578B\u5217\u8868</button><span class="zygr-test-status" data-status="models"></span></div>
           <div data-model-options hidden><select data-field-model-picker aria-label="\u9009\u62E9\u6A21\u578B"></select><button class="zygr-btn" data-act="apply-model">\u4F7F\u7528\u6240\u9009\u6A21\u578B</button></div>
           <div class="zygr-row"><button class="zygr-btn" data-test="vlm">\u6D4B\u8BD5\u591A\u6A21\u6001</button><span class="zygr-test-status" data-status="vlm"></span></div>

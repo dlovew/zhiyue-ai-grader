@@ -124,25 +124,6 @@
       jsonModeKey: "response_format",
       stream: false
     },
-    {
-      // Cloudflare 端点含账户 ID：请把 {account_id} 替换为 Cloudflare 账户 ID。
-      // 鉴权用 Cloudflare API Token（需 Workers AI - Read 权限），走标准 Authorization: Bearer。
-      id: "cloudflare-workers-ai",
-      label: "Cloudflare Workers AI",
-      endpoint: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions",
-      models: ["@cf/meta/llama-3.1-8b-instruct-fp8", "@cf/openai/gpt-oss-20b", "@cf/moondream3.1-9B-A2B", "@cf/llava-hf/llava-1.5-7b-hf"],
-      authHeader: "bearer",
-      disableThinkingKey: null,
-      // gpt-oss 等推理模型用顶层 reasoning_effort 控制强度（low/medium/high）。
-      // 本插件下拉无 medium，故把 max 归到 high；非推理模型会拒绝该参数，选「不干预」即可。
-      thinkingFields: {
-        low: { reasoning_effort: "low" },
-        high: { reasoning_effort: "high" },
-        max: { reasoning_effort: "high" }
-      },
-      jsonModeKey: null,
-      stream: false
-    },
   ];
 
   function normalizeThinkingValues(value) {

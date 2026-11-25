@@ -113,9 +113,7 @@
 
 ## 支持的服务平台
 
-内置预设包含：`自定义`、`opencode.ai`、`OpenAI 官方`、`Azure OpenAI`、`DeepSeek`、`硅基流动`、`Kimi / Moonshot`、`通义千问 / DashScope`、`智谱 GLM`、`火山方舟（Chat）`、`Cloudflare Workers AI`。
-
-Cloudflare Workers AI 使用说明：端点是 `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1/chat/completions`，请把 `{account_id}` 替换为自己的 Cloudflare 账户 ID；API Key 填具备 `Workers AI - Read` 权限的 Cloudflare API Token；模型选支持图片输入的视觉模型（预设推荐了 `@cf/meta/llama-3.1-8b-instruct-fp8`、`@cf/moondream3.1-9B-A2B` 等）。该平台默认不注入 `response_format` 字段以提升兼容性。注意：该平台没有 `/models` 在线端点，点「获取模型列表」会自动列出预设推荐的模型；思考强度仅对 `gpt-oss` 推理模型生效（发送 `reasoning_effort: "low"|"high"`），其他模型请选「不干预」。
+内置预设包含：`自定义`、`opencode.ai`、`OpenAI 官方`、`Azure OpenAI`、`DeepSeek`、`硅基流动`、`Kimi / Moonshot`、`通义千问 / DashScope`、`智谱 GLM`、`火山方舟（Chat）`。
 
 硅基流动使用说明：`enable_thinking` 只接受布尔值，所以「关闭」模式发送 `enable_thinking: false`；`low` / `high` / `max` 强度改用顶层 `reasoning_effort`（按官方文档 `low`/`medium` 由服务端映射为 `high`，`max` 原样发送）。选「不干预」时不发送任何思考参数，但部分模型默认开启思考并生成长链推理，72B 等大模型处理图片时可能超过默认 120 秒超时——可在「高级」里调大请求超时，或换用更小的视觉模型，或选「关闭」模式关闭思考。
 

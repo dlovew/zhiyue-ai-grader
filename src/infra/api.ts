@@ -231,7 +231,7 @@
   }
 
   // 拉取平台可用模型列表；返回模型 ID 字符串数组（数组可带 fallback 标记）。
-  // 部分平台（如 Cloudflare Workers AI）没有 /models 端点，GET 会返回 405，此时回退到预设内置模型。
+  // 部分平台没有 /models 端点，GET 会返回 405，此时回退到预设内置模型。
   async function fetchModels(service, timeoutMs = 15e3) {
     const profile = resolveProfile(service);
     const url = modelsEndpoint(profile.endpoint);
