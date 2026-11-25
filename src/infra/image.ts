@@ -97,7 +97,8 @@
   // 切成等宽小块后按网格重排成接近方形的版面，tile 数可降到 1/3 左右。
   function stripLayout(width, height) {
     const ratio = height > 0 ? width / height : 0;
-    if (ratio <= 2.4 || height < 160) return null;
+    // 阈值取 3.2：常见的"两个空并排"宽条约 2.5～3，绝不能切，否则会打乱空的对应关系。
+    if (ratio <= 3.2 || height < 200) return null;
     const rows = Math.max(1, Math.round(Math.sqrt(ratio)));
     const cols = Math.max(1, Math.ceil(ratio / rows));
     const pieces = rows * cols;
@@ -129,8 +130,8 @@
       maxEdge: Math.min(2400, Math.max(600, positive(image.maxEdge, 1600))),
       quality: Math.min(1, Math.max(0.5, positive(image.quality, 0.82))),
       detail: ["high", "auto", "low"].includes(image.detail) ? image.detail : "high",
-      cropToAnswer: image.cropToAnswer !== false,
-      splitWideStrip: image.splitWideStrip !== false,
+      cropToAnswer: image.cropToAnswer === true,
+      splitWideStrip: image.splitWideStrip === true,
       mergeImages: image.mergeImages === true
     };
     const subject = String(config?.context?.subject || "").trim();
@@ -200,7 +201,9 @@
       width: output.width,
       height: output.height,
       blankRatio: ratio,
-      lowRes: Math.min(output.width, output.height) < 400,
+      // 只有"原图本来够清晰、被我们缩到看不清"才算问题；
+      // 宽扁作答条本身短边就小，属正常，不再误报。
+      lowRes: Math.min(output.width, output.height) < 320 && Math.min(sourceWidth, sourceHeight) >= 320,
       restructured: Boolean(layout)
     };
   }

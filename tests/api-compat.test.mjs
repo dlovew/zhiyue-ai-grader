@@ -57,7 +57,7 @@ function loadCore() {
   ];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, parseGrade, buildGradingPrompt, PROMPT_VERSION, resolveImageOptions, SUBJECT_IMAGE_PROFILES, DEFAULT_CONFIG, STORAGE_KEYS };`, context);
+  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, parseGrade, buildGradingPrompt, PROMPT_VERSION, resolveImageOptions, SUBJECT_IMAGE_PROFILES, loadConfig, DEFAULT_CONFIG, STORAGE_KEYS };`, context);
   return { core: context.__core, store };
 }
 
@@ -457,6 +457,17 @@ test('紧凑输出协议按索引映射小题名称与满分', () => {
   assert.equal(grade.subScores[1].score, 2);
 });
 
+test('小题索引按 1 开始编号时自动左移，避免错位', () => {
+  const { core } = loadCore();
+  const subs = [{ label: '第1空', maxScore: 2 }, { label: '第2空', maxScore: 3 }];
+  const grade = core.parseGrade('{"s":"l","sc":4,"c":0.9,"r":"ok","sub":[{"i":1,"sc":2},{"i":2,"sc":2,"r":"依据不符"}]}', 5, subs);
+  assert.equal(grade.subScores.length, 2);
+  assert.equal(grade.subScores[0].label, '第1空');
+  assert.equal(grade.subScores[0].maxScore, 2);
+  assert.equal(grade.subScores[1].label, '第2空');
+  assert.equal(grade.subScores[1].reason, '依据不符');
+});
+
 test('旧版 JSON 协议仍然可以解析', () => {
   const { core } = loadCore();
   const grade = core.parseGrade(
@@ -486,10 +497,12 @@ test('学科图片策略优先于手动尺寸，未选学科时保持手动值',
   const manual = core.resolveImageOptions({ image: { maxEdge: 1600, detail: 'high' }, context: { subject: '' } });
   assert.equal(manual.maxEdge, 1600);
   assert.equal(manual.subject, undefined);
-  assert.equal(manual.cropToAnswer, true);
-  assert.equal(manual.splitWideStrip, true);
-  // 多图合并会牺牲单页分辨率，默认关闭
+  // 裁切、切块重排、多图合并都会改变版面或分辨率，默认关闭
+  assert.equal(manual.cropToAnswer, false);
+  assert.equal(manual.splitWideStrip, false);
   assert.equal(manual.mergeImages, false);
+  assert.equal(core.resolveImageOptions({ image: { cropToAnswer: true, splitWideStrip: true } }).cropToAnswer, true);
+  assert.equal(core.resolveImageOptions({ image: { cropToAnswer: true, splitWideStrip: true } }).splitWideStrip, true);
   assert.equal(core.resolveImageOptions({ image: { mergeImages: true } }).mergeImages, true);
 
   const math = core.resolveImageOptions({ image: { maxEdge: 1024, detail: 'low' }, context: { subject: '数学' } });
@@ -505,6 +518,22 @@ test('学科图片策略优先于手动尺寸，未选学科时保持手动值',
   assert.equal(disabled.subject, undefined);
 
   assert.equal(Object.keys(core.SUBJECT_IMAGE_PROFILES).length, 9);
+});
+
+test('旧配置里被打开的裁切/重排开关在加载时归位', () => {
+  const { core, store } = loadCore();
+  store.set('zygr.config.v1', JSON.stringify({
+    version: 1,
+    image: { cropToAnswer: true, splitWideStrip: true, mergeImages: true }
+  }));
+  const config = core.loadConfig();
+  assert.equal(config.image.policyVersion, 2);
+  assert.equal(config.image.cropToAnswer, false);
+  assert.equal(config.image.splitWideStrip, false);
+  assert.equal(config.image.mergeImages, false);
+  // 其他字段保持默认，不受迁移影响
+  assert.equal(config.image.maxEdge, 1600);
+  assert.equal(config.pipeline.thinkingMode, 'off');
 });
 
 test('缓存批量写入并剔除模型原文', () => {

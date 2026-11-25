@@ -341,12 +341,15 @@
       subject: ""
     },
     image: {
+      // 图片策略版本：2 起裁切/切块重排/多图合并默认全关，旧配置在加载时一次性归位。
+      policyVersion: 2,
       profile: "balanced",
       maxEdge: 1600,
       quality: 0.82,
       detail: "high",
-      cropToAnswer: true,
-      splitWideStrip: true,
+      // 裁切与切块重排都属于"可能改变版面"的操作，默认关闭，由用户按题型开启。
+      cropToAnswer: false,
+      splitWideStrip: false,
       // 合并会牺牲单页有效分辨率，默认关闭，由用户在「高级」里按需开启。
       mergeImages: false,
       autoBySubject: true
@@ -392,6 +395,15 @@
     const raw = readJson(STORAGE_KEYS.config, {});
     if (!isRecord(raw) || raw.version !== 1) return clone(DEFAULT_CONFIG);
     const config = merge(DEFAULT_CONFIG, raw);
+    // 旧版本曾把"裁切/切块重排"默认打开，导致并排小空被打散、宽条被误报分辨率低。
+    // 策略版本不是 2 的配置一次性把这三项归位到安全默认值。
+    const rawImage = isRecord(raw.image) ? raw.image : {};
+    if (rawImage.policyVersion !== 2 && isRecord(config.image)) {
+      config.image.policyVersion = 2;
+      config.image.cropToAnswer = false;
+      config.image.splitWideStrip = false;
+      config.image.mergeImages = false;
+    }
     const oldPipeline = isRecord(raw.pipeline) ? raw.pipeline : {};
     if (Object.prototype.hasOwnProperty.call(oldPipeline, "disableThinking") && !Object.prototype.hasOwnProperty.call(oldPipeline, "thinkingMode")) {
       config.pipeline.thinkingMode = normalizeThinkingMode(oldPipeline.disableThinking);
@@ -1430,7 +1442,8 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
   // 切成等宽小块后按网格重排成接近方形的版面，tile 数可降到 1/3 左右。
   function stripLayout(width, height) {
     const ratio = height > 0 ? width / height : 0;
-    if (ratio <= 2.4 || height < 160) return null;
+    // 阈值取 3.2：常见的"两个空并排"宽条约 2.5～3，绝不能切，否则会打乱空的对应关系。
+    if (ratio <= 3.2 || height < 200) return null;
     const rows = Math.max(1, Math.round(Math.sqrt(ratio)));
     const cols = Math.max(1, Math.ceil(ratio / rows));
     const pieces = rows * cols;
@@ -1462,8 +1475,8 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       maxEdge: Math.min(2400, Math.max(600, positive(image.maxEdge, 1600))),
       quality: Math.min(1, Math.max(0.5, positive(image.quality, 0.82))),
       detail: ["high", "auto", "low"].includes(image.detail) ? image.detail : "high",
-      cropToAnswer: image.cropToAnswer !== false,
-      splitWideStrip: image.splitWideStrip !== false,
+      cropToAnswer: image.cropToAnswer === true,
+      splitWideStrip: image.splitWideStrip === true,
       mergeImages: image.mergeImages === true
     };
     const subject = String(config?.context?.subject || "").trim();
@@ -1533,7 +1546,9 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       width: output.width,
       height: output.height,
       blankRatio: ratio,
-      lowRes: Math.min(output.width, output.height) < 400,
+      // 只有"原图本来够清晰、被我们缩到看不清"才算问题；
+      // 宽扁作答条本身短边就小，属正常，不再误报。
+      lowRes: Math.min(output.width, output.height) < 320 && Math.min(sourceWidth, sourceHeight) >= 320,
       restructured: Boolean(layout)
     };
   }
@@ -1604,7 +1619,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
   }
 
 // src/core/prompt.ts
-var PROMPT_VERSION = "zygr-prompt-v4-vlm";
+var PROMPT_VERSION = "zygr-prompt-v5-vlm";
 function clip(text, max) {
   const value = String(text ?? "").trim();
   if (!value) return "\uFF08\u65E0\uFF09";
@@ -1626,9 +1641,9 @@ function buildGradingPrompt(question, context, options) {
   const sections = [
     "\u4F60\u662F\u9605\u5377\u52A9\u624B\u3002\u53EA\u4F9D\u636E\u7ED9\u5B9A\u5185\u5BB9\u4E0E\u968F\u9644\u56FE\u7247\u8BC4\u5206\uFF0C\u4E0D\u8981\u81C6\u6D4B\u3002",
     "\u4E25\u683C\u8F93\u51FA\u4E00\u4E2A JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981 Markdown \u4EE3\u7801\u5757\uFF0C\u4E0D\u8981\u989D\u5916\u89E3\u91CA\u3002\u4E0D\u8981\u56DE\u5199\u9898\u76EE\u3001\u53C2\u8003\u7B54\u6848\u3001\u5C0F\u9898\u540D\u79F0\u4E0E\u6EE1\u5206\u3002",
-    "\u5B57\u6BB5\uFF08\u52A1\u5FC5\u7CBE\u7B80\uFF09\uFF1As\uFF08l \u53EF\u8FA8\u8BA4 / p \u90E8\u5206\u4E0D\u6E05 / i \u65E0\u6CD5\u8FA8\u8BA4 / b \u672A\u4F5C\u7B54\uFF09\u3001sc\uFF08\u5F97\u5206\u6570\u5B57\uFF09\u3001c\uFF08\u7F6E\u4FE1\u5EA6 0-1\uFF0C\u4E00\u4F4D\u5C0F\u6570\uFF09\u3001r\uFF08\u603B\u8BC4\u8BED\uFF0C\u4E0D\u8D85\u8FC7 30 \u5B57\uFF09\u3001sub\uFF08\u6570\u7EC4\uFF1Ai \u5C0F\u9898\u5E8F\u53F7\u3001sc \u5F97\u5206\u3001r \u4EC5\u5728\u6263\u5206\u65F6\u7ED9\u4E0D\u8D85\u8FC7 20 \u5B57\u7684\u6263\u5206\u539F\u56E0\uFF09\u3002",
+    "\u5B57\u6BB5\uFF08\u52A1\u5FC5\u7CBE\u7B80\uFF09\uFF1As\uFF08l \u53EF\u8FA8\u8BA4 / p \u90E8\u5206\u4E0D\u6E05 / i \u65E0\u6CD5\u8FA8\u8BA4 / b \u672A\u4F5C\u7B54\uFF09\u3001sc\uFF08\u5F97\u5206\u6570\u5B57\uFF09\u3001c\uFF08\u7F6E\u4FE1\u5EA6 0-1\uFF0C\u4E00\u4F4D\u5C0F\u6570\uFF09\u3001r\uFF08\u603B\u8BC4\u8BED\uFF0C\u4E0D\u8D85\u8FC7 30 \u5B57\uFF09\u3001sub\uFF08\u6570\u7EC4\uFF1Ai \u5C0F\u9898\u5E8F\u53F7\u4ECE 0 \u5F00\u59CB\u3001sc \u5F97\u5206\u3001r \u4EC5\u5728\u6263\u5206\u65F6\u7ED9\u4E0D\u8D85\u8FC7 20 \u5B57\u7684\u6263\u5206\u539F\u56E0\uFF09\u3002",
     "\u89C4\u5219\uFF1A\u672A\u4F5C\u7B54\u4E0D\u5F97\u7ED9\u6B63\u5206\uFF1B\u5212\u53BB\u7684\u5185\u5BB9\u4E0D\u8BA1\u5206\uFF1B\u7B49\u4EF7\u89E3\u6CD5\u5E94\u7ED9\u5206\uFF1B\u5206\u6570\u4E0D\u5F97\u8D85\u8FC7\u6EE1\u5206\uFF1B\u65E0\u6CD5\u8FA8\u8BA4\u65F6\u7528 i/p \u5E76\u8BF4\u660E\uFF1B\u6EE1\u5206\u5C0F\u9898\u4E0D\u5199\u6263\u5206\u539F\u56E0\u3002",
-    question.subQuestions.length > 0 ? "\u5FC5\u987B\u9010\u5C0F\u9898\u8FD4\u56DE sub\uFF1Bi \u4E0E\u8F93\u5165\u5C0F\u9898\u5E8F\u53F7\u4E00\u81F4\uFF0C\u4E0D\u8DF3\u53F7\uFF1B\u603B\u5206 sc \u7B49\u4E8E\u5404\u5C0F\u9898 sc \u4E4B\u548C\u3002" : "sub \u8FD4\u56DE\u7A7A\u6570\u7EC4\u5373\u53EF\u3002",
+    question.subQuestions.length > 0 ? "\u5FC5\u987B\u9010\u5C0F\u9898\u8FD4\u56DE sub\uFF0Ci \u4ECE 0 \u5F00\u59CB\u3001\u4E0E\u3010\u5C0F\u9898\u3011\u5217\u8868\u7F16\u53F7\u4E00\u4E00\u5BF9\u5E94\uFF0C\u4E0D\u8DF3\u53F7\u3001\u4E0D\u5408\u5E76\u3001\u4E0D\u91CD\u6392\uFF1B\u56FE\u4E2D\u5E76\u6392\u7684\u591A\u4E2A\u7B54\u9898\u533A\u6309\u4ECE\u5DE6\u5230\u53F3\u3001\u4ECE\u4E0A\u5230\u4E0B\u4E0E\u5C0F\u9898\u987A\u5E8F\u5BF9\u5E94\uFF1B\u603B\u5206 sc \u7B49\u4E8E\u5404\u5C0F\u9898 sc \u4E4B\u548C\u3002" : "sub \u8FD4\u56DE\u7A7A\u6570\u7EC4\u5373\u53EF\u3002",
     question.subQuestions.length > 0 ? "\u6EE1\u5206\u5C0F\u9898\u7684 sub.r \u7701\u7565\uFF1B\u6263\u5206\u5C0F\u9898\u7684 sub.r \u53EA\u5199\u5173\u952E\u6263\u5206\u70B9\u3002" : "",
     "===== \u8F93\u5165 =====",
     `\u3010\u9898\u76EE\u3011
@@ -1819,11 +1834,17 @@ ${subQuestionLines(question)}`,
   // 小题名称与满分由输入给出，模型不再回写，避免每份卷子白花几十个输出 token。
   function parseSubScores(value, maxScore, subQuestions = []) {
     if (!Array.isArray(value)) return [];
+    // 模型偶尔按 1 开始编号：仅当没有任何 0 号、且最大号不超过小题数时，整体左移一位。
+    const rawIndexes = value
+      .map((item) => Number(asRecord(item)?.i ?? asRecord(item)?.index))
+      .filter((index) => Number.isInteger(index) && index >= 0);
+    const shifted = rawIndexes.length > 0 && !rawIndexes.includes(0) && Math.max(...rawIndexes) <= subQuestions.length;
     return value.flatMap((item) => {
       const record = asRecord(item);
       if (!record) return [];
-      const index = Number(record.i ?? record.index);
-      const base = Number.isInteger(index) && index >= 0 && index < subQuestions.length ? subQuestions[index] : null;
+      const rawIndex = Number(record.i ?? record.index);
+      const index = Number.isInteger(rawIndex) && rawIndex >= 0 ? (shifted ? rawIndex - 1 : rawIndex) : -1;
+      const base = index >= 0 && index < subQuestions.length ? subQuestions[index] : null;
       const label = String(record.label ?? base?.label ?? "").trim();
       if (!label) return [];
       const itemMax = clamp(Number(record.maxScore ?? base?.maxScore ?? 0), maxScore);
@@ -2703,11 +2724,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
             ${field("\u7F13\u5B58\u6709\u6548\u671F\uFF08\u5929\uFF09", "cacheTtlDays", "number")}
             ${field("\u7F13\u5B58\u6761\u6570\u4E0A\u9650", "cacheMaxEntries", "number")}
           </div>
-          <label class="zygr-row"><input type="checkbox" data-field="image.cropToAnswer"> \u81EA\u52A8\u88C1\u5207\u7A7A\u767D\u8FB9\u8DDD\uFF08\u5EFA\u8BAE\u5F00\u542F\uFF0C\u5DF2\u9884\u7559 6% \u8FB9\u8DDD\uFF09</label>
-          <label class="zygr-row"><input type="checkbox" data-field="image.splitWideStrip"> \u5BBD\u6241\u4F5C\u7B54\u6761\u5207\u5757\u91CD\u6392\uFF08\u964D\u4F4E\u56FE\u7247 token\uFF09</label>
+          <label class="zygr-row"><input type="checkbox" data-field="image.cropToAnswer"> \u81EA\u52A8\u88C1\u5207\u7A7A\u767D\u8FB9\u8DDD\uFF08\u9ED8\u8BA4\u5173\u95ED\uFF1B\u5F00\u542F\u540E\u4FDD\u7559 6% \u8FB9\u8DDD\uFF09</label>
+          <label class="zygr-row"><input type="checkbox" data-field="image.splitWideStrip"> \u5BBD\u6241\u4F5C\u7B54\u6761\u5207\u5757\u91CD\u6392\uFF08\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4EC5\u5F53\u5E76\u6392\u5C0F\u7A7A\u4F1A\u88AB\u6253\u4E71\uFF0C\u52FF\u5F00\uFF09</label>
           <label class="zygr-row"><input type="checkbox" data-field="image.autoBySubject"> \u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF08\u5DF2\u9009\u5B66\u79D1\u65F6\u751F\u6548\uFF09</label>
           <label class="zygr-row"><input type="checkbox" data-field="image.mergeImages"> \u540C\u9898\u591A\u56FE\u5408\u5E76\u6210\u4E00\u5F20\uFF08\u7701\u56FA\u5B9A\u5F00\u9500\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4F1A\u7565\u964D\u5355\u9875\u6E05\u6670\u5EA6\uFF09</label>
-          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\uFF1B\u591A\u56FE\u5408\u5E76\u4EC5\u5728\u4E24\u5F20\u56FE\u90FD\u4E0D\u5C0F\u4E8E 1100px \u4E14\u5408\u5E76\u540E\u4E0D\u8FC7\u9AD8\u65F6\u751F\u6548\uFF0C\u5426\u5219\u81EA\u52A8\u653E\u5F03\u3002</p>
+          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\uFF1B\u591A\u56FE\u5408\u5E76\u4EC5\u5728\u4E24\u5F20\u56FE\u90FD\u4E0D\u5C0F\u4E8E 1100px \u4E14\u5408\u5E76\u540E\u4E0D\u8FC7\u9AD8\u65F6\u751F\u6548\uFF0C\u5426\u5219\u81EA\u52A8\u653E\u5F03\u3002\u88C1\u5207\u4E0E\u5207\u5757\u91CD\u6392\u4F1A\u6539\u53D8\u7248\u9762\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u5E76\u6392\u5C0F\u7A7A\u9898\u578B\u4E0D\u5EFA\u8BAE\u5F00\u542F\u3002</p>
           <h3>\u9650\u901F\u4E0E\u8D85\u65F6</h3>
           <div class="zygr-grid">
             ${field("\u5E76\u53D1\u4E0A\u9650", "pipeline.maxConcurrent", "number")}

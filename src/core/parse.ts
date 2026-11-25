@@ -43,11 +43,17 @@
   // 小题名称与满分由输入给出，模型不再回写，避免每份卷子白花几十个输出 token。
   function parseSubScores(value, maxScore, subQuestions = []) {
     if (!Array.isArray(value)) return [];
+    // 模型偶尔按 1 开始编号：仅当没有任何 0 号、且最大号不超过小题数时，整体左移一位。
+    const rawIndexes = value
+      .map((item) => Number(asRecord(item)?.i ?? asRecord(item)?.index))
+      .filter((index) => Number.isInteger(index) && index >= 0);
+    const shifted = rawIndexes.length > 0 && !rawIndexes.includes(0) && Math.max(...rawIndexes) <= subQuestions.length;
     return value.flatMap((item) => {
       const record = asRecord(item);
       if (!record) return [];
-      const index = Number(record.i ?? record.index);
-      const base = Number.isInteger(index) && index >= 0 && index < subQuestions.length ? subQuestions[index] : null;
+      const rawIndex = Number(record.i ?? record.index);
+      const index = Number.isInteger(rawIndex) && rawIndex >= 0 ? (shifted ? rawIndex - 1 : rawIndex) : -1;
+      const base = index >= 0 && index < subQuestions.length ? subQuestions[index] : null;
       const label = String(record.label ?? base?.label ?? "").trim();
       if (!label) return [];
       const itemMax = clamp(Number(record.maxScore ?? base?.maxScore ?? 0), maxScore);
