@@ -772,14 +772,15 @@ test('界面使用思考模式下拉菜单而非关闭勾选框', () => {
 test('思考档位随平台变化：DeepSeek / 商汤 / 智谱 各不同', () => {
   const { api } = loadModules();
   assert.equal(Array.from(api.resolveProfile({ platform: 'deepseek' }).thinkingLevels).join(','), 'off,auto,low,high,max');
+  // 商汤官方只给了 minimal 至 max 六档，没有关闭字段
   assert.equal(
     Array.from(api.resolveProfile({ platform: 'sensenova' }).thinkingLevels).join(','),
-    'off,auto,minimal,low,medium,high,xhigh,max'
+    'auto,minimal,low,medium,high,xhigh,max'
   );
   // 智谱 glm-5 类模型无法关闭思考，最低 low
   assert.equal(Array.from(api.resolveProfile({ platform: 'zhipu' }).thinkingLevels).join(','), 'auto,low,high,max');
   assert.equal(Array.from(api.resolveProfile({ platform: 'custom' }).thinkingLevels).join(','), 'off,auto');
-  assert.equal(api.getPlatformPreset('sensenova').endpoint, 'https://api.sensenova.cn/compatible-mode/v1/chat/completions');
+  assert.equal(api.getPlatformPreset('sensenova').endpoint, 'https://token.sensenova.cn/v1/chat/completions');
 });
 
 test('不支持的思考档位收敛到该平台首项', () => {
@@ -792,7 +793,7 @@ test('不支持的思考档位收敛到该平台首项', () => {
 
 test('商汤日日新的强度参数按档位传递', async () => {
   const { api, calls } = loadModules([{ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }]);
-  const service = { platform: 'sensenova', endpoint: 'https://api.sensenova.cn/compatible-mode/v1/chat/completions', model: 'm', apiKey: 'k', thinkingMode: 'xhigh' };
+  const service = { platform: 'sensenova', endpoint: 'https://token.sensenova.cn/v1/chat/completions', model: 'sensenova-6.8-flash', apiKey: 'k', thinkingMode: 'xhigh' };
   await api.chatCompletion(service, [{ role: 'user', content: 'hi' }], {});
   assert.equal(JSON.parse(calls[0].data).reasoning_effort, 'xhigh');
 });
@@ -810,7 +811,7 @@ test('商汤日日新用 token.sensenova.cn 拉模型列表，视觉模型排前
   }]);
   const models = await api.fetchModels({
     platform: 'sensenova',
-    endpoint: 'https://api.sensenova.cn/compatible-mode/v1/chat/completions',
+    endpoint: 'https://token.sensenova.cn/v1/chat/completions',
     apiKey: 'k'
   });
   assert.equal(calls[0].url, 'https://token.sensenova.cn/v1/models');

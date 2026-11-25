@@ -65,15 +65,16 @@
     {
       id: "sensenova",
       label: "商汤日日新（SenseNova）",
-      endpoint: "https://api.sensenova.cn/compatible-mode/v1/chat/completions",
-      models: [],
+      // 官方示例：POST https://token.sensenova.cn/v1/chat/completions，Bearer 鉴权。
+      endpoint: "https://token.sensenova.cn/v1/chat/completions",
+      models: ["sensenova-6.8-flash"],
       authHeader: "bearer",
-      // 模型列表与推理不在同一主机：官方文档给出 GET https://token.sensenova.cn/v1/models。
+      // 模型列表与推理同域：GET https://token.sensenova.cn/v1/models。
       modelsEndpoint: "https://token.sensenova.cn/v1/models",
-      // 日日新兼容模式：强度档位为 minimal / low / medium / high / xhigh / max。
-      thinkingLevels: ["off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"],
+      // 官方文档只给出 minimal / low / medium / high / xhigh / max 六档，
+      // 没有"关闭"字段，因此不提供 off：不选档位（模型默认）即为最省。
+      thinkingLevels: ["auto", "minimal", "low", "medium", "high", "xhigh", "max"],
       thinkingFields: {
-        off: { thinking: { type: "disabled" } },
         minimal: { reasoning_effort: "minimal" },
         low: { reasoning_effort: "low" },
         medium: { reasoning_effort: "medium" },
