@@ -114,6 +114,7 @@
     removeKey(STORAGE_KEYS.history);
     removeKey(STORAGE_KEYS.cache);
     removeKey(STORAGE_KEYS.stats);
+    removeKey(STORAGE_KEYS.thinkingForced);
     removeKey(PRESET_STORAGE_KEY);
     removeKey(PLATFORM_KEYS_KEY);
     removeKey(PLATFORM_MODELS_KEY);

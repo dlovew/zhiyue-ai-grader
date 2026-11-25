@@ -294,7 +294,8 @@
     config: "zygr.config.v1",
     history: "zygr.history.v1",
     cache: "zygr.cache.v1",
-    stats: "zygr.stats.v1"
+    stats: "zygr.stats.v1",
+    thinkingForced: "zygr.thinking-forced.v1"
   };
   function readJson(key, fallback) {
     try {
@@ -439,6 +440,7 @@
     removeKey(STORAGE_KEYS.history);
     removeKey(STORAGE_KEYS.cache);
     removeKey(STORAGE_KEYS.stats);
+    removeKey(STORAGE_KEYS.thinkingForced);
     removeKey(PRESET_STORAGE_KEY);
     removeKey(PLATFORM_KEYS_KEY);
     removeKey(PLATFORM_MODELS_KEY);
@@ -761,9 +763,10 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       authHeader: "bearer",
       // 模型列表与推理同域：GET https://token.sensenova.cn/v1/models。
       modelsEndpoint: "https://token.sensenova.cn/v1/models",
-      // 官方文档只给出 minimal / low / medium / high / xhigh / max 六档，没有关闭字段；
-      // 因此「关闭」不注入任何参数（等同模型默认），强度映射保留在 thinkingFields 里。
+      // 官方文档：thinking.type 控制开关（默认 enabled），reasoning_effort 取 low~max、默认 high，
+      // 且 reasoning_effort 设为 none 即可关闭思考。这里统一用单一字段关闭，少一个参数少一分风险。
       thinkingFields: {
+        off: { reasoning_effort: "none" },
         minimal: { reasoning_effort: "minimal" },
         low: { reasoning_effort: "low" },
         medium: { reasoning_effort: "medium" },
@@ -862,6 +865,29 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
   function clampThinkingLevel(id, value) {
     const mode = String(value || "").trim().toLowerCase();
     return THINKING_LEVELS.indexOf(mode) >= 0 ? mode : "auto";
+  }
+
+  // 能否关闭思考取决于模型，而不是平台：这里维护"强制思考"的已知名单，
+  // 同时把运行时踩到的 400 结果记下来，避免每次批改都先失败一次。
+  var FORCED_THINKING_PATTERNS = [/^glm-5\.3(?:$|[-_.])/i];
+  function loadForcedThinking() {
+    const raw = readJson(STORAGE_KEYS.thinkingForced, {});
+    return isRecord(raw) ? raw : {};
+  }
+  function markForcedThinking(platformId, model) {
+    const name = String(model || "").trim();
+    if (!name) return false;
+    const map = loadForcedThinking();
+    const key = `${String(platformId || "custom")}|${name}`;
+    if (map[key]) return true;
+    map[key] = Date.now();
+    return writeJson(STORAGE_KEYS.thinkingForced, map);
+  }
+  function isForcedThinkingModel(platformId, model) {
+    const name = String(model || "").trim();
+    if (!name) return false;
+    if (FORCED_THINKING_PATTERNS.some((pattern) => pattern.test(name))) return true;
+    return Boolean(loadForcedThinking()[`${String(platformId || "custom")}|${name}`]);
   }
 
   function normalizeThinkingValues(value) {
@@ -1319,7 +1345,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
         throw new Error("\u63A5\u53E3\u54CD\u5E94\u7F3A\u5C11\u6587\u672C\u5185\u5BB9");
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
-        if (lastError.status === 400) {
+        if (lastError.status === 400 || lastError.status === 422) {
           let relaxed = false;
           if (jsonInjectedKey) {
             delete payload[jsonInjectedKey];
@@ -1328,6 +1354,13 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
           }
           // 仅「关闭」模式可降级重试；low/high/max 是用户明确选择，降级会静默改变意图。
           if (thinkingKeys.length && thinkingMode === "off") {
+            // 仅当报错像是"该模型不支持关闭思考"时才记下模型能力，
+            // 避免把其它 400（如参数拼写）误记成强制思考。
+            if (/thinking|reasoning|思考|1210/i.test(lastError.message || "")) {
+              try {
+                options.onThinkingForced?.(profile.model);
+              } catch { /* 记忆失败不影响重试 */ }
+            }
             for (const key of thinkingKeys) delete payload[key];
             thinkingKeys.length = 0;
             relaxed = true;
@@ -1414,7 +1447,10 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       messages: [{ role: "user", content: "\u7B3C\u5B50\u91CC\u6709\u9E21\u548C\u5154\u5171 35 \u4E2A\u5934\u300194 \u53EA\u811A\u3002\u8BF7\u7ED9\u51FA\u63A8\u7406\u8FC7\u7A0B\u548C\u6700\u7EC8\u7B54\u6848\uFF1A\u9E21\u548C\u5154\u5404\u591A\u5C11\u53EA\uFF1F" }],
       stream: false
     };
-    const thinkingMode = normalizeThinkingMode(service.thinkingMode !== void 0 ? service.thinkingMode : service.disableThinking);
+    const wantedMode = normalizeThinkingMode(service.thinkingMode !== void 0 ? service.thinkingMode : service.disableThinking);
+    // 强制思考的模型（如 glm-5.3 系列）直接按默认走，避免关闭参数触发 1210/400。
+    const forcedByModel = wantedMode === "off" && isForcedThinkingModel(service.platform || profile.id, profile.model);
+    const thinkingMode = forcedByModel ? "auto" : wantedMode;
     const thinkingKeys = thinkingControl(payload, profile, thinkingMode);
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
@@ -1431,7 +1467,9 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     let ok;
     if (thinkingMode === "auto") {
       ok = true;
-      verdict = "未干预思考模式，将使用模型默认设置";
+      verdict = forcedByModel
+        ? "该模型强制思考、不支持关闭，已按模型默认运行"
+        : "未干预思考模式，将使用模型默认设置";
     } else if (thinkingMode === "off") {
       ok = !hasThinking;
       if (!injected) {
@@ -2057,7 +2095,7 @@ ${subQuestionLines(question)}`,
 function configured(service) {
   return Boolean(service.endpoint.trim() && service.model.trim());
 }
-async function runGrade(service, question, maxScore, prompt, images, config, rateLimiter, imageOptions) {
+async function runGrade(service, question, maxScore, prompt, images, config, rateLimiter, imageOptions, forcedByModel) {
   const detail = imageOptions?.detail || "high";
   const content = [
     { type: "text", text: prompt },
@@ -2073,6 +2111,7 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
   const baseTokens = OUTPUT_MODES[mode]?.maxTokens || 800;
   const maxTokens = thinking === "off" ? baseTokens : Math.round(baseTokens * 1.8);
   let usage = null;
+  let forcedDetected = false;
   const raw = await chatCompletion(service, messages, {
     rateLimiter,
     timeoutMs: config.pipeline.timeoutMs,
@@ -2081,19 +2120,25 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
     estimatedTokens: estimateTokens(prompt, images.length),
     onUsage: (value) => {
       if (value) usage = value;
+    },
+    // 运行期才发现"该模型不支持关闭思考"：记住它，下次不再浪费一次失败请求。
+    onThinkingForced: () => {
+      forcedDetected = true;
+      markForcedThinking(service.platform, service.model);
     }
   });
   if (!raw.trim()) throw new Error("\u6A21\u578B\u8FD4\u56DE\u4E3A\u7A7A");
   const grade = parseGrade(raw, maxScore, question.subQuestions);
   grade.usage = usage;
   grade.outputMode = mode;
-  return grade;
+  grade.thinkingForced = forcedDetected || Boolean(forcedByModel);
 }
 async function gradeQuestion(options) {
   const { config, question, cache, rateLimiter } = options;
   const wanted = normalizeThinkingMode(config.pipeline.thinkingMode !== void 0 ? config.pipeline.thinkingMode : config.pipeline.disableThinking);
-  // 各平台档位不同：不在该平台列表里的档位收敛到平台首项（默认关闭）。
-  config.pipeline.vlm.thinkingMode = clampThinkingLevel(config.pipeline.vlm.platform, wanted);
+  const forcedByModel = wanted === "off" && isForcedThinkingModel(config.pipeline.vlm.platform, config.pipeline.vlm.model);
+  // 已知强制思考的模型直接按「模型默认」走，省掉一次注定失败的 400 请求。
+  config.pipeline.vlm.thinkingMode = forcedByModel ? "auto" : clampThinkingLevel(config.pipeline.vlm.platform, wanted);
   const startedAt = Date.now();
   const stage = (name, detail) => options.events?.onStage?.(name, detail);
   const reviewReasons = [];
@@ -2138,7 +2183,7 @@ async function gradeQuestion(options) {
     return { ...cached, cacheHit: true, elapsedMs: Date.now() - startedAt, cacheKey, usage: null };
   }
   stage("\u6A21\u578B\u8BC4\u5206", gradeService.model);
-  const grade = await runGrade(gradeService, question, maxScore, prompt, payloadImages, config, rateLimiter, imageOptions);
+  const grade = await runGrade(gradeService, question, maxScore, prompt, payloadImages, config, rateLimiter, imageOptions, forcedByModel);
   if (grade.status === "blank" && grade.score > 0) {
     reviewReasons.push("\u8BC6\u522B\u4E3A\u672A\u4F5C\u7B54\u4F46\u7ED9\u51FA\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u67E5");
   }
@@ -2854,7 +2899,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           <p class="zygr-hint">\u8BC4\u5206\u53EA\u4F7F\u7528\u591A\u6A21\u6001\u89C6\u89C9\u6A21\u578B\uFF1A\u76F4\u63A5\u8BFB\u53D6\u4F5C\u7B54\u56FE\u7247\u5E76\u6309\u8BC4\u5206\u6807\u51C6\u8F93\u51FA JSON\u3002\u6A21\u578B\u5FC5\u987B\u652F\u6301\u56FE\u7247\u8F93\u516E\u3002</p>
           ${select("\u601D\u8003\u6A21\u5F0F", "pipeline.thinkingMode", [["off", thinkingLevelLabel("off")], ["auto", thinkingLevelLabel("auto")]])}
           <div class="zygr-row"><button class="zygr-btn zygr-ghost" data-act="test-thinking">\u6D4B\u8BD5\u5F53\u524D\u601D\u8003\u6A21\u5F0F\u662F\u5426\u751F\u6548</button><span class="zygr-test-status" data-status="thinking"></span></div>
-          <p class="zygr-hint">\u9ED8\u8BA4\u5173\u95ED\u601D\u8003\u3002\u540C\u4E00\u5E73\u53F0\u4E0D\u540C\u6A21\u578B\u652F\u6301\u7684\u5F3A\u5EA6\u6863\u4F4D\u5E76\u4E0D\u4E00\u81F4\uFF0C\u56E0\u6B64\u7EDF\u4E00\u53EA\u7ED9\u4E24\u6863\uFF1A\u300C\u5173\u95ED\u601D\u8003\u300D\u4E0E\u300C\u6A21\u578B\u9ED8\u8BA4\u300D\uFF08\u4E0D\u4F20\u4EFB\u4F55\u5F3A\u5EA6\u53C2\u6570\uFF09\u3002\u90E8\u5206\u6A21\u578B\uFF08\u5982\u667A\u8C31 glm-5 \u7C7B\u3001\u5546\u6C64\u90E8\u5206\u6A21\u578B\uFF09\u4E0D\u652F\u6301\u5173\u95ED\uFF0C\u6B64\u65F6\u9009\u300C\u5173\u95ED\u300D\u4E5F\u4E0D\u4F1A\u62A5\u9519\uFF0C\u5B9E\u9645\u4ECD\u6309\u6A21\u578B\u9ED8\u8BA4\u8FD0\u884C\u3002</p>
+          <p class="zygr-hint">\u9ED8\u8BA4\u5173\u95ED\u601D\u8003\uFF0C\u754C\u9762\u53EA\u7ED9\u4E24\u6863\uFF1A\u300C\u5173\u95ED\u601D\u8003\u300D\u4E0E\u300C\u6A21\u578B\u9ED8\u8BA4\u300D\uFF08\u4E0D\u4F20\u5F3A\u5EA6\u53C2\u6570\uFF09\u3002\u80FD\u4E0D\u80FD\u5173\u95ED\u53D6\u51B3\u4E8E\u6A21\u578B\u800C\u4E0D\u662F\u5E73\u53F0\uFF1A\u5DF2\u77E5 GLM-5.3\u3001GLM-5.3-FLASH \u5F3A\u5236\u601D\u8003\uFF0C\u9009\u5173\u95ED\u4E5F\u4E0D\u4F1A\u62A5\u9519\uFF0C\u4F1A\u76F4\u63A5\u6309\u6A21\u578B\u9ED8\u8BA4\u8FD0\u884C\uFF1B\u5176\u5B83\u6A21\u578B\u5982\u679C\u8FD4\u56DE\u201C\u4E0D\u652F\u6301\u5173\u95ED\u601D\u8003\u201D\uFF0C\u7A0B\u5E8F\u4F1A\u81EA\u52A8\u8BC6\u522B\u5E76\u8BB0\u4F4F\uFF0C\u4E0B\u6B21\u4E0D\u518D\u91CD\u590D\u8BD5\u9519\u3002</p>
 
           ${platformSelect("\u5E73\u53F0\u9884\u8BBE", "pipeline.vlm.platform")}
           <h3>\u591A\u6A21\u6001\u670D\u52A1</h3>
@@ -3355,6 +3400,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     let lastResult = null;
     let lastHistoryId = "";
     let busy = false;
+    const forcedNotified = new Set();
     let autoMode = false;
     let autoStopRequested = false;
     let observer = null;
@@ -3499,6 +3545,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         }, config.historyLimit);
         historyPanel.refresh(loadHistory());
         if (result.needsReview) panel.toast("\u6279\u6539\u5B8C\u6210\uFF0C\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
+        // 强制思考的模型只提示一次，避免每份卷子都弹。
+        if (result.thinkingForced && !forcedNotified.has(config.pipeline.vlm.model)) {
+          forcedNotified.add(config.pipeline.vlm.model);
+          panel.toast(`\u300C${config.pipeline.vlm.model}\u300D\u5F3A\u5236\u601D\u8003\u3001\u65E0\u6CD5\u5173\u95ED\uFF0C\u5DF2\u6309\u6A21\u578B\u9ED8\u8BA4\u8FD0\u884C`);
+        }
         return true;
       } catch (error) {
         panel.showError(error instanceof Error ? error.message : "\u6279\u6539\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u63A5\u53E3\u914D\u7F6E");

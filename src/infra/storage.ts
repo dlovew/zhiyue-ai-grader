@@ -3,7 +3,8 @@
     config: "zygr.config.v1",
     history: "zygr.history.v1",
     cache: "zygr.cache.v1",
-    stats: "zygr.stats.v1"
+    stats: "zygr.stats.v1",
+    thinkingForced: "zygr.thinking-forced.v1"
   };
   function readJson(key, fallback) {
     try {

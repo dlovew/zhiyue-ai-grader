@@ -68,9 +68,10 @@
       authHeader: "bearer",
       // 模型列表与推理同域：GET https://token.sensenova.cn/v1/models。
       modelsEndpoint: "https://token.sensenova.cn/v1/models",
-      // 官方文档只给出 minimal / low / medium / high / xhigh / max 六档，没有关闭字段；
-      // 因此「关闭」不注入任何参数（等同模型默认），强度映射保留在 thinkingFields 里。
+      // 官方文档：thinking.type 控制开关（默认 enabled），reasoning_effort 取 low~max、默认 high，
+      // 且 reasoning_effort 设为 none 即可关闭思考。这里统一用单一字段关闭，少一个参数少一分风险。
       thinkingFields: {
+        off: { reasoning_effort: "none" },
         minimal: { reasoning_effort: "minimal" },
         low: { reasoning_effort: "low" },
         medium: { reasoning_effort: "medium" },
@@ -169,6 +170,29 @@
   function clampThinkingLevel(id, value) {
     const mode = String(value || "").trim().toLowerCase();
     return THINKING_LEVELS.indexOf(mode) >= 0 ? mode : "auto";
+  }
+
+  // 能否关闭思考取决于模型，而不是平台：这里维护"强制思考"的已知名单，
+  // 同时把运行时踩到的 400 结果记下来，避免每次批改都先失败一次。
+  var FORCED_THINKING_PATTERNS = [/^glm-5\.3(?:$|[-_.])/i];
+  function loadForcedThinking() {
+    const raw = readJson(STORAGE_KEYS.thinkingForced, {});
+    return isRecord(raw) ? raw : {};
+  }
+  function markForcedThinking(platformId, model) {
+    const name = String(model || "").trim();
+    if (!name) return false;
+    const map = loadForcedThinking();
+    const key = `${String(platformId || "custom")}|${name}`;
+    if (map[key]) return true;
+    map[key] = Date.now();
+    return writeJson(STORAGE_KEYS.thinkingForced, map);
+  }
+  function isForcedThinkingModel(platformId, model) {
+    const name = String(model || "").trim();
+    if (!name) return false;
+    if (FORCED_THINKING_PATTERNS.some((pattern) => pattern.test(name))) return true;
+    return Boolean(loadForcedThinking()[`${String(platformId || "custom")}|${name}`]);
   }
 
   function normalizeThinkingValues(value) {

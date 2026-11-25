@@ -2,7 +2,7 @@
 function configured(service) {
   return Boolean(service.endpoint.trim() && service.model.trim());
 }
-async function runGrade(service, question, maxScore, prompt, images, config, rateLimiter, imageOptions) {
+async function runGrade(service, question, maxScore, prompt, images, config, rateLimiter, imageOptions, forcedByModel) {
   const detail = imageOptions?.detail || "high";
   const content = [
     { type: "text", text: prompt },
@@ -18,6 +18,7 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
   const baseTokens = OUTPUT_MODES[mode]?.maxTokens || 800;
   const maxTokens = thinking === "off" ? baseTokens : Math.round(baseTokens * 1.8);
   let usage = null;
+  let forcedDetected = false;
   const raw = await chatCompletion(service, messages, {
     rateLimiter,
     timeoutMs: config.pipeline.timeoutMs,
@@ -26,19 +27,25 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
     estimatedTokens: estimateTokens(prompt, images.length),
     onUsage: (value) => {
       if (value) usage = value;
+    },
+    // 运行期才发现"该模型不支持关闭思考"：记住它，下次不再浪费一次失败请求。
+    onThinkingForced: () => {
+      forcedDetected = true;
+      markForcedThinking(service.platform, service.model);
     }
   });
   if (!raw.trim()) throw new Error("\u6A21\u578B\u8FD4\u56DE\u4E3A\u7A7A");
   const grade = parseGrade(raw, maxScore, question.subQuestions);
   grade.usage = usage;
   grade.outputMode = mode;
-  return grade;
+  grade.thinkingForced = forcedDetected || Boolean(forcedByModel);
 }
 async function gradeQuestion(options) {
   const { config, question, cache, rateLimiter } = options;
   const wanted = normalizeThinkingMode(config.pipeline.thinkingMode !== void 0 ? config.pipeline.thinkingMode : config.pipeline.disableThinking);
-  // 各平台档位不同：不在该平台列表里的档位收敛到平台首项（默认关闭）。
-  config.pipeline.vlm.thinkingMode = clampThinkingLevel(config.pipeline.vlm.platform, wanted);
+  const forcedByModel = wanted === "off" && isForcedThinkingModel(config.pipeline.vlm.platform, config.pipeline.vlm.model);
+  // 已知强制思考的模型直接按「模型默认」走，省掉一次注定失败的 400 请求。
+  config.pipeline.vlm.thinkingMode = forcedByModel ? "auto" : clampThinkingLevel(config.pipeline.vlm.platform, wanted);
   const startedAt = Date.now();
   const stage = (name, detail) => options.events?.onStage?.(name, detail);
   const reviewReasons = [];
@@ -83,7 +90,7 @@ async function gradeQuestion(options) {
     return { ...cached, cacheHit: true, elapsedMs: Date.now() - startedAt, cacheKey, usage: null };
   }
   stage("\u6A21\u578B\u8BC4\u5206", gradeService.model);
-  const grade = await runGrade(gradeService, question, maxScore, prompt, payloadImages, config, rateLimiter, imageOptions);
+  const grade = await runGrade(gradeService, question, maxScore, prompt, payloadImages, config, rateLimiter, imageOptions, forcedByModel);
   if (grade.status === "blank" && grade.score > 0) {
     reviewReasons.push("\u8BC6\u522B\u4E3A\u672A\u4F5C\u7B54\u4F46\u7ED9\u51FA\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u67E5");
   }

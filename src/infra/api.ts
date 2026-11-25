@@ -221,7 +221,7 @@
         throw new Error("\u63A5\u53E3\u54CD\u5E94\u7F3A\u5C11\u6587\u672C\u5185\u5BB9");
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
-        if (lastError.status === 400) {
+        if (lastError.status === 400 || lastError.status === 422) {
           let relaxed = false;
           if (jsonInjectedKey) {
             delete payload[jsonInjectedKey];
@@ -230,6 +230,13 @@
           }
           // 仅「关闭」模式可降级重试；low/high/max 是用户明确选择，降级会静默改变意图。
           if (thinkingKeys.length && thinkingMode === "off") {
+            // 仅当报错像是"该模型不支持关闭思考"时才记下模型能力，
+            // 避免把其它 400（如参数拼写）误记成强制思考。
+            if (/thinking|reasoning|思考|1210/i.test(lastError.message || "")) {
+              try {
+                options.onThinkingForced?.(profile.model);
+              } catch { /* 记忆失败不影响重试 */ }
+            }
             for (const key of thinkingKeys) delete payload[key];
             thinkingKeys.length = 0;
             relaxed = true;
@@ -316,7 +323,10 @@
       messages: [{ role: "user", content: "\u7B3C\u5B50\u91CC\u6709\u9E21\u548C\u5154\u5171 35 \u4E2A\u5934\u300194 \u53EA\u811A\u3002\u8BF7\u7ED9\u51FA\u63A8\u7406\u8FC7\u7A0B\u548C\u6700\u7EC8\u7B54\u6848\uFF1A\u9E21\u548C\u5154\u5404\u591A\u5C11\u53EA\uFF1F" }],
       stream: false
     };
-    const thinkingMode = normalizeThinkingMode(service.thinkingMode !== void 0 ? service.thinkingMode : service.disableThinking);
+    const wantedMode = normalizeThinkingMode(service.thinkingMode !== void 0 ? service.thinkingMode : service.disableThinking);
+    // 强制思考的模型（如 glm-5.3 系列）直接按默认走，避免关闭参数触发 1210/400。
+    const forcedByModel = wantedMode === "off" && isForcedThinkingModel(service.platform || profile.id, profile.model);
+    const thinkingMode = forcedByModel ? "auto" : wantedMode;
     const thinkingKeys = thinkingControl(payload, profile, thinkingMode);
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
@@ -333,7 +343,9 @@
     let ok;
     if (thinkingMode === "auto") {
       ok = true;
-      verdict = "未干预思考模式，将使用模型默认设置";
+      verdict = forcedByModel
+        ? "该模型强制思考、不支持关闭，已按模型默认运行"
+        : "未干预思考模式，将使用模型默认设置";
     } else if (thinkingMode === "off") {
       ok = !hasThinking;
       if (!injected) {

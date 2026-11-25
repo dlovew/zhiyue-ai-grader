@@ -22,6 +22,7 @@
     let lastResult = null;
     let lastHistoryId = "";
     let busy = false;
+    const forcedNotified = new Set();
     let autoMode = false;
     let autoStopRequested = false;
     let observer = null;
@@ -166,6 +167,11 @@
         }, config.historyLimit);
         historyPanel.refresh(loadHistory());
         if (result.needsReview) panel.toast("\u6279\u6539\u5B8C\u6210\uFF0C\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
+        // 强制思考的模型只提示一次，避免每份卷子都弹。
+        if (result.thinkingForced && !forcedNotified.has(config.pipeline.vlm.model)) {
+          forcedNotified.add(config.pipeline.vlm.model);
+          panel.toast(`\u300C${config.pipeline.vlm.model}\u300D\u5F3A\u5236\u601D\u8003\u3001\u65E0\u6CD5\u5173\u95ED\uFF0C\u5DF2\u6309\u6A21\u578B\u9ED8\u8BA4\u8FD0\u884C`);
+        }
         return true;
       } catch (error) {
         panel.showError(error instanceof Error ? error.message : "\u6279\u6539\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u63A5\u53E3\u914D\u7F6E");

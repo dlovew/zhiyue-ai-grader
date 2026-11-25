@@ -30,7 +30,7 @@ function loadModules(queue = []) {
   const files = ['src/infra/storage.ts', 'src/config.ts', 'src/infra/platforms.ts', 'src/infra/api.ts'];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG, getPlatformThinkingLevels, thinkingLevelLabel, clampThinkingLevel, THINKING_LEVEL_LABELS };`, context);
+  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG, getPlatformThinkingLevels, thinkingLevelLabel, clampThinkingLevel, THINKING_LEVEL_LABELS, isForcedThinkingModel, markForcedThinking, loadForcedThinking };`, context);
   return { api: context.__exposed, calls, store };
 }
 
@@ -787,23 +787,54 @@ test('历史档位收敛为模型默认，关闭与默认保持原样', () => {
   assert.equal(api.clampThinkingLevel('custom', ''), 'auto');
 });
 
-test('智谱与商汤选「关闭」时不注入未验证字段，避免 400 重试', async () => {
-  const { api, calls } = loadModules([{ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }]);
-  for (const platform of ['zhipu', 'sensenova']) {
+test('智谱「关闭」不注入参数，商汤与 DeepSeek 用 reasoning_effort=none 关闭', () => {
+  const { api } = loadModules();
+  const zhipu = api.resolveProfile({ platform: 'zhipu', endpoint: 'https://example.com/v1/chat/completions', model: 'glm-4v-flash', apiKey: 'k' });
+  const zhipuPayload = { model: 'm', messages: [] };
+  assert.equal(api.thinkingControl(zhipuPayload, zhipu, 'off').length, 0);
+  assert.equal(zhipuPayload.thinking, undefined);
+
+  for (const platform of ['sensenova', 'deepseek']) {
     const profile = api.resolveProfile({ platform, endpoint: 'https://example.com/v1/chat/completions', model: 'm', apiKey: 'k' });
-    assert.equal(profile.disableThinkingKey, null);
     const payload = { model: 'm', messages: [] };
-    const injected = api.thinkingControl(payload, profile, 'off');
-    assert.equal(injected.length, 0, platform);
-    assert.equal(payload.thinking, undefined);
-    assert.equal(payload.reasoning_effort, undefined);
+    assert.equal(api.thinkingControl(payload, profile, 'off').join(','), 'reasoning_effort', platform);
+    assert.equal(payload.reasoning_effort, 'none', platform);
   }
-  // DeepSeek 的关闭有官方字段，应正常注入
-  const deepseek = api.resolveProfile({ platform: 'deepseek', endpoint: 'https://api.deepseek.com/chat/completions', model: 'm', apiKey: 'k' });
-  const payload = { model: 'm', messages: [] };
-  assert.equal(api.thinkingControl(payload, deepseek, 'off').join(','), 'reasoning_effort');
-  assert.equal(payload.reasoning_effort, 'none');
-  assert.equal(calls.length, 0);
+});
+
+test('强制思考按模型判断：GLM-5.3 系列 + 运行时记忆', () => {
+  const { api } = loadModules();
+  assert.equal(api.isForcedThinkingModel('zhipu', 'glm-5.3'), true);
+  assert.equal(api.isForcedThinkingModel('zhipu', 'GLM-5.3-FLASH'), true);
+  assert.equal(api.isForcedThinkingModel('zhipu', 'glm-5.3-flash-2509'), true);
+  assert.equal(api.isForcedThinkingModel('zhipu', 'glm-5.30'), false);
+  assert.equal(api.isForcedThinkingModel('zhipu', 'glm-4v-flash'), false);
+  assert.equal(api.isForcedThinkingModel('sensenova', 'sensenova-6.8-flash'), false);
+
+  // 运行期学到的模型也要记住，且按平台+模型区分
+  api.markForcedThinking('sensenova', 'sensenova-6.8-pro');
+  assert.equal(api.isForcedThinkingModel('sensenova', 'sensenova-6.8-pro'), true);
+  assert.equal(api.isForcedThinkingModel('zhipu', 'sensenova-6.8-pro'), false);
+  assert.equal(Object.keys(api.loadForcedThinking()).length, 1);
+});
+
+test('400 提示不支持关闭思考时自动降级重试并记住模型', async () => {
+  const { api, calls } = loadModules([
+    { status: 400, responseText: JSON.stringify({ error: { message: '该模型始终思考，不支持关闭思考', code: 1210 } }) },
+    { status: 200, responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }
+  ]);
+  let forced = 0;
+  const content = await api.chatCompletion(
+    { platform: 'deepseek', endpoint: 'https://api.deepseek.com/chat/completions', model: 'deepseek-flash', apiKey: 'k', thinkingMode: 'off' },
+    [{ role: 'user', content: 'hi' }],
+    { onThinkingForced: () => { forced += 1; } }
+  );
+  assert.equal(content, 'ok');
+  assert.equal(forced, 1);
+  assert.equal(calls.length, 2);
+  // 第一次带关闭参数，被拒后第二次去掉该参数重试
+  assert.equal(JSON.parse(calls[0].data).reasoning_effort, 'none');
+  assert.equal(JSON.parse(calls[1].data).reasoning_effort, undefined);
 });
 
 test('商汤日日新的强度参数按档位传递', async () => {
