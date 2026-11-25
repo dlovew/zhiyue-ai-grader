@@ -11,7 +11,11 @@
   }
   async function bootstrap() {
     let config = loadConfig();
-    let cache = new CacheStore(config.cacheTtlDays);
+    let cache = null;
+    // 缓存条数上限可配（默认 2000）：双评大卷时同一份卷可能在很后面再次出现。
+    const createCache = () => new CacheStore(config.cacheTtlDays, config.cacheMaxEntries, {
+      onStorageError: () => panel.toast("\u5B58\u50A8\u914D\u989D\u5DF2\u6EE1\uFF0C\u672C\u5730\u7F13\u5B58\u5DF2\u505C\u6B62\u5199\u5165\uFF0C\u8BF7\u6E05\u7406\u5386\u53F2\u6216\u7F13\u5B58")
+    });
     let limiter = buildLimiter(config);
     let markingDoc = null;
     let currentQuestion = null;
@@ -35,6 +39,7 @@
       onHistory: () => historyPanel.show(loadHistory()),
       onSettings: () => settingsPanel.show(config)
     });
+    cache = createCache();
     const settingsPanel = new SettingsPanel({
       onSave: (draft) => {
         config = draft;
@@ -42,7 +47,7 @@
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
         syncThinkingModesFromConfig(config);
-        cache = new CacheStore(config.cacheTtlDays);
+        cache = createCache();
         limiter = buildLimiter(config);
         panel.setCache(pipelineLabel(config));
         panel.setSubtitle("\u914D\u7F6E\u5DF2\u66F4\u65B0");
@@ -68,7 +73,7 @@
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
         syncThinkingModesFromConfig(config);
-        cache = new CacheStore(config.cacheTtlDays);
+        cache = createCache();
         limiter = buildLimiter(config);
         panel.setCache(pipelineLabel(config));
         panel.setSubtitle("\u914D\u7F6E\u5DF2\u5BFC\u5165");
@@ -76,7 +81,7 @@
       onReset: () => {
         resetConfig();
         config = loadConfig();
-        cache = new CacheStore(config.cacheTtlDays);
+        cache = createCache();
         limiter = buildLimiter(config);
         settingsPanel.show(config);
       },
@@ -319,6 +324,8 @@
       cache.clear();
       panel.toast("\u7F13\u5B58\u5DF2\u6E05\u7A7A");
     });
+    // 缓存写入是合并批量的，页面关闭前补一次落盘，避免丢最后几份结果。
+    window.addEventListener("pagehide", () => cache?.flush?.());
     await detect();
   }
   void bootstrap().catch((error) => {

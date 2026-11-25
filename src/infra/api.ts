@@ -174,6 +174,8 @@
     const thinkingKeys = thinkingControl(payload, profile, thinkingMode);
     const temperature = options.temperature === void 0 ? 0.2 : options.temperature;
     if (temperature !== null) payload.temperature = temperature;
+    // 输出 token 按更高单价计费，限制上限可挡住模型絮叨产生的长尾。
+    if (options.maxTokens > 0) payload.max_tokens = Math.round(options.maxTokens);
     let jsonInjectedKey = null;
     if (options.jsonMode && profile.jsonModeKey === "response_format") {
       payload.response_format = { type: "json_object" };

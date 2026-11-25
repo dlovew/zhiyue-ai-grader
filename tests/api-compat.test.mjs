@@ -34,6 +34,32 @@ function loadModules(queue = []) {
   return { api: context.__exposed, calls, store };
 }
 
+// 解析/缓存/提示词模块单独装载：不依赖 DOM 与网络。
+function loadCore() {
+  const store = new Map();
+  const context = {
+    console: { log() {}, warn() {}, error() {} },
+    window: {
+      setTimeout: (fn, ms) => setTimeout(fn, Math.min(Number(ms) || 0, 1)),
+      clearTimeout: (id) => clearTimeout(id)
+    },
+    GM_getValue: (key) => (store.has(key) ? store.get(key) : undefined),
+    GM_setValue: (key, value) => store.set(key, value)
+  };
+  context.globalThis = context;
+  const files = [
+    'src/infra/storage.ts',
+    'src/config.ts',
+    'src/core/cache.ts',
+    'src/core/prompt.ts',
+    'src/core/parse.ts'
+  ];
+  const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
+  vm.createContext(context);
+  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, parseGrade, buildGradingPrompt, PROMPT_VERSION, DEFAULT_CONFIG, STORAGE_KEYS };`, context);
+  return { core: context.__core, store };
+}
+
 test('批改结果分数可编辑且提交前应用手动改分', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
   assert.match(built, /zygr-score-input/);
@@ -399,6 +425,93 @@ test('平台不支持在线列表时只提示手动填写，不回退预设模�
   assert.match(none.message, /请手动填写模型名称/);
 });
 
+test('批改请求带上 max_tokens 上限以限制输出长尾', async () => {
+  const { api, calls } = loadModules([{ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }]);
+  await api.chatCompletion(
+    { platform: 'custom', endpoint: 'https://example.com/v1/chat/completions', model: 'm', apiKey: 'k' },
+    [{ role: 'user', content: 'hi' }],
+    { jsonMode: true, maxTokens: 800 }
+  );
+  assert.equal(JSON.parse(calls[0].data).max_tokens, 800);
+  await api.chatCompletion(
+    { platform: 'custom', endpoint: 'https://example.com/v1/chat/completions', model: 'm', apiKey: 'k' },
+    [{ role: 'user', content: 'hi' }],
+    {}
+  );
+  assert.equal(JSON.parse(calls[1].data).max_tokens, undefined);
+});
+
+test('紧凑输出协议按索引映射小题名称与满分', () => {
+  const { core } = loadCore();
+  const subs = [{ label: '第1小问', maxScore: 3 }, { label: '第2小问', maxScore: 2 }];
+  const grade = core.parseGrade('{"s":"p","sc":4,"c":0.8,"r":"第2问漏步骤","sub":[{"i":0,"sc":1.5},{"i":1,"sc":2}]}', 5, subs);
+  assert.equal(grade.status, 'partial');
+  assert.equal(grade.score, 4);
+  assert.equal(grade.confidence, 0.8);
+  assert.equal(grade.reason, '第2问漏步骤');
+  assert.equal(grade.subScores.length, 2);
+  assert.equal(grade.subScores[0].label, '第1小问');
+  assert.equal(grade.subScores[0].maxScore, 3);
+  assert.equal(grade.subScores[1].label, '第2小问');
+  assert.equal(grade.subScores[1].score, 2);
+});
+
+test('旧版 JSON 协议仍然可以解析', () => {
+  const { core } = loadCore();
+  const grade = core.parseGrade(
+    '{"status":"legible","score":3,"subScores":[{"label":"X","score":3,"maxScore":3,"reason":"满分"}],"reason":"ok","confidence":0.9}',
+    5
+  );
+  assert.equal(grade.status, 'legible');
+  assert.equal(grade.score, 3);
+  assert.equal(grade.subScores[0].label, 'X');
+  assert.equal(grade.subScores[0].reason, '满分');
+});
+
+test('提示词固定段不含动态内容，同题不同废图数完全一致', () => {
+  const { core } = loadCore();
+  const question = { questionText: '题干', subQuestions: [{ label: '第1问', maxScore: 2 }] };
+  const context = { question: '', answer: '答案', rubric: '标准', maxScore: 5 };
+  const a = core.buildGradingPrompt(question, context, { removedImages: 0 });
+  const b = core.buildGradingPrompt(question, context, { removedImages: 3 });
+  assert.equal(a, b);
+  assert.match(a, /字段（务必精简）/);
+  assert.match(a, /已剔除空白或重复图片/);
+  assert.doesNotMatch(a, /已剔除 \d+ 张废图/);
+});
+
+test('缓存批量写入并剔除模型原文', () => {
+  const { core, store } = loadCore();
+  const cache = new core.CacheStore(30, 2000);
+  cache.set('k1', {
+    status: 'legible',
+    score: 3,
+    subScores: [{ label: '第1问', score: 3, maxScore: 3, reason: '' }],
+    reason: 'ok',
+    cacheKey: 'k1',
+    raw: 'x'.repeat(2000),
+    createdAt: 1
+  });
+  // 未到批量写入时机前不落盘
+  assert.equal(store.has('zygr.cache.v1'), false);
+  assert.equal(cache.size(), 1);
+  assert.equal(cache.get('k1').score, 3);
+  assert.equal(cache.flush(), true);
+  const saved = JSON.parse(store.get('zygr.cache.v1'));
+  assert.equal(saved.k1.data.raw, undefined);
+  assert.equal(saved.k1.data.cacheKey, undefined);
+  assert.equal(saved.k1.data.subScores[0].label, '第1问');
+});
+
+test('缓存超过上限只分批淘汰，不会整表清空', () => {
+  const { core } = loadCore();
+  const cache = new core.CacheStore(30, 100);
+  for (let index = 0; index < 130; index += 1) cache.set(`k${index}`, { score: index });
+  assert.ok(cache.size() <= 100, `size=${cache.size()}`);
+  assert.ok(cache.size() >= 80, `size=${cache.size()}`);
+  assert.equal(cache.get('k129').score, 129);
+});
+
 test('平台模型可记忆并随配置归集', () => {
   const { api } = loadModules();
   assert.equal(api.getPlatformModel('opencode-ai'), '');
@@ -463,6 +576,15 @@ test('界面已移除管理自定义预设入口', () => {
   assert.doesNotMatch(built, /data-act="preset-toggle"/);
   assert.doesNotMatch(built, /data-preset-editor/);
   assert.doesNotMatch(built, /collectPresetForm\(\)/);
+});
+
+test('构建产物包含缓存扩容、输出上限与宽条重排能力', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /cacheMaxEntries/);
+  assert.match(built, /max_tokens/);
+  assert.match(built, /stripLayout/);
+  assert.match(built, /splitWideStrip/);
+  assert.match(built, /data-field="image\.detail"/);
 });
 
 test('思考模式归一化兼容旧布尔并支持 low/high/max', () => {

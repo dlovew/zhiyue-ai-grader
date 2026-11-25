@@ -4,6 +4,10 @@
     partial: "partial",
     illegible: "illegible",
     blank: "blank",
+    l: "legible",
+    p: "partial",
+    i: "illegible",
+    b: "blank",
     \u53EF\u8FA8\u8BA4: "legible",
     \u6E05\u6670: "legible",
     \u90E8\u5206\u4E0D\u6E05: "partial",
@@ -35,23 +39,27 @@
     if (numbers.length === 0) return 0;
     return clamp(numbers[numbers.length - 1], maxScore);
   }
-  function parseSubScores(value, maxScore) {
+  // 兼容两种协议：紧凑版（i/sc/r）与旧版（label/score/maxScore/reason）。
+  // 小题名称与满分由输入给出，模型不再回写，避免每份卷子白花几十个输出 token。
+  function parseSubScores(value, maxScore, subQuestions = []) {
     if (!Array.isArray(value)) return [];
     return value.flatMap((item) => {
       const record = asRecord(item);
       if (!record) return [];
-      const label = String(record.label ?? "").trim();
+      const index = Number(record.i ?? record.index);
+      const base = Number.isInteger(index) && index >= 0 && index < subQuestions.length ? subQuestions[index] : null;
+      const label = String(record.label ?? base?.label ?? "").trim();
       if (!label) return [];
-      const itemMax = clamp(Number(record.maxScore ?? 0), maxScore);
+      const itemMax = clamp(Number(record.maxScore ?? base?.maxScore ?? 0), maxScore);
       return [{
         label,
-        score: clamp(Number(record.score ?? 0), itemMax > 0 ? itemMax : maxScore),
+        score: clamp(Number(record.sc ?? record.score ?? 0), itemMax > 0 ? itemMax : maxScore),
         maxScore: itemMax,
-        reason: String(record.reason ?? "").slice(0, 200)
+        reason: String(record.r ?? record.reason ?? "").slice(0, 200)
       }];
     });
   }
-  function fromJson(raw, maxScore) {
+  function fromJson(raw, maxScore, subQuestions = []) {
     const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
     const start = cleaned.indexOf("{");
     const end = cleaned.lastIndexOf("}");
@@ -59,15 +67,15 @@
     try {
       const record = asRecord(JSON.parse(cleaned.slice(start, end + 1)));
       if (!record) return null;
-      const subScores = parseSubScores(record.subScores, maxScore);
+      const subScores = parseSubScores(record.subScores ?? record.sub, maxScore, subQuestions);
       const fallbackScore = subScores.reduce((sum, item) => sum + item.score, 0);
-      const scoreValue = record.score === void 0 ? fallbackScore : Number(record.score);
+      const scoreValue = record.sc ?? record.score ?? fallbackScore;
       return {
-        status: mapStatus(record.status),
-        score: clamp(scoreValue, maxScore),
+        status: mapStatus(record.s ?? record.status),
+        score: clamp(Number(scoreValue), maxScore),
         subScores,
-        reason: String(record.reason ?? "").slice(0, 300),
-        confidence: clamp(Number(record.confidence ?? 0.7), 1),
+        reason: String(record.r ?? record.reason ?? "").slice(0, 300),
+        confidence: clamp(Number(record.c ?? record.confidence ?? 0.7), 1),
         raw
       };
     } catch {
@@ -101,6 +109,6 @@
     };
   }
   function parseGrade(raw, maxScore, subQuestions = []) {
-    return fromJson(raw, maxScore) ?? fromText(raw, maxScore, subQuestions);
+    return fromJson(raw, maxScore, subQuestions) ?? fromText(raw, maxScore, subQuestions);
   }
 

@@ -3,18 +3,22 @@
     return Boolean(service.endpoint.trim() && service.model.trim());
   }
   async function runGrade(service, question, maxScore, prompt, images, config, rateLimiter) {
+    const detail = ["high", "low", "auto"].includes(config.image?.detail) ? config.image.detail : "high";
     const content = [
       { type: "text", text: prompt },
-      ...images.map((image) => ({ type: "image_url", image_url: { url: image.dataUrl, detail: "high" } }))
+      ...images.map((image) => ({ type: "image_url", image_url: { url: image.dataUrl, detail } }))
     ];
     const messages = [
       { role: "system", content: "\u4F60\u662F\u4E25\u683C\u4F46\u516C\u6B63\u7684\u9605\u5377\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA JSON\u3002" },
       { role: "user", content }
     ];
+    // 思考模式会额外消耗输出预算，开启时放宽上限避免 JSON 被截断。
+    const maxTokens = normalizeThinkingMode(service.thinkingMode) === "off" ? 800 : 1600;
     const raw = await chatCompletion(service, messages, {
       rateLimiter,
       timeoutMs: config.pipeline.timeoutMs,
       jsonMode: true,
+      maxTokens,
       estimatedTokens: estimateTokens(prompt, images.length)
     });
     if (!raw.trim()) throw new Error("\u6A21\u578B\u8FD4\u56DE\u4E3A\u7A7A");
@@ -37,6 +41,9 @@
     const removed = prepared.filter((image) => isBlankImage(image) || isWasteImage(image));
     const usable = prepared.filter((image) => !isBlankImage(image) && !isWasteImage(image));
     if (removed.length > 0) reviewReasons.push(`\u5DF2\u5254\u9664 ${removed.length} \u5F20\u5E9F\u56FE`);
+    const lowResCount = usable.filter((image) => image.lowRes).length;
+    if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
+    if (config.image?.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
     if (usable.length === 0) {
       throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF0C\u8BF7\u7B49\u5F85\u9605\u5377\u9875\u56FE\u7247\u52A0\u8F7D\u5B8C\u6210\u540E\u91CD\u8BD5");
     }
@@ -48,6 +55,8 @@
       question,
       context: config.context,
       model: gradeService.model,
+      image: config.image,
+      thinkingMode: config.pipeline.thinkingMode,
       promptVersion: PROMPT_VERSION
     });
     const cached = cache.get(cacheKey);

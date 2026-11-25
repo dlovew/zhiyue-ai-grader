@@ -99,13 +99,17 @@
         <div class="zygr-section" data-page="advanced" hidden>
           <h3>\u56FE\u7247\u4E0E\u63D0\u793A\u8BCD</h3>
           <div class="zygr-grid">
+            ${select("\u56FE\u7247\u7CBE\u5EA6", "image.detail", [["high", "\u9AD8\u7CBE\u5EA6\uFF08\u63A8\u8350\uFF0C\u624B\u5199\u5FC5\u9009\uFF09"], ["auto", "\u81EA\u52A8\uFF08\u7531\u5E73\u53F0\u51B3\u5B9A\uFF09"], ["low", "\u4F4E\u7CBE\u5EA6\uFF08\u4EC5\u9009\u62E9/\u586B\u7A7A\u5224\u5BF9\u9519\uFF09"]])}
             ${select("\u7701 Token \u6863\u4F4D", "image.profile", [["clarity", "\u6E05\u6670\u4F18\u5148"], ["balanced", "\u5747\u8861"], ["saving", "\u7701 Token"]])}
             ${field("\u56FE\u7247\u957F\u8FB9\u4E0A\u9650\uFF08px\uFF09", "image.maxEdge", "number")}
             ${field("JPEG \u8D28\u91CF\uFF080.5-1\uFF09", "image.quality", "number")}
             ${field("\u5386\u53F2\u4FDD\u7559\u6761\u6570", "historyLimit", "number")}
             ${field("\u7F13\u5B58\u6709\u6548\u671F\uFF08\u5929\uFF09", "cacheTtlDays", "number")}
+            ${field("\u7F13\u5B58\u6761\u6570\u4E0A\u9650", "cacheMaxEntries", "number")}
           </div>
-          <label class="zygr-row"><input type="checkbox" data-field="image.cropToAnswer"> \u81EA\u52A8\u88C1\u5207\u767D\u8FB9\uFF08\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4FDD\u6301\u7B54\u5377\u539F\u8C8C\uFF09</label>
+          <label class="zygr-row"><input type="checkbox" data-field="image.cropToAnswer"> \u81EA\u52A8\u88C1\u5207\u7A7A\u767D\u8FB9\u8DDD\uFF08\u5EFA\u8BAE\u5F00\u542F\uFF0C\u5DF2\u9884\u7559 6% \u8FB9\u8DDD\uFF09</label>
+          <label class="zygr-row"><input type="checkbox" data-field="image.splitWideStrip"> \u5BBD\u6241\u4F5C\u7B54\u6761\u5207\u5757\u91CD\u6392\uFF08\u964D\u4F4E\u56FE\u7247 token\uFF09</label>
+          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002</p>
           <h3>\u9650\u901F\u4E0E\u8D85\u65F6</h3>
           <div class="zygr-grid">
             ${field("\u5E76\u53D1\u4E0A\u9650", "pipeline.maxConcurrent", "number")}
@@ -243,11 +247,27 @@
           target.value = "";
         }
         if (target.hasAttribute("data-platform-select")) this.applyPlatform(target.dataset.field || "", target.value);
+        if (target.dataset.field === "image.profile") this.applyImageProfile(target.value);
         if (target.hasAttribute("data-config-file") && target.files?.[0]) {
           void this.importConfig(target.files[0]);
           target.value = "";
         }
       });
+    }
+    // 档位只是"尺寸建议"：细节精度保持高精度，低精度只能手动选。
+    applyImageProfile(id) {
+      const presets = {
+        clarity: { label: "\u6E05\u6670\u4F18\u5148", maxEdge: 1600, detail: "high" },
+        balanced: { label: "\u5747\u8861", maxEdge: 1440, detail: "high" },
+        saving: { label: "\u7701 Token", maxEdge: 1280, detail: "high" }
+      };
+      const preset = presets[id];
+      if (!preset) return;
+      const edge = this.shadow.querySelector('[data-field="image.maxEdge"]');
+      const detail = this.shadow.querySelector('[data-field="image.detail"]');
+      if (edge) edge.value = String(preset.maxEdge);
+      if (detail) detail.value = preset.detail;
+      this.toast(`\u5DF2\u5957\u7528\u300C${preset.label}\u300D\u5EFA\u8BAE\uFF1A\u957F\u8FB9 ${preset.maxEdge}px\u3001\u9AD8\u7CBE\u5EA6`);
     }
     refreshPlatformSelects() {
       const presets = listPlatformPresets();

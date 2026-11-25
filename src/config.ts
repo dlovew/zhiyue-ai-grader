@@ -19,11 +19,14 @@
       profile: "balanced",
       maxEdge: 1600,
       quality: 0.82,
-      cropToAnswer: false
+      detail: "high",
+      cropToAnswer: true,
+      splitWideStrip: true
     },
     promptVersion: "zygr-prompt-v2",
     historyLimit: 500,
-    cacheTtlDays: 30
+    cacheTtlDays: 30,
+    cacheMaxEntries: 2000
   };
   function isRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);

@@ -67,7 +67,8 @@
         }
       }
       if (!found) return null;
-      const pad = Math.max(4, Math.floor(Math.min(width, height) * 0.02));
+      // 留够边距，避免裁掉贴在边缘的作答与跨栏标注。
+      const pad = Math.max(6, Math.floor(Math.min(width, height) * 0.06));
       const x = Math.max(0, minX - pad);
       const y = Math.max(0, minY - pad);
       const w = Math.min(width, maxX + pad + 1) - x;
@@ -91,6 +92,17 @@
     } catch {
       return 0;
     }
+  }
+  // 宽扁的作答条在视觉模型里会被"短边拉到 768"规则放大宽度，tile 数暴涨。
+  // 切成等宽小块后按网格重排成接近方形的版面，tile 数可降到 1/3 左右。
+  function stripLayout(width, height) {
+    const ratio = height > 0 ? width / height : 0;
+    if (ratio <= 2.4 || height < 160) return null;
+    const rows = Math.max(1, Math.round(Math.sqrt(ratio)));
+    const cols = Math.max(1, Math.ceil(ratio / rows));
+    const pieces = rows * cols;
+    if (pieces < 2 || pieces > 16) return null;
+    return { rows, cols, pieces };
   }
   async function prepareImage(src, config) {
     const dataUrl = src.startsWith("data:") ? src : await fetchAsDataUrl(src);
@@ -117,20 +129,41 @@
         sh = box.h;
       }
     }
-    const scale = Math.min(1, config.maxEdge / Math.max(sw, sh));
+    const layout = config.splitWideStrip === false ? null : stripLayout(sw, sh);
+    const gap = 16;
+    const piecesW = layout ? sw / layout.pieces : sw;
+    const boardW = layout ? layout.cols * piecesW : sw;
+    const boardH = layout ? layout.rows * sh + (layout.rows - 1) * gap : sh;
+    const scale = Math.min(1, config.maxEdge / Math.max(boardW, boardH));
     const output = document.createElement("canvas");
-    output.width = Math.max(1, Math.round(sw * scale));
-    output.height = Math.max(1, Math.round(sh * scale));
+    output.width = Math.max(1, Math.round(boardW * scale));
+    output.height = Math.max(1, Math.round(boardH * scale));
     const outputCtx = output.getContext("2d");
     if (!outputCtx) throw new Error("\u65E0\u6CD5\u521B\u5EFA\u753B\u5E03\u4E0A\u4E0B\u6587");
-    outputCtx.drawImage(work, sx, sy, sw, sh, 0, 0, output.width, output.height);
+    if (layout) {
+      // 左上到右下按原顺序重排，阅读顺序不乱；块间留白避免笔画粘连。
+      for (let index = 0; index < layout.pieces; index += 1) {
+        const col = index % layout.cols;
+        const row = Math.floor(index / layout.cols);
+        outputCtx.drawImage(
+          work,
+          sx + index * piecesW, sy, piecesW, sh,
+          Math.round(col * piecesW * scale), Math.round(row * (sh + gap) * scale),
+          Math.ceil(piecesW * scale), Math.ceil(sh * scale)
+        );
+      }
+    } else {
+      outputCtx.drawImage(work, sx, sy, sw, sh, 0, 0, output.width, output.height);
+    }
     const encoded = output.toDataURL("image/jpeg", Math.min(1, Math.max(0.5, config.quality)));
     return {
       dataUrl: encoded,
       hash: await sha256(encoded),
       width: output.width,
       height: output.height,
-      blankRatio: ratio
+      blankRatio: ratio,
+      lowRes: Math.min(output.width, output.height) < 400,
+      restructured: Boolean(layout)
     };
   }
   function dedupePrepared(images) {

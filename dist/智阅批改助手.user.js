@@ -343,11 +343,14 @@
       profile: "balanced",
       maxEdge: 1600,
       quality: 0.82,
-      cropToAnswer: false
+      detail: "high",
+      cropToAnswer: true,
+      splitWideStrip: true
     },
     promptVersion: "zygr-prompt-v2",
     historyLimit: 500,
-    cacheTtlDays: 30
+    cacheTtlDays: 30,
+    cacheMaxEntries: 2000
   };
   function isRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -425,62 +428,132 @@
     removeKey("zygr.submit.skipConfirm.v1");
   }
 
-  // src/core/cache.ts
-  function hashString(input) {
-    let hash = 2166136261;
-    for (let i = 0; i < input.length; i += 1) {
-      hash ^= input.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    return (hash >>> 0).toString(16).padStart(8, "0");
+// src/core/cache.ts
+function hashString(input) {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
   }
-  function makeGradeCacheKey(input) {
-    const payload = JSON.stringify({
-      question: input.context.question || input.question.questionText,
-      answer: input.context.answer,
-      rubric: input.context.rubric,
-      maxScore: input.context.maxScore,
-      subs: input.question.subQuestions,
-      images: input.question.images,
-      model: input.model,
-      pipeline: "vlm"
-    });
-    return `grade:${hashString(payload)}:${input.promptVersion}`;
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function makeGradeCacheKey(input) {
+  const payload = JSON.stringify({
+    question: input.context.question || input.question.questionText,
+    answer: input.context.answer,
+    rubric: input.context.rubric,
+    maxScore: input.context.maxScore,
+    subs: input.question.subQuestions,
+    images: input.question.images,
+    model: input.model,
+    image: input.image,
+    thinkingMode: input.thinkingMode,
+    pipeline: "vlm"
+  });
+  return `grade:${hashString(payload)}:${input.promptVersion}`;
+}
+// 入库前去冗余：模型原文（raw）与 cacheKey 只在当前会话需要，存进缓存会白占配额。
+var CACHE_RESULT_FIELDS = ["status", "score", "subScores", "reason", "confidence", "maxScore", "pipeline", "needsReview", "reviewReasons", "model", "createdAt"];
+function compactCacheResult(result) {
+  if (!isRecord(result)) return result;
+  const compact = {};
+  for (const key of CACHE_RESULT_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(result, key)) compact[key] = result[key];
   }
-  var CacheStore = class {
-    constructor(ttlDays, maxEntries = 300) {
-      this.ttlDays = ttlDays;
-      this.maxEntries = maxEntries;
-      this.data = readJson(STORAGE_KEYS.cache, {});
-      this.prune();
-    }
-    prune() {
-      const now = Date.now();
-      const limit = this.ttlDays * 864e5;
-      for (const [key, envelope] of Object.entries(this.data)) {
-        if (!envelope || now - envelope.savedAt > limit) delete this.data[key];
+  if (Array.isArray(result.subScores)) {
+    compact.subScores = result.subScores.map((item) => ({
+      label: String(item?.label ?? ""),
+      score: Number(item?.score) || 0,
+      maxScore: Number(item?.maxScore) || 0,
+      reason: String(item?.reason ?? "")
+    }));
+  }
+  return compact;
+}
+var CACHE_WRITE_DELAY = 1200;
+var CacheStore = class {
+  constructor(ttlDays, maxEntries = 2000, options = {}) {
+    this.ttlDays = ttlDays;
+    this.maxEntries = Math.max(50, Math.min(2e4, Number(maxEntries) || 2000));
+    this.onStorageError = typeof options?.onStorageError === "function" ? options.onStorageError : null;
+    const raw = readJson(STORAGE_KEYS.cache, {});
+    this.data = isRecord(raw) ? raw : {};
+    this.dirty = false;
+    this.timer = 0;
+    this.warned = false;
+    this.prune();
+  }
+  // 只淘汰一批（10%），避免每次写入都对全表排序；返回是否有变化。
+  prune() {
+    const now = Date.now();
+    const limit = this.ttlDays * 864e5;
+    let changed = false;
+    for (const [key, envelope] of Object.entries(this.data)) {
+      if (!isRecord(envelope) || now - Number(envelope.savedAt || 0) > limit) {
+        delete this.data[key];
+        changed = true;
       }
-      const keys = Object.keys(this.data);
-      if (keys.length > this.maxEntries) {
-        keys.sort((a, b) => this.data[a].savedAt - this.data[b].savedAt).slice(0, keys.length - this.maxEntries).forEach((key) => delete this.data[key]);
-      }
     }
-    get(key) {
-      const envelope = this.data[key];
-      if (!envelope) return void 0;
-      return envelope.data;
+    const keys = Object.keys(this.data);
+    if (keys.length > this.maxEntries) {
+      const drop = Math.max(1, Math.ceil(keys.length * 0.1));
+      keys.sort((a, b) => Number(this.data[a].savedAt || 0) - Number(this.data[b].savedAt || 0)).slice(0, drop).forEach((key) => {
+        delete this.data[key];
+        changed = true;
+      });
     }
-    set(key, data) {
-      this.data[key] = { v: 1, savedAt: Date.now(), data };
-      this.prune();
-      writeJson(STORAGE_KEYS.cache, this.data);
+    return changed;
+  }
+  get(key) {
+    const envelope = this.data[key];
+    if (!isRecord(envelope)) return void 0;
+    return envelope.data;
+  }
+  set(key, data) {
+    this.data[key] = { v: 2, savedAt: Date.now(), data: compactCacheResult(data) };
+    this.prune();
+    this.scheduleWrite();
+  }
+  // 批改是连续的高频操作，逐条写盘会让每次批改都序列化整张缓存表；
+  // 这里合并成定时批量写入，页面关闭时由 flush 兜底。
+  scheduleWrite() {
+    this.dirty = true;
+    if (this.timer) return;
+    this.timer = window.setTimeout(() => {
+      this.timer = 0;
+      this.flush();
+    }, CACHE_WRITE_DELAY);
+  }
+  flush() {
+    if (this.timer) {
+      window.clearTimeout(this.timer);
+      this.timer = 0;
     }
-    clear() {
-      this.data = {};
-      removeKey(STORAGE_KEYS.cache);
+    if (!this.dirty) return true;
+    const ok = writeJson(STORAGE_KEYS.cache, this.data);
+    if (ok) {
+      this.dirty = false;
+      return true;
     }
-  };
-
+    if (!this.warned) {
+      this.warned = true;
+      this.onStorageError?.();
+    }
+    return false;
+  }
+  clear() {
+    if (this.timer) {
+      window.clearTimeout(this.timer);
+      this.timer = 0;
+    }
+    this.data = {};
+    this.dirty = false;
+    removeKey(STORAGE_KEYS.cache);
+  }
+  size() {
+    return Object.keys(this.data).length;
+  }
+};
   // src/core/export.ts
   function loadHistory() {
     const value = readJson(STORAGE_KEYS.history, []);
@@ -1086,6 +1159,8 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     const thinkingKeys = thinkingControl(payload, profile, thinkingMode);
     const temperature = options.temperature === void 0 ? 0.2 : options.temperature;
     if (temperature !== null) payload.temperature = temperature;
+    // 输出 token 按更高单价计费，限制上限可挡住模型絮叨产生的长尾。
+    if (options.maxTokens > 0) payload.max_tokens = Math.round(options.maxTokens);
     let jsonInjectedKey = null;
     if (options.jsonMode && profile.jsonModeKey === "response_format") {
       payload.response_format = { type: "json_object" };
@@ -1321,7 +1396,8 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
         }
       }
       if (!found) return null;
-      const pad = Math.max(4, Math.floor(Math.min(width, height) * 0.02));
+      // 留够边距，避免裁掉贴在边缘的作答与跨栏标注。
+      const pad = Math.max(6, Math.floor(Math.min(width, height) * 0.06));
       const x = Math.max(0, minX - pad);
       const y = Math.max(0, minY - pad);
       const w = Math.min(width, maxX + pad + 1) - x;
@@ -1345,6 +1421,17 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     } catch {
       return 0;
     }
+  }
+  // 宽扁的作答条在视觉模型里会被"短边拉到 768"规则放大宽度，tile 数暴涨。
+  // 切成等宽小块后按网格重排成接近方形的版面，tile 数可降到 1/3 左右。
+  function stripLayout(width, height) {
+    const ratio = height > 0 ? width / height : 0;
+    if (ratio <= 2.4 || height < 160) return null;
+    const rows = Math.max(1, Math.round(Math.sqrt(ratio)));
+    const cols = Math.max(1, Math.ceil(ratio / rows));
+    const pieces = rows * cols;
+    if (pieces < 2 || pieces > 16) return null;
+    return { rows, cols, pieces };
   }
   async function prepareImage(src, config) {
     const dataUrl = src.startsWith("data:") ? src : await fetchAsDataUrl(src);
@@ -1371,20 +1458,41 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
         sh = box.h;
       }
     }
-    const scale = Math.min(1, config.maxEdge / Math.max(sw, sh));
+    const layout = config.splitWideStrip === false ? null : stripLayout(sw, sh);
+    const gap = 16;
+    const piecesW = layout ? sw / layout.pieces : sw;
+    const boardW = layout ? layout.cols * piecesW : sw;
+    const boardH = layout ? layout.rows * sh + (layout.rows - 1) * gap : sh;
+    const scale = Math.min(1, config.maxEdge / Math.max(boardW, boardH));
     const output = document.createElement("canvas");
-    output.width = Math.max(1, Math.round(sw * scale));
-    output.height = Math.max(1, Math.round(sh * scale));
+    output.width = Math.max(1, Math.round(boardW * scale));
+    output.height = Math.max(1, Math.round(boardH * scale));
     const outputCtx = output.getContext("2d");
     if (!outputCtx) throw new Error("\u65E0\u6CD5\u521B\u5EFA\u753B\u5E03\u4E0A\u4E0B\u6587");
-    outputCtx.drawImage(work, sx, sy, sw, sh, 0, 0, output.width, output.height);
+    if (layout) {
+      // 左上到右下按原顺序重排，阅读顺序不乱；块间留白避免笔画粘连。
+      for (let index = 0; index < layout.pieces; index += 1) {
+        const col = index % layout.cols;
+        const row = Math.floor(index / layout.cols);
+        outputCtx.drawImage(
+          work,
+          sx + index * piecesW, sy, piecesW, sh,
+          Math.round(col * piecesW * scale), Math.round(row * (sh + gap) * scale),
+          Math.ceil(piecesW * scale), Math.ceil(sh * scale)
+        );
+      }
+    } else {
+      outputCtx.drawImage(work, sx, sy, sw, sh, 0, 0, output.width, output.height);
+    }
     const encoded = output.toDataURL("image/jpeg", Math.min(1, Math.max(0.5, config.quality)));
     return {
       dataUrl: encoded,
       hash: await sha256(encoded),
       width: output.width,
       height: output.height,
-      blankRatio: ratio
+      blankRatio: ratio,
+      lowRes: Math.min(output.width, output.height) < 400,
+      restructured: Boolean(layout)
     };
   }
   function dedupePrepared(images) {
@@ -1403,49 +1511,51 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     return width < 15 || height < 15 || Math.max(width / height, height / width) > 100;
   }
 
-  // src/core/prompt.ts
-  var PROMPT_VERSION = "zygr-prompt-v3-vlm";
-  function clip(text, max) {
-    const value = String(text ?? "").trim();
-    if (!value) return "\uFF08\u65E0\uFF09";
-    return value.length > max ? `${value.slice(0, max)}
+// src/core/prompt.ts
+var PROMPT_VERSION = "zygr-prompt-v4-vlm";
+function clip(text, max) {
+  const value = String(text ?? "").trim();
+  if (!value) return "\uFF08\u65E0\uFF09";
+  return value.length > max ? `${value.slice(0, max)}
 \u2026\u2026\uFF08\u5185\u5BB9\u5DF2\u622A\u65AD\uFF09` : value;
-  }
-  function subQuestionLines(question) {
-    if (question.subQuestions.length === 0) return "\uFF08\u65E0\u5206\u5C0F\u9898\u4FE1\u606F\uFF09";
-    return question.subQuestions.map((item) => `- ${item.label}\uFF1A\u6EE1\u5206 ${item.maxScore > 0 ? item.maxScore : "\u672A\u6307\u5B9A"}`).join("\n");
-  }
-  function maxScoreLine(context, question) {
-    const max = context.maxScore > 0 ? context.maxScore : question.maxScore;
-    return max > 0 ? `\u6EE1\u5206 ${max} \u5206` : "\u6EE1\u5206\u672A\u6307\u5B9A\uFF0C\u6309\u5E38\u89C4\u5224\u65AD";
-  }
-  function buildGradingPrompt(question, context, options) {
-    const answer = "\u3010\u5B66\u751F\u4F5C\u7B54\u3011\n\u89C1\u968F\u9644\u56FE\u7247\uFF0C\u6309\u56FE\u7247\u5185\u5BB9\u5224\u65AD";
-    const sections = [
-      "\u4F60\u662F\u9605\u5377\u52A9\u624B\u3002\u53EA\u4F9D\u636E\u7ED9\u5B9A\u5185\u5BB9\u4E0E\u968F\u9644\u56FE\u7247\u8BC4\u5206\uFF0C\u4E0D\u8981\u81C6\u6D4B\u3002",
-      "\u4E25\u683C\u8F93\u51FA\u4E00\u4E2A JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981 Markdown \u4EE3\u7801\u5757\uFF0C\u4E0D\u8981\u989D\u5916\u89E3\u91CA\u3002",
-      "\u5B57\u6BB5\uFF1Astatus\uFF08legible/partial/illegible/blank\uFF09\u3001score\uFF08\u6570\u5B57\uFF09\u3001subScores\uFF08\u6570\u7EC4\uFF1Alabel/score/maxScore/reason\uFF09\u3001reason\uFF08\u4E0D\u8D85\u8FC7 80 \u5B57\uFF09\u3001confidence\uFF080 \u5230 1\uFF09\u3002",
-      "\u89C4\u5219\uFF1A\u672A\u4F5C\u7B54\u4E0D\u5F97\u7ED9\u6B63\u5206\uFF1B\u5212\u53BB\u7684\u5185\u5BB9\u4E0D\u8BA1\u5206\uFF1B\u7B49\u4EF7\u89E3\u6CD5\u5E94\u7ED9\u5206\uFF1B\u5206\u6570\u4E0D\u5F97\u8D85\u8FC7\u6EE1\u5206\uFF1B\u65E0\u6CD5\u8FA8\u8BA4\u65F6\u7ED9\u51FA legible/partial/illegible \u5E76\u8BF4\u660E\u3002",
-      question.subQuestions.length > 0 ? "\u8BF7\u9010\u9879\u7ED9\u51FA subScores\uFF0Clabel \u5FC5\u987B\u4E0E\u8F93\u5165\u5C0F\u9898\u4E00\u81F4\uFF1B\u603B\u5206\u987B\u7B49\u4E8E\u5404\u5C0F\u9898\u5F97\u5206\u4E4B\u548C\u3002" : "subScores \u8FD4\u56DE\u7A7A\u6570\u7EC4\u5373\u53EF\u3002",
-      "===== \u8F93\u5165 =====",
-      `\u3010\u9898\u76EE\u3011
+}
+function subQuestionLines(question) {
+  if (question.subQuestions.length === 0) return "\uFF08\u65E0\u5206\u5C0F\u9898\u4FE1\u606F\uFF09";
+  return question.subQuestions.map((item, index) => `- ${index}\uFF1A${item.label}\uFF08\u6EE1\u5206 ${item.maxScore > 0 ? item.maxScore : "\u672A\u6307\u5B9A"}\uFF09`).join("\n");
+}
+function maxScoreLine(context, question) {
+  const max = context.maxScore > 0 ? context.maxScore : question.maxScore;
+  return max > 0 ? `\u6EE1\u5206 ${max} \u5206` : "\u6EE1\u5206\u672A\u6307\u5B9A\uFF0C\u6309\u5E38\u89C4\u5224\u65AD";
+}
+// 固定段落（角色/规则/输出协议）必须逐字不变，才能命中平台侧前缀缓存；
+// 动态内容一律放到后面的【输入】段，且不得插入固定段落之间。
+function buildGradingPrompt(question, context, options) {
+  const answer = "\u3010\u5B66\u751F\u4F5C\u7B54\u3011\n\u89C1\u968F\u9644\u56FE\u7247\uFF0C\u6309\u56FE\u7247\u5185\u5BB9\u5224\u65AD";
+  const sections = [
+    "\u4F60\u662F\u9605\u5377\u52A9\u624B\u3002\u53EA\u4F9D\u636E\u7ED9\u5B9A\u5185\u5BB9\u4E0E\u968F\u9644\u56FE\u7247\u8BC4\u5206\uFF0C\u4E0D\u8981\u81C6\u6D4B\u3002",
+    "\u4E25\u683C\u8F93\u51FA\u4E00\u4E2A JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981 Markdown \u4EE3\u7801\u5757\uFF0C\u4E0D\u8981\u989D\u5916\u89E3\u91CA\u3002\u4E0D\u8981\u56DE\u5199\u9898\u76EE\u3001\u53C2\u8003\u7B54\u6848\u3001\u5C0F\u9898\u540D\u79F0\u4E0E\u6EE1\u5206\u3002",
+    "\u5B57\u6BB5\uFF08\u52A1\u5FC5\u7CBE\u7B80\uFF09\uFF1As\uFF08l \u53EF\u8FA8\u8BA4 / p \u90E8\u5206\u4E0D\u6E05 / i \u65E0\u6CD5\u8FA8\u8BA4 / b \u672A\u4F5C\u7B54\uFF09\u3001sc\uFF08\u5F97\u5206\u6570\u5B57\uFF09\u3001c\uFF08\u7F6E\u4FE1\u5EA6 0-1\uFF0C\u4E00\u4F4D\u5C0F\u6570\uFF09\u3001r\uFF08\u603B\u8BC4\u8BED\uFF0C\u4E0D\u8D85\u8FC7 30 \u5B57\uFF09\u3001sub\uFF08\u6570\u7EC4\uFF1Ai \u5C0F\u9898\u5E8F\u53F7\u3001sc \u5F97\u5206\u3001r \u4EC5\u5728\u6263\u5206\u65F6\u7ED9\u4E0D\u8D85\u8FC7 20 \u5B57\u7684\u6263\u5206\u539F\u56E0\uFF09\u3002",
+    "\u89C4\u5219\uFF1A\u672A\u4F5C\u7B54\u4E0D\u5F97\u7ED9\u6B63\u5206\uFF1B\u5212\u53BB\u7684\u5185\u5BB9\u4E0D\u8BA1\u5206\uFF1B\u7B49\u4EF7\u89E3\u6CD5\u5E94\u7ED9\u5206\uFF1B\u5206\u6570\u4E0D\u5F97\u8D85\u8FC7\u6EE1\u5206\uFF1B\u65E0\u6CD5\u8FA8\u8BA4\u65F6\u7528 i/p \u5E76\u8BF4\u660E\uFF1B\u6EE1\u5206\u5C0F\u9898\u4E0D\u5199\u6263\u5206\u539F\u56E0\u3002",
+    question.subQuestions.length > 0 ? "\u5FC5\u987B\u9010\u5C0F\u9898\u8FD4\u56DE sub\uFF1Bi \u4E0E\u8F93\u5165\u5C0F\u9898\u5E8F\u53F7\u4E00\u81F4\uFF0C\u4E0D\u8DF3\u53F7\uFF1B\u603B\u5206 sc \u7B49\u4E8E\u5404\u5C0F\u9898 sc \u4E4B\u548C\u3002" : "sub \u8FD4\u56DE\u7A7A\u6570\u7EC4\u5373\u53EF\u3002",
+    question.subQuestions.length > 0 ? "\u6EE1\u5206\u5C0F\u9898\u7684 sub.r \u7701\u7565\uFF1B\u6263\u5206\u5C0F\u9898\u7684 sub.r \u53EA\u5199\u5173\u952E\u6263\u5206\u70B9\u3002" : "",
+    "===== \u8F93\u5165 =====",
+    `\u3010\u9898\u76EE\u3011
 ${clip(context.question || question.questionText, 6e3)}`,
-      `\u3010\u53C2\u8003\u7B54\u6848\u3011
+    `\u3010\u53C2\u8003\u7B54\u6848\u3011
 ${clip(context.answer, 6e3)}`,
-      `\u3010\u8BC4\u5206\u6807\u51C6\u3011
+    `\u3010\u8BC4\u5206\u6807\u51C6\u3011
 ${clip(context.rubric, 6e3)}`,
-      `\u3010\u5206\u503C\u3011
+    `\u3010\u5206\u503C\u3011
 ${maxScoreLine(context, question)}`,
-      `\u3010\u5C0F\u9898\u3011
+    `\u3010\u5C0F\u9898\u3011
 ${subQuestionLines(question)}`,
-      answer,
-      "\u6CE8\u610F\uFF1A\u968F\u9644\u56FE\u7247\u4EC5\u4E3A\u672C\u6B21\u5B66\u751F\u4F5C\u7B54\uFF0C\u7B54\u5377\u4E0A\u7684\u5370\u5237\u9898\u5E72\u4E0D\u5C5E\u4E8E\u5B66\u751F\u4F5C\u7B54\u3002",
-      options.removedImages && options.removedImages > 0 ? `\u3010\u56FE\u7247\u8BF4\u660E\u3011\u5DF2\u5254\u9664 ${options.removedImages} \u5F20\u5E9F\u56FE\uFF0C\u8BF7\u57FA\u4E8E\u5269\u4F59\u56FE\u7247\u8BC4\u5224\u3002` : "",
-      "===== \u8F93\u51FA =====",
-      "\u53EA\u8F93\u51FA JSON\u3002"
-    ];
-    return sections.filter(Boolean).join("\n\n");
-  }
+    answer,
+    "\u6CE8\u610F\uFF1A\u968F\u9644\u56FE\u7247\u4EC5\u4E3A\u672C\u6B21\u5B66\u751F\u4F5C\u7B54\uFF0C\u7B54\u5377\u4E0A\u7684\u5370\u5237\u9898\u5E72\u4E0D\u5C5E\u4E8E\u5B66\u751F\u4F5C\u7B54\uFF1B\u82E5\u5DF2\u5254\u9664\u7A7A\u767D\u6216\u91CD\u590D\u56FE\u7247\uFF0C\u4EC5\u57FA\u4E8E\u5269\u4F59\u56FE\u7247\u8BC4\u5224\uFF1B\u56FE\u7247\u53EF\u80FD\u88AB\u5207\u5757\u540E\u4ECE\u5DE6\u5230\u53F3\u3001\u4ECE\u4E0A\u5230\u4E0B\u91CD\u6392\uFF0C\u8BF7\u6309\u8BE5\u987A\u5E8F\u9605\u8BFB\u3002",
+    "===== \u8F93\u51FA =====",
+    "\u53EA\u8F93\u51FA JSON\u3002"
+  ];
+  return sections.filter(Boolean).join("\n\n");
+}
   // src/core/rubric-generator.ts
   var RUBRIC_SUBJECTS = {
     "\u8BED\u6587": ["\u4F5C\u6587", "\u73B0\u4EE3\u6587\u9605\u8BFB", "\u53E4\u8BD7\u6587\u9605\u8BFB", "\u6587\u8A00\u6587\u7FFB\u8BD1", "\u8BED\u8A00\u6587\u5B57\u8FD0\u7528"],
@@ -1578,6 +1688,10 @@ ${subQuestionLines(question)}`,
     partial: "partial",
     illegible: "illegible",
     blank: "blank",
+    l: "legible",
+    p: "partial",
+    i: "illegible",
+    b: "blank",
     \u53EF\u8FA8\u8BA4: "legible",
     \u6E05\u6670: "legible",
     \u90E8\u5206\u4E0D\u6E05: "partial",
@@ -1609,23 +1723,27 @@ ${subQuestionLines(question)}`,
     if (numbers.length === 0) return 0;
     return clamp(numbers[numbers.length - 1], maxScore);
   }
-  function parseSubScores(value, maxScore) {
+  // 兼容两种协议：紧凑版（i/sc/r）与旧版（label/score/maxScore/reason）。
+  // 小题名称与满分由输入给出，模型不再回写，避免每份卷子白花几十个输出 token。
+  function parseSubScores(value, maxScore, subQuestions = []) {
     if (!Array.isArray(value)) return [];
     return value.flatMap((item) => {
       const record = asRecord(item);
       if (!record) return [];
-      const label = String(record.label ?? "").trim();
+      const index = Number(record.i ?? record.index);
+      const base = Number.isInteger(index) && index >= 0 && index < subQuestions.length ? subQuestions[index] : null;
+      const label = String(record.label ?? base?.label ?? "").trim();
       if (!label) return [];
-      const itemMax = clamp(Number(record.maxScore ?? 0), maxScore);
+      const itemMax = clamp(Number(record.maxScore ?? base?.maxScore ?? 0), maxScore);
       return [{
         label,
-        score: clamp(Number(record.score ?? 0), itemMax > 0 ? itemMax : maxScore),
+        score: clamp(Number(record.sc ?? record.score ?? 0), itemMax > 0 ? itemMax : maxScore),
         maxScore: itemMax,
-        reason: String(record.reason ?? "").slice(0, 200)
+        reason: String(record.r ?? record.reason ?? "").slice(0, 200)
       }];
     });
   }
-  function fromJson(raw, maxScore) {
+  function fromJson(raw, maxScore, subQuestions = []) {
     const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
     const start = cleaned.indexOf("{");
     const end = cleaned.lastIndexOf("}");
@@ -1633,15 +1751,15 @@ ${subQuestionLines(question)}`,
     try {
       const record = asRecord(JSON.parse(cleaned.slice(start, end + 1)));
       if (!record) return null;
-      const subScores = parseSubScores(record.subScores, maxScore);
+      const subScores = parseSubScores(record.subScores ?? record.sub, maxScore, subQuestions);
       const fallbackScore = subScores.reduce((sum, item) => sum + item.score, 0);
-      const scoreValue = record.score === void 0 ? fallbackScore : Number(record.score);
+      const scoreValue = record.sc ?? record.score ?? fallbackScore;
       return {
-        status: mapStatus(record.status),
-        score: clamp(scoreValue, maxScore),
+        status: mapStatus(record.s ?? record.status),
+        score: clamp(Number(scoreValue), maxScore),
         subScores,
-        reason: String(record.reason ?? "").slice(0, 300),
-        confidence: clamp(Number(record.confidence ?? 0.7), 1),
+        reason: String(record.r ?? record.reason ?? "").slice(0, 300),
+        confidence: clamp(Number(record.c ?? record.confidence ?? 0.7), 1),
         raw
       };
     } catch {
@@ -1675,7 +1793,7 @@ ${subQuestionLines(question)}`,
     };
   }
   function parseGrade(raw, maxScore, subQuestions = []) {
-    return fromJson(raw, maxScore) ?? fromText(raw, maxScore, subQuestions);
+    return fromJson(raw, maxScore, subQuestions) ?? fromText(raw, maxScore, subQuestions);
   }
 
   // src/core/pipeline.ts
@@ -1683,18 +1801,22 @@ ${subQuestionLines(question)}`,
     return Boolean(service.endpoint.trim() && service.model.trim());
   }
   async function runGrade(service, question, maxScore, prompt, images, config, rateLimiter) {
+    const detail = ["high", "low", "auto"].includes(config.image?.detail) ? config.image.detail : "high";
     const content = [
       { type: "text", text: prompt },
-      ...images.map((image) => ({ type: "image_url", image_url: { url: image.dataUrl, detail: "high" } }))
+      ...images.map((image) => ({ type: "image_url", image_url: { url: image.dataUrl, detail } }))
     ];
     const messages = [
       { role: "system", content: "\u4F60\u662F\u4E25\u683C\u4F46\u516C\u6B63\u7684\u9605\u5377\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA JSON\u3002" },
       { role: "user", content }
     ];
+    // 思考模式会额外消耗输出预算，开启时放宽上限避免 JSON 被截断。
+    const maxTokens = normalizeThinkingMode(service.thinkingMode) === "off" ? 800 : 1600;
     const raw = await chatCompletion(service, messages, {
       rateLimiter,
       timeoutMs: config.pipeline.timeoutMs,
       jsonMode: true,
+      maxTokens,
       estimatedTokens: estimateTokens(prompt, images.length)
     });
     if (!raw.trim()) throw new Error("\u6A21\u578B\u8FD4\u56DE\u4E3A\u7A7A");
@@ -1717,6 +1839,9 @@ ${subQuestionLines(question)}`,
     const removed = prepared.filter((image) => isBlankImage(image) || isWasteImage(image));
     const usable = prepared.filter((image) => !isBlankImage(image) && !isWasteImage(image));
     if (removed.length > 0) reviewReasons.push(`\u5DF2\u5254\u9664 ${removed.length} \u5F20\u5E9F\u56FE`);
+    const lowResCount = usable.filter((image) => image.lowRes).length;
+    if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
+    if (config.image?.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
     if (usable.length === 0) {
       throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF0C\u8BF7\u7B49\u5F85\u9605\u5377\u9875\u56FE\u7247\u52A0\u8F7D\u5B8C\u6210\u540E\u91CD\u8BD5");
     }
@@ -1728,6 +1853,8 @@ ${subQuestionLines(question)}`,
       question,
       context: config.context,
       model: gradeService.model,
+      image: config.image,
+      thinkingMode: config.pipeline.thinkingMode,
       promptVersion: PROMPT_VERSION
     });
     const cached = cache.get(cacheKey);
@@ -2470,13 +2597,17 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         <div class="zygr-section" data-page="advanced" hidden>
           <h3>\u56FE\u7247\u4E0E\u63D0\u793A\u8BCD</h3>
           <div class="zygr-grid">
+            ${select("\u56FE\u7247\u7CBE\u5EA6", "image.detail", [["high", "\u9AD8\u7CBE\u5EA6\uFF08\u63A8\u8350\uFF0C\u624B\u5199\u5FC5\u9009\uFF09"], ["auto", "\u81EA\u52A8\uFF08\u7531\u5E73\u53F0\u51B3\u5B9A\uFF09"], ["low", "\u4F4E\u7CBE\u5EA6\uFF08\u4EC5\u9009\u62E9/\u586B\u7A7A\u5224\u5BF9\u9519\uFF09"]])}
             ${select("\u7701 Token \u6863\u4F4D", "image.profile", [["clarity", "\u6E05\u6670\u4F18\u5148"], ["balanced", "\u5747\u8861"], ["saving", "\u7701 Token"]])}
             ${field("\u56FE\u7247\u957F\u8FB9\u4E0A\u9650\uFF08px\uFF09", "image.maxEdge", "number")}
             ${field("JPEG \u8D28\u91CF\uFF080.5-1\uFF09", "image.quality", "number")}
             ${field("\u5386\u53F2\u4FDD\u7559\u6761\u6570", "historyLimit", "number")}
             ${field("\u7F13\u5B58\u6709\u6548\u671F\uFF08\u5929\uFF09", "cacheTtlDays", "number")}
+            ${field("\u7F13\u5B58\u6761\u6570\u4E0A\u9650", "cacheMaxEntries", "number")}
           </div>
-          <label class="zygr-row"><input type="checkbox" data-field="image.cropToAnswer"> \u81EA\u52A8\u88C1\u5207\u767D\u8FB9\uFF08\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4FDD\u6301\u7B54\u5377\u539F\u8C8C\uFF09</label>
+          <label class="zygr-row"><input type="checkbox" data-field="image.cropToAnswer"> \u81EA\u52A8\u88C1\u5207\u7A7A\u767D\u8FB9\u8DDD\uFF08\u5EFA\u8BAE\u5F00\u542F\uFF0C\u5DF2\u9884\u7559 6% \u8FB9\u8DDD\uFF09</label>
+          <label class="zygr-row"><input type="checkbox" data-field="image.splitWideStrip"> \u5BBD\u6241\u4F5C\u7B54\u6761\u5207\u5757\u91CD\u6392\uFF08\u964D\u4F4E\u56FE\u7247 token\uFF09</label>
+          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002</p>
           <h3>\u9650\u901F\u4E0E\u8D85\u65F6</h3>
           <div class="zygr-grid">
             ${field("\u5E76\u53D1\u4E0A\u9650", "pipeline.maxConcurrent", "number")}
@@ -2614,11 +2745,27 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           target.value = "";
         }
         if (target.hasAttribute("data-platform-select")) this.applyPlatform(target.dataset.field || "", target.value);
+        if (target.dataset.field === "image.profile") this.applyImageProfile(target.value);
         if (target.hasAttribute("data-config-file") && target.files?.[0]) {
           void this.importConfig(target.files[0]);
           target.value = "";
         }
       });
+    }
+    // 档位只是"尺寸建议"：细节精度保持高精度，低精度只能手动选。
+    applyImageProfile(id) {
+      const presets = {
+        clarity: { label: "\u6E05\u6670\u4F18\u5148", maxEdge: 1600, detail: "high" },
+        balanced: { label: "\u5747\u8861", maxEdge: 1440, detail: "high" },
+        saving: { label: "\u7701 Token", maxEdge: 1280, detail: "high" }
+      };
+      const preset = presets[id];
+      if (!preset) return;
+      const edge = this.shadow.querySelector('[data-field="image.maxEdge"]');
+      const detail = this.shadow.querySelector('[data-field="image.detail"]');
+      if (edge) edge.value = String(preset.maxEdge);
+      if (detail) detail.value = preset.detail;
+      this.toast(`\u5DF2\u5957\u7528\u300C${preset.label}\u300D\u5EFA\u8BAE\uFF1A\u957F\u8FB9 ${preset.maxEdge}px\u3001\u9AD8\u7CBE\u5EA6`);
     }
     refreshPlatformSelects() {
       const presets = listPlatformPresets();
@@ -2899,7 +3046,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   }
   async function bootstrap() {
     let config = loadConfig();
-    let cache = new CacheStore(config.cacheTtlDays);
+    let cache = null;
+    // 缓存条数上限可配（默认 2000）：双评大卷时同一份卷可能在很后面再次出现。
+    const createCache = () => new CacheStore(config.cacheTtlDays, config.cacheMaxEntries, {
+      onStorageError: () => panel.toast("\u5B58\u50A8\u914D\u989D\u5DF2\u6EE1\uFF0C\u672C\u5730\u7F13\u5B58\u5DF2\u505C\u6B62\u5199\u5165\uFF0C\u8BF7\u6E05\u7406\u5386\u53F2\u6216\u7F13\u5B58")
+    });
     let limiter = buildLimiter(config);
     let markingDoc = null;
     let currentQuestion = null;
@@ -2923,6 +3074,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       onHistory: () => historyPanel.show(loadHistory()),
       onSettings: () => settingsPanel.show(config)
     });
+    cache = createCache();
     const settingsPanel = new SettingsPanel({
       onSave: (draft) => {
         config = draft;
@@ -2930,7 +3082,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
         syncThinkingModesFromConfig(config);
-        cache = new CacheStore(config.cacheTtlDays);
+        cache = createCache();
         limiter = buildLimiter(config);
         panel.setCache(pipelineLabel(config));
         panel.setSubtitle("\u914D\u7F6E\u5DF2\u66F4\u65B0");
@@ -2956,7 +3108,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
         syncThinkingModesFromConfig(config);
-        cache = new CacheStore(config.cacheTtlDays);
+        cache = createCache();
         limiter = buildLimiter(config);
         panel.setCache(pipelineLabel(config));
         panel.setSubtitle("\u914D\u7F6E\u5DF2\u5BFC\u5165");
@@ -2964,7 +3116,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       onReset: () => {
         resetConfig();
         config = loadConfig();
-        cache = new CacheStore(config.cacheTtlDays);
+        cache = createCache();
         limiter = buildLimiter(config);
         settingsPanel.show(config);
       },
@@ -3207,6 +3359,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       cache.clear();
       panel.toast("\u7F13\u5B58\u5DF2\u6E05\u7A7A");
     });
+    // 缓存写入是合并批量的，页面关闭前补一次落盘，避免丢最后几份结果。
+    window.addEventListener("pagehide", () => cache?.flush?.());
     await detect();
   }
   void bootstrap().catch((error) => {
