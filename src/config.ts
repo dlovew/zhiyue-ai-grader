@@ -13,7 +13,8 @@
       question: "",
       answer: "",
       rubric: "",
-      maxScore: 0
+      maxScore: 0,
+      subject: ""
     },
     image: {
       profile: "balanced",
@@ -21,7 +22,10 @@
       quality: 0.82,
       detail: "high",
       cropToAnswer: true,
-      splitWideStrip: true
+      splitWideStrip: true,
+      // 合并会牺牲单页有效分辨率，默认关闭，由用户在「高级」里按需开启。
+      mergeImages: false,
+      autoBySubject: true
     },
     promptVersion: "zygr-prompt-v2",
     historyLimit: 500,

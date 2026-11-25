@@ -104,6 +104,44 @@
     if (pieces < 2 || pieces > 16) return null;
     return { rows, cols, pieces };
   }
+  // 学科策略：公式/符号密集的学科保分辨率；文字为主的科目适度收敛以省 token。
+  // 只在用户明确选了学科时生效，detail 一律高精度，避免手写小字被糊掉。
+  var SUBJECT_IMAGE_PROFILES = {
+    "\u6570\u5B66": { maxEdge: 1600, detail: "high" },
+    "\u7269\u7406": { maxEdge: 1600, detail: "high" },
+    "\u5316\u5B66": { maxEdge: 1600, detail: "high" },
+    "\u751F\u7269": { maxEdge: 1440, detail: "high" },
+    "\u8BED\u6587": { maxEdge: 1440, detail: "high" },
+    "\u82F1\u8BED": { maxEdge: 1440, detail: "high" },
+    "\u5386\u53F2": { maxEdge: 1280, detail: "high" },
+    "\u653F\u6CBB": { maxEdge: 1280, detail: "high" },
+    "\u5730\u7406": { maxEdge: 1280, detail: "high" }
+  };
+  // 把配置规整成一次批改真正使用的图片参数；学科自动策略优先于手动尺寸。
+  function resolveImageOptions(config) {
+    const image = isRecord(config?.image) ? config.image : {};
+    const positive = (value, fallback) => {
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 ? number : fallback;
+    };
+    const resolved = {
+      profile: String(image.profile || "balanced"),
+      maxEdge: Math.min(2400, Math.max(600, positive(image.maxEdge, 1600))),
+      quality: Math.min(1, Math.max(0.5, positive(image.quality, 0.82))),
+      detail: ["high", "auto", "low"].includes(image.detail) ? image.detail : "high",
+      cropToAnswer: image.cropToAnswer !== false,
+      splitWideStrip: image.splitWideStrip !== false,
+      mergeImages: image.mergeImages === true
+    };
+    const subject = String(config?.context?.subject || "").trim();
+    const preset = image.autoBySubject === false ? null : SUBJECT_IMAGE_PROFILES[subject];
+    if (preset) {
+      resolved.maxEdge = preset.maxEdge;
+      resolved.detail = preset.detail;
+      resolved.subject = subject;
+    }
+    return resolved;
+  }
   async function prepareImage(src, config) {
     const dataUrl = src.startsWith("data:") ? src : await fetchAsDataUrl(src);
     const image = await loadImage(dataUrl);
@@ -165,6 +203,56 @@
       lowRes: Math.min(output.width, output.height) < 400,
       restructured: Boolean(layout)
     };
+  }
+  // 同题多图按顺序两两纵向拼成一张：省掉每张图的固定开销与 tile 取整浪费。
+  // 拼后过高则放弃合并，避免整页被缩到短边 768 后手写发糊。
+  async function mergePreparedImages(images, options) {
+    if (!options?.mergeImages || !Array.isArray(images) || images.length < 2) return images;
+    const merged = [];
+    for (let index = 0; index < images.length; index += 2) {
+      const first = images[index];
+      const second = images[index + 1];
+      if (!second) {
+        merged.push(first);
+        continue;
+      }
+      // 只有两张图都足够清晰时才合并，否则单页有效分辨率会掉到看不清手写。
+      if (Math.min(first.width, first.height, second.width, second.height) < 1100) {
+        merged.push(first, second);
+        continue;
+      }
+      const width = Math.max(first.width, second.width);
+      const gap = Math.max(16, Math.round(Math.min(first.width, second.width) * 0.03));
+      const height = first.height + second.height + gap;
+      if (height > width * 2.4) {
+        merged.push(first, second);
+        continue;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        merged.push(first, second);
+        continue;
+      }
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, width, height);
+      context.drawImage(await loadImage(first.dataUrl), 0, 0, first.width, first.height);
+      context.drawImage(await loadImage(second.dataUrl), 0, first.height + gap, second.width, second.height);
+      const dataUrl = canvas.toDataURL("image/jpeg", Math.min(1, Math.max(0.5, options.quality)));
+      merged.push({
+        dataUrl,
+        hash: await sha256(dataUrl),
+        width,
+        height,
+        blankRatio: Math.min(first.blankRatio, second.blankRatio),
+        lowRes: Boolean(first.lowRes || second.lowRes),
+        restructured: true,
+        mergedCount: 2
+      });
+    }
+    return merged;
   }
   function dedupePrepared(images) {
     const seen = /* @__PURE__ */ new Set();

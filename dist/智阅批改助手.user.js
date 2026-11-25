@@ -337,7 +337,8 @@
       question: "",
       answer: "",
       rubric: "",
-      maxScore: 0
+      maxScore: 0,
+      subject: ""
     },
     image: {
       profile: "balanced",
@@ -345,7 +346,10 @@
       quality: 0.82,
       detail: "high",
       cropToAnswer: true,
-      splitWideStrip: true
+      splitWideStrip: true,
+      // 合并会牺牲单页有效分辨率，默认关闭，由用户在「高级」里按需开启。
+      mergeImages: false,
+      autoBySubject: true
     },
     promptVersion: "zygr-prompt-v2",
     historyLimit: 500,
@@ -1433,6 +1437,44 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     if (pieces < 2 || pieces > 16) return null;
     return { rows, cols, pieces };
   }
+  // 学科策略：公式/符号密集的学科保分辨率；文字为主的科目适度收敛以省 token。
+  // 只在用户明确选了学科时生效，detail 一律高精度，避免手写小字被糊掉。
+  var SUBJECT_IMAGE_PROFILES = {
+    "\u6570\u5B66": { maxEdge: 1600, detail: "high" },
+    "\u7269\u7406": { maxEdge: 1600, detail: "high" },
+    "\u5316\u5B66": { maxEdge: 1600, detail: "high" },
+    "\u751F\u7269": { maxEdge: 1440, detail: "high" },
+    "\u8BED\u6587": { maxEdge: 1440, detail: "high" },
+    "\u82F1\u8BED": { maxEdge: 1440, detail: "high" },
+    "\u5386\u53F2": { maxEdge: 1280, detail: "high" },
+    "\u653F\u6CBB": { maxEdge: 1280, detail: "high" },
+    "\u5730\u7406": { maxEdge: 1280, detail: "high" }
+  };
+  // 把配置规整成一次批改真正使用的图片参数；学科自动策略优先于手动尺寸。
+  function resolveImageOptions(config) {
+    const image = isRecord(config?.image) ? config.image : {};
+    const positive = (value, fallback) => {
+      const number = Number(value);
+      return Number.isFinite(number) && number > 0 ? number : fallback;
+    };
+    const resolved = {
+      profile: String(image.profile || "balanced"),
+      maxEdge: Math.min(2400, Math.max(600, positive(image.maxEdge, 1600))),
+      quality: Math.min(1, Math.max(0.5, positive(image.quality, 0.82))),
+      detail: ["high", "auto", "low"].includes(image.detail) ? image.detail : "high",
+      cropToAnswer: image.cropToAnswer !== false,
+      splitWideStrip: image.splitWideStrip !== false,
+      mergeImages: image.mergeImages === true
+    };
+    const subject = String(config?.context?.subject || "").trim();
+    const preset = image.autoBySubject === false ? null : SUBJECT_IMAGE_PROFILES[subject];
+    if (preset) {
+      resolved.maxEdge = preset.maxEdge;
+      resolved.detail = preset.detail;
+      resolved.subject = subject;
+    }
+    return resolved;
+  }
   async function prepareImage(src, config) {
     const dataUrl = src.startsWith("data:") ? src : await fetchAsDataUrl(src);
     const image = await loadImage(dataUrl);
@@ -1494,6 +1536,56 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       lowRes: Math.min(output.width, output.height) < 400,
       restructured: Boolean(layout)
     };
+  }
+  // 同题多图按顺序两两纵向拼成一张：省掉每张图的固定开销与 tile 取整浪费。
+  // 拼后过高则放弃合并，避免整页被缩到短边 768 后手写发糊。
+  async function mergePreparedImages(images, options) {
+    if (!options?.mergeImages || !Array.isArray(images) || images.length < 2) return images;
+    const merged = [];
+    for (let index = 0; index < images.length; index += 2) {
+      const first = images[index];
+      const second = images[index + 1];
+      if (!second) {
+        merged.push(first);
+        continue;
+      }
+      // 只有两张图都足够清晰时才合并，否则单页有效分辨率会掉到看不清手写。
+      if (Math.min(first.width, first.height, second.width, second.height) < 1100) {
+        merged.push(first, second);
+        continue;
+      }
+      const width = Math.max(first.width, second.width);
+      const gap = Math.max(16, Math.round(Math.min(first.width, second.width) * 0.03));
+      const height = first.height + second.height + gap;
+      if (height > width * 2.4) {
+        merged.push(first, second);
+        continue;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        merged.push(first, second);
+        continue;
+      }
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, width, height);
+      context.drawImage(await loadImage(first.dataUrl), 0, 0, first.width, first.height);
+      context.drawImage(await loadImage(second.dataUrl), 0, first.height + gap, second.width, second.height);
+      const dataUrl = canvas.toDataURL("image/jpeg", Math.min(1, Math.max(0.5, options.quality)));
+      merged.push({
+        dataUrl,
+        hash: await sha256(dataUrl),
+        width,
+        height,
+        blankRatio: Math.min(first.blankRatio, second.blankRatio),
+        lowRes: Boolean(first.lowRes || second.lowRes),
+        restructured: true,
+        mergedCount: 2
+      });
+    }
+    return merged;
   }
   function dedupePrepared(images) {
     const seen = /* @__PURE__ */ new Set();
@@ -1800,8 +1892,8 @@ ${subQuestionLines(question)}`,
   function configured(service) {
     return Boolean(service.endpoint.trim() && service.model.trim());
   }
-  async function runGrade(service, question, maxScore, prompt, images, config, rateLimiter) {
-    const detail = ["high", "low", "auto"].includes(config.image?.detail) ? config.image.detail : "high";
+  async function runGrade(service, question, maxScore, prompt, images, config, rateLimiter, imageOptions) {
+    const detail = imageOptions?.detail || "high";
     const content = [
       { type: "text", text: prompt },
       ...images.map((image) => ({ type: "image_url", image_url: { url: image.dataUrl, detail } }))
@@ -1832,8 +1924,10 @@ ${subQuestionLines(question)}`,
     const gradeService = config.pipeline.vlm;
     if (!configured(gradeService)) throw new Error("\u6279\u6539\u670D\u52A1\u672A\u914D\u7F6E\u5B8C\u6574\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u591A\u6A21\u6001\u670D\u52A1\u7684\u63A5\u53E3\u5730\u5740\u4E0E\u6A21\u578B");
     stage("\u51C6\u5907\u4F5C\u7B54\u56FE\u7247");
+    // 学科策略优先于手动尺寸；未选学科时完全按手动参数。
+    const imageOptions = resolveImageOptions(config);
     const preparedList = (await Promise.all(
-      question.images.map((src) => prepareImage(src, config.image).catch(() => null))
+      question.images.map((src) => prepareImage(src, imageOptions).catch(() => null))
     )).filter((item) => item !== null);
     const prepared = dedupePrepared(preparedList);
     const removed = prepared.filter((image) => isBlankImage(image) || isWasteImage(image));
@@ -1841,19 +1935,20 @@ ${subQuestionLines(question)}`,
     if (removed.length > 0) reviewReasons.push(`\u5DF2\u5254\u9664 ${removed.length} \u5F20\u5E9F\u56FE`);
     const lowResCount = usable.filter((image) => image.lowRes).length;
     if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
-    if (config.image?.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
+    if (imageOptions.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
     if (usable.length === 0) {
       throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF0C\u8BF7\u7B49\u5F85\u9605\u5377\u9875\u56FE\u7247\u52A0\u8F7D\u5B8C\u6210\u540E\u91CD\u8BD5");
     }
+    const payloadImages = await mergePreparedImages(usable, imageOptions);
     const prompt = buildGradingPrompt(question, config.context, {
-      profile: config.image.profile,
+      profile: imageOptions.profile,
       removedImages: removed.length
     });
     const cacheKey = makeGradeCacheKey({
       question,
       context: config.context,
       model: gradeService.model,
-      image: config.image,
+      image: imageOptions,
       thinkingMode: config.pipeline.thinkingMode,
       promptVersion: PROMPT_VERSION
     });
@@ -1863,7 +1958,7 @@ ${subQuestionLines(question)}`,
       return { ...cached, cacheHit: true, elapsedMs: Date.now() - startedAt, cacheKey };
     }
     stage("\u6A21\u578B\u8BC4\u5206", gradeService.model);
-    const grade = await runGrade(gradeService, question, maxScore, prompt, usable, config, rateLimiter);
+    const grade = await runGrade(gradeService, question, maxScore, prompt, payloadImages, config, rateLimiter, imageOptions);
     if (grade.status === "blank" && grade.score > 0) {
       reviewReasons.push("\u8BC6\u522B\u4E3A\u672A\u4F5C\u7B54\u4F46\u7ED9\u51FA\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u67E5");
     }
@@ -2553,7 +2648,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           ${area("\u9898\u76EE\u5185\u5BB9\uFF08\u53EF\u9009\uFF09", "context.question")}
           ${area("\u53C2\u8003\u7B54\u6848", "context.answer", "\u5FC5\u586B")}
           ${area("\u8BC4\u5206\u6807\u51C6", "context.rubric", "\u5FC5\u586B")}
-          <div class="zygr-grid">${field("\u672C\u65B9\u6848\u6EE1\u5206", "context.maxScore", "number")}</div>
+          <div class="zygr-grid">
+            ${field("\u672C\u65B9\u6848\u6EE1\u5206", "context.maxScore", "number")}
+            ${select("\u5B66\u79D1\uFF08\u7528\u4E8E\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF09", "context.subject", [["", "\u4E0D\u6307\u5B9A\uFF08\u6309\u624B\u52A8\u53C2\u6570\uFF09"], ...Object.keys(RUBRIC_SUBJECTS).map((name) => [name, name])])}
+          </div>
         </div>
 
         <div class="zygr-section" data-page="api" hidden>
@@ -2607,7 +2705,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           </div>
           <label class="zygr-row"><input type="checkbox" data-field="image.cropToAnswer"> \u81EA\u52A8\u88C1\u5207\u7A7A\u767D\u8FB9\u8DDD\uFF08\u5EFA\u8BAE\u5F00\u542F\uFF0C\u5DF2\u9884\u7559 6% \u8FB9\u8DDD\uFF09</label>
           <label class="zygr-row"><input type="checkbox" data-field="image.splitWideStrip"> \u5BBD\u6241\u4F5C\u7B54\u6761\u5207\u5757\u91CD\u6392\uFF08\u964D\u4F4E\u56FE\u7247 token\uFF09</label>
-          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002</p>
+          <label class="zygr-row"><input type="checkbox" data-field="image.autoBySubject"> \u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF08\u5DF2\u9009\u5B66\u79D1\u65F6\u751F\u6548\uFF09</label>
+          <label class="zygr-row"><input type="checkbox" data-field="image.mergeImages"> \u540C\u9898\u591A\u56FE\u5408\u5E76\u6210\u4E00\u5F20\uFF08\u7701\u56FA\u5B9A\u5F00\u9500\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4F1A\u7565\u964D\u5355\u9875\u6E05\u6670\u5EA6\uFF09</label>
+          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\uFF1B\u591A\u56FE\u5408\u5E76\u4EC5\u5728\u4E24\u5F20\u56FE\u90FD\u4E0D\u5C0F\u4E8E 1100px \u4E14\u5408\u5E76\u540E\u4E0D\u8FC7\u9AD8\u65F6\u751F\u6548\uFF0C\u5426\u5219\u81EA\u52A8\u653E\u5F03\u3002</p>
           <h3>\u9650\u901F\u4E0E\u8D85\u65F6</h3>
           <div class="zygr-grid">
             ${field("\u5E76\u53D1\u4E0A\u9650", "pipeline.maxConcurrent", "number")}

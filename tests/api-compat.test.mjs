@@ -50,13 +50,14 @@ function loadCore() {
   const files = [
     'src/infra/storage.ts',
     'src/config.ts',
+    'src/infra/image.ts',
     'src/core/cache.ts',
     'src/core/prompt.ts',
     'src/core/parse.ts'
   ];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, parseGrade, buildGradingPrompt, PROMPT_VERSION, DEFAULT_CONFIG, STORAGE_KEYS };`, context);
+  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, parseGrade, buildGradingPrompt, PROMPT_VERSION, resolveImageOptions, SUBJECT_IMAGE_PROFILES, DEFAULT_CONFIG, STORAGE_KEYS };`, context);
   return { core: context.__core, store };
 }
 
@@ -480,6 +481,32 @@ test('提示词固定段不含动态内容，同题不同废图数完全一致',
   assert.doesNotMatch(a, /已剔除 \d+ 张废图/);
 });
 
+test('学科图片策略优先于手动尺寸，未选学科时保持手动值', () => {
+  const { core } = loadCore();
+  const manual = core.resolveImageOptions({ image: { maxEdge: 1600, detail: 'high' }, context: { subject: '' } });
+  assert.equal(manual.maxEdge, 1600);
+  assert.equal(manual.subject, undefined);
+  assert.equal(manual.cropToAnswer, true);
+  assert.equal(manual.splitWideStrip, true);
+  // 多图合并会牺牲单页分辨率，默认关闭
+  assert.equal(manual.mergeImages, false);
+  assert.equal(core.resolveImageOptions({ image: { mergeImages: true } }).mergeImages, true);
+
+  const math = core.resolveImageOptions({ image: { maxEdge: 1024, detail: 'low' }, context: { subject: '数学' } });
+  assert.equal(math.maxEdge, 1600);
+  assert.equal(math.detail, 'high');
+  assert.equal(math.subject, '数学');
+
+  const geography = core.resolveImageOptions({ image: { maxEdge: 1600 }, context: { subject: '地理' } });
+  assert.equal(geography.maxEdge, 1280);
+
+  const disabled = core.resolveImageOptions({ image: { maxEdge: 1024, autoBySubject: false }, context: { subject: '数学' } });
+  assert.equal(disabled.maxEdge, 1024);
+  assert.equal(disabled.subject, undefined);
+
+  assert.equal(Object.keys(core.SUBJECT_IMAGE_PROFILES).length, 9);
+});
+
 test('缓存批量写入并剔除模型原文', () => {
   const { core, store } = loadCore();
   const cache = new core.CacheStore(30, 2000);
@@ -584,7 +611,12 @@ test('构建产物包含缓存扩容、输出上限与宽条重排能力', () =>
   assert.match(built, /max_tokens/);
   assert.match(built, /stripLayout/);
   assert.match(built, /splitWideStrip/);
-  assert.match(built, /data-field="image\.detail"/);
+  assert.match(built, /"image\.detail"/);
+  assert.match(built, /resolveImageOptions/);
+  assert.match(built, /mergePreparedImages/);
+  assert.match(built, /"context\.subject"/);
+  assert.match(built, /data-field="image\.mergeImages"/);
+  assert.match(built, /data-field="image\.autoBySubject"/);
 });
 
 test('思考模式归一化兼容旧布尔并支持 low/high/max', () => {
