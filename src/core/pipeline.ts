@@ -72,7 +72,7 @@ async function gradeQuestion(options) {
     context: config.context,
     model: gradeService.model,
     image: imageOptions,
-    thinkingMode: config.pipeline.thinkingMode,
+    thinkingMode: gradeService.thinkingMode,
     outputMode,
     promptVersion: PROMPT_VERSION
   });

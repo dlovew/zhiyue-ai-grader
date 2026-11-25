@@ -769,26 +769,41 @@ test('界面使用思考模式下拉菜单而非关闭勾选框', () => {
   assert.doesNotMatch(built, /data-field="pipeline\.disableThinking"/);
 });
 
-test('思考档位随平台变化：DeepSeek / 商汤 / 智谱 各不同', () => {
+test('所有平台的思考只暴露两档：关闭 / 模型默认', () => {
   const { api } = loadModules();
-  assert.equal(Array.from(api.resolveProfile({ platform: 'deepseek' }).thinkingLevels).join(','), 'off,auto,low,high,max');
-  // 商汤官方只给了 minimal 至 max 六档，没有关闭字段
-  assert.equal(
-    Array.from(api.resolveProfile({ platform: 'sensenova' }).thinkingLevels).join(','),
-    'auto,minimal,low,medium,high,xhigh,max'
-  );
-  // 智谱 glm-5 类模型无法关闭思考，最低 low
-  assert.equal(Array.from(api.resolveProfile({ platform: 'zhipu' }).thinkingLevels).join(','), 'auto,low,high,max');
-  assert.equal(Array.from(api.resolveProfile({ platform: 'custom' }).thinkingLevels).join(','), 'off,auto');
+  for (const platform of ['custom', 'opencode-ai', 'deepseek', 'sensenova', 'siliconflow', 'moonshot', 'dashscope', 'zhipu', 'volcengine-chat']) {
+    assert.equal(Array.from(api.resolveProfile({ platform }).thinkingLevels).join(','), 'off,auto', platform);
+  }
   assert.equal(api.getPlatformPreset('sensenova').endpoint, 'https://token.sensenova.cn/v1/chat/completions');
 });
 
-test('不支持的思考档位收敛到该平台首项', () => {
+test('历史档位收敛为模型默认，关闭与默认保持原样', () => {
   const { api } = loadModules();
-  assert.equal(api.clampThinkingLevel('zhipu', 'off'), 'auto');
-  assert.equal(api.clampThinkingLevel('deepseek', 'minimal'), 'off');
-  assert.equal(api.clampThinkingLevel('sensenova', 'xhigh'), 'xhigh');
-  assert.equal(api.clampThinkingLevel('custom', 'max'), 'off');
+  assert.equal(api.clampThinkingLevel('deepseek', 'off'), 'off');
+  assert.equal(api.clampThinkingLevel('deepseek', 'auto'), 'auto');
+  assert.equal(api.clampThinkingLevel('sensenova', 'xhigh'), 'auto');
+  assert.equal(api.clampThinkingLevel('zhipu', 'low'), 'auto');
+  assert.equal(api.clampThinkingLevel('custom', 'max'), 'auto');
+  assert.equal(api.clampThinkingLevel('custom', ''), 'auto');
+});
+
+test('智谱与商汤选「关闭」时不注入未验证字段，避免 400 重试', async () => {
+  const { api, calls } = loadModules([{ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }]);
+  for (const platform of ['zhipu', 'sensenova']) {
+    const profile = api.resolveProfile({ platform, endpoint: 'https://example.com/v1/chat/completions', model: 'm', apiKey: 'k' });
+    assert.equal(profile.disableThinkingKey, null);
+    const payload = { model: 'm', messages: [] };
+    const injected = api.thinkingControl(payload, profile, 'off');
+    assert.equal(injected.length, 0, platform);
+    assert.equal(payload.thinking, undefined);
+    assert.equal(payload.reasoning_effort, undefined);
+  }
+  // DeepSeek 的关闭有官方字段，应正常注入
+  const deepseek = api.resolveProfile({ platform: 'deepseek', endpoint: 'https://api.deepseek.com/chat/completions', model: 'm', apiKey: 'k' });
+  const payload = { model: 'm', messages: [] };
+  assert.equal(api.thinkingControl(payload, deepseek, 'off').join(','), 'reasoning_effort');
+  assert.equal(payload.reasoning_effort, 'none');
+  assert.equal(calls.length, 0);
 });
 
 test('商汤日日新的强度参数按档位传递', async () => {

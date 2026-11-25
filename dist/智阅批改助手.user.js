@@ -711,7 +711,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
 
   // 内置预设只提供建议端点/模型与协议档案；用户已填写的 endpoint / model / apiKey 始终优先。
   // authHeader: bearer | api-key | none；全部请求统一为 Chat Completions。
-  // thinkingLevels 决定该平台「思考强度」下拉的选项，thinkingFields 是档位到请求字段的映射。
+  // 思考只暴露「关闭 / 模型默认」两档；thinkingFields 是各平台强度到请求字段的映射。
   // disableThinkingKey / jsonModeKey 为 null 表示不向该平台注入对应字段。
   var BUILTIN_PLATFORM_PRESETS = [
     {
@@ -720,7 +720,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "",
       models: [],
       authHeader: "bearer",
-      thinkingLevels: ["off", "auto"],
       disableThinkingKey: null,
       jsonModeKey: "response_format",
       stream: false
@@ -731,7 +730,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "https://opencode.ai/inference/openai/v1/chat/completions",
       models: ["hy4-flash-free"],
       authHeader: "bearer",
-      thinkingLevels: ["off", "auto"],
       disableThinkingKey: null,
       jsonModeKey: "response_format",
       stream: false
@@ -744,7 +742,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       authHeader: "bearer",
       // 官方文档（2026）：thinking.type 控制开关，reasoning_effort 取 none|low|high|max，
       // 省略即"模型默认"（默认开启思考）；minimal→low、medium/xhigh→high。
-      thinkingLevels: ["off", "auto", "low", "high", "max"],
       thinkingFields: {
         off: { reasoning_effort: "none" },
         low: { reasoning_effort: "low" },
@@ -764,9 +761,8 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       authHeader: "bearer",
       // 模型列表与推理同域：GET https://token.sensenova.cn/v1/models。
       modelsEndpoint: "https://token.sensenova.cn/v1/models",
-      // 官方文档只给出 minimal / low / medium / high / xhigh / max 六档，
-      // 没有"关闭"字段，因此不提供 off：不选档位（模型默认）即为最省。
-      thinkingLevels: ["auto", "minimal", "low", "medium", "high", "xhigh", "max"],
+      // 官方文档只给出 minimal / low / medium / high / xhigh / max 六档，没有关闭字段；
+      // 因此「关闭」不注入任何参数（等同模型默认），强度映射保留在 thinkingFields 里。
       thinkingFields: {
         minimal: { reasoning_effort: "minimal" },
         low: { reasoning_effort: "low" },
@@ -775,7 +771,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
         xhigh: { reasoning_effort: "xhigh" },
         max: { reasoning_effort: "max" }
       },
-      disableThinkingKey: "thinking",
+      disableThinkingKey: null,
       jsonModeKey: "response_format",
       stream: false
     },
@@ -788,7 +784,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       disableThinkingKey: "enable_thinking",
       // 硅基流动 enable_thinking 只接受布尔值；强度用顶层 reasoning_effort。
       // 官方文档：枚举 high|max，其中 low/medium 会被服务端映射为 high。
-      thinkingLevels: ["off", "auto", "high", "max"],
       thinkingFields: {
         off: { enable_thinking: false },
         low: { reasoning_effort: "high" },
@@ -804,7 +799,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "https://api.moonshot.cn/v1/chat/completions",
       models: ["moonshot-v1-8k-vision-preview", "moonshot-v1-32k", "moonshot-v1-128k"],
       authHeader: "bearer",
-      thinkingLevels: ["off", "auto"],
       thinkingFields: { off: { thinking: { type: "disabled" } } },
       disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
@@ -816,7 +810,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
       models: ["qwen-vl-max", "qwen-vl-plus", "qwen-plus"],
       authHeader: "bearer",
-      thinkingLevels: ["off", "auto"],
       thinkingFields: { off: { enable_thinking: false } },
       disableThinkingKey: "enable_thinking",
       jsonModeKey: "response_format",
@@ -828,12 +821,11 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
       models: ["glm-4v-flash", "glm-4-plus", "glm-4-air", "glm-5.3-flash"],
       authHeader: "bearer",
-      disableThinkingKey: "thinking",
       // 智谱官方格式：thinking.type 只接受 enabled（glm-5.x 强制思考），
       // 强度由独立的 reasoning_effort 字段控制（low/high/max，默认 max）。
-      // 关闭写了 disabled 会触发错误码 1210「该模型始终思考，不支持关闭思考」。
-      // 因此该平台不提供「关闭」档，最低只能选 low。
-      thinkingLevels: ["auto", "low", "high", "max"],
+      // 关闭写了 disabled 会触发错误码 1210「该模型始终思考，不支持关闭思考」，
+      // 所以该平台的「关闭」不注入参数（等同模型默认），避免 400 重试。
+      disableThinkingKey: null,
       thinkingFields: {
         low: { thinking: { type: "enabled" }, reasoning_effort: "low" },
         high: { thinking: { type: "enabled" }, reasoning_effort: "high" },
@@ -848,7 +840,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
       models: ["doubao-seed-2-1-lite-260915", "doubao-seed-2-1-turbo-260628"],
       authHeader: "bearer",
-      thinkingLevels: ["off", "auto"],
       thinkingFields: { off: { thinking: { type: "disabled" } } },
       disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
@@ -856,22 +847,21 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     },
   ];
 
-  // 该平台「思考强度」下拉可选的档位；未声明的平台只提供 关闭 / 模型默认。
-  function getPlatformThinkingLevels(id) {
-    const preset = getPlatformPreset(id);
-    const levels = Array.isArray(preset?.thinkingLevels) && preset.thinkingLevels.length ? preset.thinkingLevels : ["off", "auto"];
-    return levels.filter((level) => typeof level === "string" && level);
+  // 同一平台的不同模型支持的强度档位并不一致，因此界面统一只给「关闭」与「模型默认」两档；
+  // thinkingFields 里保留各平台的强度映射，供底层与将来扩展使用。
+  var THINKING_LEVELS = ["off", "auto"];
+  function getPlatformThinkingLevels() {
+    return THINKING_LEVELS.slice();
   }
 
   function thinkingLevelLabel(level) {
     return THINKING_LEVEL_LABELS[level] || String(level);
   }
 
-  // 把任意值收敛到该平台支持的档位；不支持的档位回落到该平台的第一项。
+  // 只允许两档：关闭(off) 与 不指定强度(auto)；历史配置里的 low/high/max 一律收敛为 auto。
   function clampThinkingLevel(id, value) {
-    const levels = getPlatformThinkingLevels(id);
     const mode = String(value || "").trim().toLowerCase();
-    return levels.indexOf(mode) >= 0 ? mode : (levels[0] || "off");
+    return THINKING_LEVELS.indexOf(mode) >= 0 ? mode : "auto";
   }
 
   function normalizeThinkingValues(value) {
@@ -2137,7 +2127,7 @@ async function gradeQuestion(options) {
     context: config.context,
     model: gradeService.model,
     image: imageOptions,
-    thinkingMode: config.pipeline.thinkingMode,
+    thinkingMode: gradeService.thinkingMode,
     outputMode,
     promptVersion: PROMPT_VERSION
   });
@@ -2862,9 +2852,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 
           <h3>\u591A\u6A21\u6001\u76F4\u8BC4</h3>
           <p class="zygr-hint">\u8BC4\u5206\u53EA\u4F7F\u7528\u591A\u6A21\u6001\u89C6\u89C9\u6A21\u578B\uFF1A\u76F4\u63A5\u8BFB\u53D6\u4F5C\u7B54\u56FE\u7247\u5E76\u6309\u8BC4\u5206\u6807\u51C6\u8F93\u51FA JSON\u3002\u6A21\u578B\u5FC5\u987B\u652F\u6301\u56FE\u7247\u8F93\u516E\u3002</p>
-          ${select("\u601D\u8003\u5F3A\u5EA6", "pipeline.thinkingMode", [["off", thinkingLevelLabel("off")], ["auto", thinkingLevelLabel("auto")]])}
+          ${select("\u601D\u8003\u6A21\u5F0F", "pipeline.thinkingMode", [["off", thinkingLevelLabel("off")], ["auto", thinkingLevelLabel("auto")]])}
           <div class="zygr-row"><button class="zygr-btn zygr-ghost" data-act="test-thinking">\u6D4B\u8BD5\u5F53\u524D\u601D\u8003\u6A21\u5F0F\u662F\u5426\u751F\u6548</button><span class="zygr-test-status" data-status="thinking"></span></div>
-          <p class="zygr-hint">\u9ED8\u8BA4\u5173\u95ED\u601D\u8003\u3002\u4E0B\u62C9\u9009\u9879\u4F1A\u968F\u5E73\u53F0\u53D8\u5316\uFF08\u5982 DeepSeek\uFF1A\u5173\u95ED / \u6A21\u578B\u9ED8\u8BA4 / low / high / max\uFF1B\u5546\u6C64\u65E5\u65E5\u65B0\uFF1A\u5173\u95ED / \u6A21\u578B\u9ED8\u8BA4 / minimal \u81F3 max\uFF09\uFF1B\u9009\u300C\u6A21\u578B\u9ED8\u8BA4\u300D\u65F6\u4E0D\u4F20\u5F3A\u5EA6\u53C2\u6570\u3002\u667A\u8C31 glm-5 \u7C7B\u59CB\u7EC8\u601D\u8003\u7684\u6A21\u578B\u65E0\u6CD5\u5173\u95ED\uFF0C\u53EA\u80FD\u4ECE low \u8D77\u9009\uFF1B\u300C\u81EA\u5B9A\u4E49\u300D\u5E73\u53F0\u4E0D\u6CE8\u5165\u4EFB\u4F55\u53C2\u6570\uFF0C\u5F00\u5173\u9760\u6A21\u578B\u81EA\u8EAB\u9ED8\u8BA4\u3002</p>
+          <p class="zygr-hint">\u9ED8\u8BA4\u5173\u95ED\u601D\u8003\u3002\u540C\u4E00\u5E73\u53F0\u4E0D\u540C\u6A21\u578B\u652F\u6301\u7684\u5F3A\u5EA6\u6863\u4F4D\u5E76\u4E0D\u4E00\u81F4\uFF0C\u56E0\u6B64\u7EDF\u4E00\u53EA\u7ED9\u4E24\u6863\uFF1A\u300C\u5173\u95ED\u601D\u8003\u300D\u4E0E\u300C\u6A21\u578B\u9ED8\u8BA4\u300D\uFF08\u4E0D\u4F20\u4EFB\u4F55\u5F3A\u5EA6\u53C2\u6570\uFF09\u3002\u90E8\u5206\u6A21\u578B\uFF08\u5982\u667A\u8C31 glm-5 \u7C7B\u3001\u5546\u6C64\u90E8\u5206\u6A21\u578B\uFF09\u4E0D\u652F\u6301\u5173\u95ED\uFF0C\u6B64\u65F6\u9009\u300C\u5173\u95ED\u300D\u4E5F\u4E0D\u4F1A\u62A5\u9519\uFF0C\u5B9E\u9645\u4ECD\u6309\u6A21\u578B\u9ED8\u8BA4\u8FD0\u884C\u3002</p>
 
           ${platformSelect("\u5E73\u53F0\u9884\u8BBE", "pipeline.vlm.platform")}
           <h3>\u591A\u6A21\u6001\u670D\u52A1</h3>
@@ -3054,14 +3044,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         }
       });
     }
-    // 思考强度下拉随平台变化：只列出该平台文档支持的档位。
-    refreshThinkingLevels(platformId) {
+    // 思考只保留两档，历史配置里的 low/high/max 在回填时收敛为「模型默认」。
+    clampThinkingSelect() {
       const element = this.shadow.querySelector('[data-field="pipeline.thinkingMode"]');
-      if (!(element instanceof HTMLSelectElement)) return;
-      const levels = getPlatformThinkingLevels(platformId);
-      const current = element.value;
-      element.innerHTML = levels.map((level) => `<option value="${level}">${thinkingLevelLabel(level)}</option>`).join("");
-      element.value = levels.indexOf(current) >= 0 ? current : levels[0];
+      if (element instanceof HTMLSelectElement) element.value = clampThinkingLevel("", element.value);
     }
     // 累计用量来自本地计数，不触发任何请求。
     refreshStats() {
@@ -3112,8 +3098,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         modelElement.value = rememberedModel;
         modelElement.dataset.platformBound = id;
       }
-      // 档位随平台切换：先换选项，再落到该平台支持的档位。
-      this.refreshThinkingLevels(id);
+      // 历史记忆里可能是 low/high/max，统一收敛为「模型默认」。
       if (thinkingElement) thinkingElement.value = clampThinkingLevel(id, rememberedThinking || thinkingElement.value || "off");
       if (preset.endpoint) setField(`${base}.endpoint`, preset.endpoint);
       this.toast(`\u5DF2\u5207\u6362\u5230\u300C${preset.label}\u300D\uFF0C\u5DF2\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 API Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F`);
@@ -3326,14 +3311,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.config = config;
       this.mount();
       const boundPlatform = getPath(config, "pipeline.vlm.platform") || "custom";
-      // 先按平台重建下拉选项，再回填数值，否则不在选项里的档位会被浏览器清空。
       this.refreshPlatformSelects();
-      this.refreshThinkingLevels(boundPlatform);
       this.shadow.querySelectorAll("[data-field]").forEach((element) => {
         const value = getPath(config, element.dataset.field ?? "");
         if (element instanceof HTMLInputElement && element.type === "checkbox") element.checked = Boolean(value);
         else element.value = value === void 0 || value === null ? "" : String(value);
       });
+      this.clampThinkingSelect();
       const keyElement = this.shadow.querySelector('[data-field="pipeline.vlm.apiKey"]');
       const modelElement = this.shadow.querySelector('[data-field="pipeline.vlm.model"]');
       if (keyElement) keyElement.dataset.platformBound = boundPlatform;

@@ -18,7 +18,7 @@
 
   // 内置预设只提供建议端点/模型与协议档案；用户已填写的 endpoint / model / apiKey 始终优先。
   // authHeader: bearer | api-key | none；全部请求统一为 Chat Completions。
-  // thinkingLevels 决定该平台「思考强度」下拉的选项，thinkingFields 是档位到请求字段的映射。
+  // 思考只暴露「关闭 / 模型默认」两档；thinkingFields 是各平台强度到请求字段的映射。
   // disableThinkingKey / jsonModeKey 为 null 表示不向该平台注入对应字段。
   var BUILTIN_PLATFORM_PRESETS = [
     {
@@ -27,7 +27,6 @@
       endpoint: "",
       models: [],
       authHeader: "bearer",
-      thinkingLevels: ["off", "auto"],
       disableThinkingKey: null,
       jsonModeKey: "response_format",
       stream: false
@@ -38,7 +37,6 @@
       endpoint: "https://opencode.ai/inference/openai/v1/chat/completions",
       models: ["hy4-flash-free"],
       authHeader: "bearer",
-      thinkingLevels: ["off", "auto"],
       disableThinkingKey: null,
       jsonModeKey: "response_format",
       stream: false
@@ -51,7 +49,6 @@
       authHeader: "bearer",
       // 官方文档（2026）：thinking.type 控制开关，reasoning_effort 取 none|low|high|max，
       // 省略即"模型默认"（默认开启思考）；minimal→low、medium/xhigh→high。
-      thinkingLevels: ["off", "auto", "low", "high", "max"],
       thinkingFields: {
         off: { reasoning_effort: "none" },
         low: { reasoning_effort: "low" },
@@ -71,9 +68,8 @@
       authHeader: "bearer",
       // 模型列表与推理同域：GET https://token.sensenova.cn/v1/models。
       modelsEndpoint: "https://token.sensenova.cn/v1/models",
-      // 官方文档只给出 minimal / low / medium / high / xhigh / max 六档，
-      // 没有"关闭"字段，因此不提供 off：不选档位（模型默认）即为最省。
-      thinkingLevels: ["auto", "minimal", "low", "medium", "high", "xhigh", "max"],
+      // 官方文档只给出 minimal / low / medium / high / xhigh / max 六档，没有关闭字段；
+      // 因此「关闭」不注入任何参数（等同模型默认），强度映射保留在 thinkingFields 里。
       thinkingFields: {
         minimal: { reasoning_effort: "minimal" },
         low: { reasoning_effort: "low" },
@@ -82,7 +78,7 @@
         xhigh: { reasoning_effort: "xhigh" },
         max: { reasoning_effort: "max" }
       },
-      disableThinkingKey: "thinking",
+      disableThinkingKey: null,
       jsonModeKey: "response_format",
       stream: false
     },
@@ -95,7 +91,6 @@
       disableThinkingKey: "enable_thinking",
       // 硅基流动 enable_thinking 只接受布尔值；强度用顶层 reasoning_effort。
       // 官方文档：枚举 high|max，其中 low/medium 会被服务端映射为 high。
-      thinkingLevels: ["off", "auto", "high", "max"],
       thinkingFields: {
         off: { enable_thinking: false },
         low: { reasoning_effort: "high" },
@@ -111,7 +106,6 @@
       endpoint: "https://api.moonshot.cn/v1/chat/completions",
       models: ["moonshot-v1-8k-vision-preview", "moonshot-v1-32k", "moonshot-v1-128k"],
       authHeader: "bearer",
-      thinkingLevels: ["off", "auto"],
       thinkingFields: { off: { thinking: { type: "disabled" } } },
       disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
@@ -123,7 +117,6 @@
       endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
       models: ["qwen-vl-max", "qwen-vl-plus", "qwen-plus"],
       authHeader: "bearer",
-      thinkingLevels: ["off", "auto"],
       thinkingFields: { off: { enable_thinking: false } },
       disableThinkingKey: "enable_thinking",
       jsonModeKey: "response_format",
@@ -135,12 +128,11 @@
       endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
       models: ["glm-4v-flash", "glm-4-plus", "glm-4-air", "glm-5.3-flash"],
       authHeader: "bearer",
-      disableThinkingKey: "thinking",
       // 智谱官方格式：thinking.type 只接受 enabled（glm-5.x 强制思考），
       // 强度由独立的 reasoning_effort 字段控制（low/high/max，默认 max）。
-      // 关闭写了 disabled 会触发错误码 1210「该模型始终思考，不支持关闭思考」。
-      // 因此该平台不提供「关闭」档，最低只能选 low。
-      thinkingLevels: ["auto", "low", "high", "max"],
+      // 关闭写了 disabled 会触发错误码 1210「该模型始终思考，不支持关闭思考」，
+      // 所以该平台的「关闭」不注入参数（等同模型默认），避免 400 重试。
+      disableThinkingKey: null,
       thinkingFields: {
         low: { thinking: { type: "enabled" }, reasoning_effort: "low" },
         high: { thinking: { type: "enabled" }, reasoning_effort: "high" },
@@ -155,7 +147,6 @@
       endpoint: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
       models: ["doubao-seed-2-1-lite-260915", "doubao-seed-2-1-turbo-260628"],
       authHeader: "bearer",
-      thinkingLevels: ["off", "auto"],
       thinkingFields: { off: { thinking: { type: "disabled" } } },
       disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
@@ -163,22 +154,21 @@
     },
   ];
 
-  // 该平台「思考强度」下拉可选的档位；未声明的平台只提供 关闭 / 模型默认。
-  function getPlatformThinkingLevels(id) {
-    const preset = getPlatformPreset(id);
-    const levels = Array.isArray(preset?.thinkingLevels) && preset.thinkingLevels.length ? preset.thinkingLevels : ["off", "auto"];
-    return levels.filter((level) => typeof level === "string" && level);
+  // 同一平台的不同模型支持的强度档位并不一致，因此界面统一只给「关闭」与「模型默认」两档；
+  // thinkingFields 里保留各平台的强度映射，供底层与将来扩展使用。
+  var THINKING_LEVELS = ["off", "auto"];
+  function getPlatformThinkingLevels() {
+    return THINKING_LEVELS.slice();
   }
 
   function thinkingLevelLabel(level) {
     return THINKING_LEVEL_LABELS[level] || String(level);
   }
 
-  // 把任意值收敛到该平台支持的档位；不支持的档位回落到该平台的第一项。
+  // 只允许两档：关闭(off) 与 不指定强度(auto)；历史配置里的 low/high/max 一律收敛为 auto。
   function clampThinkingLevel(id, value) {
-    const levels = getPlatformThinkingLevels(id);
     const mode = String(value || "").trim().toLowerCase();
-    return levels.indexOf(mode) >= 0 ? mode : (levels[0] || "off");
+    return THINKING_LEVELS.indexOf(mode) >= 0 ? mode : "auto";
   }
 
   function normalizeThinkingValues(value) {

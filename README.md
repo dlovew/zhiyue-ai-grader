@@ -23,7 +23,7 @@
 - **本地缓存与限流**：相同题目与图片命中缓存（默认保留 2000 条，可配），批量合并写盘；支持并发数、RPM、TPM 预算控制。
 - **省 Token**：输出三档可调（简略/标准/详细，直接影响输出费用）、紧凑 JSON 协议、`max_tokens` 上限；图片可裁白边、可切块重排（均默认关闭）、精度可选，选了学科后按学科自动套用长边上限。
 - **用量可见**：每份结果显示输入/前缀命中/输出 token，高级页累计统计命中率；数据取自响应 `usage`，不额外消耗 token。
-- **思考强度随平台**：下拉选项按平台文档变化（DeepSeek 为 none/low/high/max，商汤日日新为 minimal 至 max），默认关闭思考。
+- **思考两档**：只提供「关闭 / 模型默认」，默认关闭；避免不同模型档位不一致导致参数不被支持。
 
 ## 安装
 
@@ -118,21 +118,21 @@
 
 内置预设包含：`自定义`、`opencode.ai`、`DeepSeek`、`商汤日日新（SenseNova）`、`硅基流动`、`Kimi / Moonshot`、`通义千问 / DashScope`、`智谱 GLM`、`火山方舟（Chat）`。
 
-**思考强度随平台变化**，下拉只列出该平台文档支持的档位（默认「关闭思考」）：
+**思考只有两档**：`关闭思考` / `模型默认`（不传任何强度参数），默认关闭。原因是同一平台的不同模型支持的强度档位并不一致（DeepSeek 是 none/low/high/max、商汤是 minimal 至 max、智谱只有 low/high/max），统一暴露少数档位比按平台切换更难用，也容易踩到不支持的参数。
 
-| 平台 | 可选档位 | 传参方式 |
-|---|---|---|
-| DeepSeek | 关闭 / 模型默认 / low / high / max | `reasoning_effort` = none / low / high / max；「模型默认」不传 |
-| 商汤日日新 | 模型默认 / minimal / low / medium / high / xhigh / max | 直接发 `reasoning_effort`；官方未提供关闭字段，选「模型默认」即不传 |
-| 硅基流动 | 关闭 / 模型默认 / high / max | 关闭发 `enable_thinking=false`；强度发 `reasoning_effort` |
-| 智谱 GLM | 模型默认 / low / high / max | `thinking.type=enabled` + `reasoning_effort`；glm-5 类模型无法关闭思考 |
-| 通义千问 | 关闭 / 模型默认 | 关闭发 `enable_thinking=false` |
-| Kimi / 火山方舟 | 关闭 / 模型默认 | 关闭发 `thinking.type=disabled` |
-| 自定义 | 关闭 / 模型默认 | 不注入任何参数，靠模型自身默认 |
+「关闭」在各平台的实现：
+
+| 平台 | 关闭时传参 |
+|---|---|
+| DeepSeek | `reasoning_effort: "none"` |
+| 硅基流动 / 通义千问 | `enable_thinking: false` |
+| Kimi / 火山方舟 | `thinking.type: "disabled"` |
+| 智谱 GLM / 商汤日日新 | 不注入（官方无关闭字段，选关闭等同模型默认，避免 400） |
+| 自定义 | 不注入，靠模型自身默认 |
 
 商汤日日新按官方示例预填：推理 `POST https://token.sensenova.cn/v1/chat/completions`，模型列表 `GET https://token.sensenova.cn/v1/models`（Bearer 鉴权，模型默认 `sensenova-6.8-flash`）。点「获取模型列表」即可拉取，返回里 `input_modalities` 含 `image` 的视觉模型会自动排在最前；思考强度直接通过顶层 `reasoning_effort` 传递。
 
-硅基流动使用说明：`enable_thinking` 只接受布尔值，所以「关闭」模式发送 `enable_thinking: false`；强度改用顶层 `reasoning_effort`（按官方文档 `low`/`medium` 由服务端映射为 `high`，`max` 原样发送）。选「模型默认」时不发送任何思考参数，但部分模型默认开启思考并生成长链推理，72B 等大模型处理图片时可能超过默认 120 秒超时——可在「高级」里调大请求超时，或换用更小的视觉模型，或选「关闭」模式关闭思考。
+硅基流动使用说明：`enable_thinking` 只接受布尔值，所以「关闭」模式发送 `enable_thinking: false`；底层仍保留 `reasoning_effort` 的档位映射（`high`/`max`），但界面只暴露两档。选「模型默认」时不发送任何思考参数，但部分模型默认开启思考并生成长链推理，72B 等大模型处理图片时可能超过默认 120 秒超时——可在「高级」里调大请求超时，或换用更小的视觉模型，或选「关闭」模式关闭思考。
 
 选择平台仅填充建议的接口地址、模型与协议参数，**你填写的 endpoint / model / apiKey 始终优先**。需要注意的是：
 
