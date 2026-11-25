@@ -40,6 +40,32 @@ function compactCacheResult(result) {
   }
   return compact;
 }
+// 用量统计：只读响应自带的 usage 与本地命中计数，不产生任何额外请求或 token。
+function loadUsageStats() {
+  const raw = readJson(STORAGE_KEYS.stats, {});
+  const stats = isRecord(raw) ? raw : {};
+  return {
+    graded: Number(stats.graded || 0),
+    localHits: Number(stats.localHits || 0),
+    requests: Number(stats.requests || 0),
+    promptTokens: Number(stats.promptTokens || 0),
+    cachedTokens: Number(stats.cachedTokens || 0),
+    completionTokens: Number(stats.completionTokens || 0)
+  };
+}
+function recordUsage(entry) {
+  const stats = loadUsageStats();
+  const next = {
+    graded: stats.graded + (entry?.graded ? 1 : 0),
+    localHits: stats.localHits + (entry?.localHit ? 1 : 0),
+    requests: stats.requests + (entry?.request ? 1 : 0),
+    promptTokens: stats.promptTokens + Number(entry?.prompt || 0),
+    cachedTokens: stats.cachedTokens + Number(entry?.cached || 0),
+    completionTokens: stats.completionTokens + Number(entry?.completion || 0)
+  };
+  writeJson(STORAGE_KEYS.stats, next);
+  return next;
+}
 var CACHE_WRITE_DELAY = 1200;
 var CacheStore = class {
   constructor(ttlDays, maxEntries = 2000, options = {}) {

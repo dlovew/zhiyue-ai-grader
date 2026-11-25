@@ -293,7 +293,8 @@
   var STORAGE_KEYS = {
     config: "zygr.config.v1",
     history: "zygr.history.v1",
-    cache: "zygr.cache.v1"
+    cache: "zygr.cache.v1",
+    stats: "zygr.stats.v1"
   };
   function readJson(key, fallback) {
     try {
@@ -328,6 +329,7 @@
     pipeline: {
       vlm: { endpoint: "", apiKey: "", model: "", platform: "custom", compat: {} },
       thinkingMode: "off",
+      outputMode: "standard",
       maxConcurrent: 2,
       maxRpm: 60,
       maxTpm: 6e4,
@@ -343,7 +345,6 @@
     image: {
       // 图片策略版本：2 起裁切/切块重排/多图合并默认全关，旧配置在加载时一次性归位。
       policyVersion: 2,
-      profile: "balanced",
       maxEdge: 1600,
       quality: 0.82,
       detail: "high",
@@ -437,6 +438,7 @@
     removeKey(STORAGE_KEYS.config);
     removeKey(STORAGE_KEYS.history);
     removeKey(STORAGE_KEYS.cache);
+    removeKey(STORAGE_KEYS.stats);
     removeKey(PRESET_STORAGE_KEY);
     removeKey(PLATFORM_KEYS_KEY);
     removeKey(PLATFORM_MODELS_KEY);
@@ -485,6 +487,32 @@ function compactCacheResult(result) {
     }));
   }
   return compact;
+}
+// 用量统计：只读响应自带的 usage 与本地命中计数，不产生任何额外请求或 token。
+function loadUsageStats() {
+  const raw = readJson(STORAGE_KEYS.stats, {});
+  const stats = isRecord(raw) ? raw : {};
+  return {
+    graded: Number(stats.graded || 0),
+    localHits: Number(stats.localHits || 0),
+    requests: Number(stats.requests || 0),
+    promptTokens: Number(stats.promptTokens || 0),
+    cachedTokens: Number(stats.cachedTokens || 0),
+    completionTokens: Number(stats.completionTokens || 0)
+  };
+}
+function recordUsage(entry) {
+  const stats = loadUsageStats();
+  const next = {
+    graded: stats.graded + (entry?.graded ? 1 : 0),
+    localHits: stats.localHits + (entry?.localHit ? 1 : 0),
+    requests: stats.requests + (entry?.request ? 1 : 0),
+    promptTokens: stats.promptTokens + Number(entry?.prompt || 0),
+    cachedTokens: stats.cachedTokens + Number(entry?.cached || 0),
+    completionTokens: stats.completionTokens + Number(entry?.completion || 0)
+  };
+  writeJson(STORAGE_KEYS.stats, next);
+  return next;
 }
 var CACHE_WRITE_DELAY = 1200;
 var CacheStore = class {
@@ -669,8 +697,21 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
   var PLATFORM_MODELS_KEY = "zygr.platform.models.v1";
   var PLATFORM_THINKING_KEY = "zygr.platform.thinking.v1";
 
+  // 思考强度档位名称：各平台可选项不同，统一取这套标签。
+  var THINKING_LEVEL_LABELS = {
+    off: "\u5173\u95ED\u601D\u8003",
+    auto: "\u6A21\u578B\u9ED8\u8BA4\uFF08\u4E0D\u4F20\u5F3A\u5EA6\u53C2\u6570\uFF09",
+    minimal: "minimal \u6700\u4F4E",
+    low: "low \u4F4E",
+    medium: "medium \u4E2D",
+    high: "high \u9AD8",
+    xhigh: "xhigh \u6781\u9AD8",
+    max: "max \u6700\u9AD8"
+  };
+
   // 内置预设只提供建议端点/模型与协议档案；用户已填写的 endpoint / model / apiKey 始终优先。
   // authHeader: bearer | api-key | none；全部请求统一为 Chat Completions。
+  // thinkingLevels 决定该平台「思考强度」下拉的选项，thinkingFields 是档位到请求字段的映射。
   // disableThinkingKey / jsonModeKey 为 null 表示不向该平台注入对应字段。
   var BUILTIN_PLATFORM_PRESETS = [
     {
@@ -679,6 +720,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "",
       models: [],
       authHeader: "bearer",
+      thinkingLevels: ["off", "auto"],
       disableThinkingKey: null,
       jsonModeKey: "response_format",
       stream: false
@@ -689,6 +731,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "https://opencode.ai/inference/openai/v1/chat/completions",
       models: ["hy4-flash-free"],
       authHeader: "bearer",
+      thinkingLevels: ["off", "auto"],
       disableThinkingKey: null,
       jsonModeKey: "response_format",
       stream: false
@@ -697,8 +740,38 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       id: "deepseek",
       label: "DeepSeek",
       endpoint: "https://api.deepseek.com/chat/completions",
-      models: ["deepseek-chat", "deepseek-reasoner"],
+      models: ["deepseek-flash", "deepseek-v4-pro"],
       authHeader: "bearer",
+      // 官方文档（2026）：thinking.type 控制开关，reasoning_effort 取 none|low|high|max，
+      // 省略即"模型默认"（默认开启思考）；minimal→low、medium/xhigh→high。
+      thinkingLevels: ["off", "auto", "low", "high", "max"],
+      thinkingFields: {
+        off: { reasoning_effort: "none" },
+        low: { reasoning_effort: "low" },
+        high: { reasoning_effort: "high" },
+        max: { reasoning_effort: "max" }
+      },
+      disableThinkingKey: "thinking",
+      jsonModeKey: "response_format",
+      stream: false
+    },
+    {
+      id: "sensenova",
+      label: "商汤日日新（SenseNova）",
+      endpoint: "https://api.sensenova.cn/compatible-mode/v1/chat/completions",
+      models: [],
+      authHeader: "bearer",
+      // 日日新兼容模式：强度档位为 minimal / low / medium / high / xhigh / max。
+      thinkingLevels: ["off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"],
+      thinkingFields: {
+        off: { thinking: { type: "disabled" } },
+        minimal: { reasoning_effort: "minimal" },
+        low: { reasoning_effort: "low" },
+        medium: { reasoning_effort: "medium" },
+        high: { reasoning_effort: "high" },
+        xhigh: { reasoning_effort: "xhigh" },
+        max: { reasoning_effort: "max" }
+      },
       disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
       stream: false
@@ -712,6 +785,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       disableThinkingKey: "enable_thinking",
       // 硅基流动 enable_thinking 只接受布尔值；强度用顶层 reasoning_effort。
       // 官方文档：枚举 high|max，其中 low/medium 会被服务端映射为 high。
+      thinkingLevels: ["off", "auto", "high", "max"],
       thinkingFields: {
         off: { enable_thinking: false },
         low: { reasoning_effort: "high" },
@@ -727,7 +801,9 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "https://api.moonshot.cn/v1/chat/completions",
       models: ["moonshot-v1-8k-vision-preview", "moonshot-v1-32k", "moonshot-v1-128k"],
       authHeader: "bearer",
-      disableThinkingKey: null,
+      thinkingLevels: ["off", "auto"],
+      thinkingFields: { off: { thinking: { type: "disabled" } } },
+      disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
       stream: false
     },
@@ -737,6 +813,8 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
       models: ["qwen-vl-max", "qwen-vl-plus", "qwen-plus"],
       authHeader: "bearer",
+      thinkingLevels: ["off", "auto"],
+      thinkingFields: { off: { enable_thinking: false } },
       disableThinkingKey: "enable_thinking",
       jsonModeKey: "response_format",
       stream: false
@@ -751,6 +829,8 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       // 智谱官方格式：thinking.type 只接受 enabled（glm-5.x 强制思考），
       // 强度由独立的 reasoning_effort 字段控制（low/high/max，默认 max）。
       // 关闭写了 disabled 会触发错误码 1210「该模型始终思考，不支持关闭思考」。
+      // 因此该平台不提供「关闭」档，最低只能选 low。
+      thinkingLevels: ["auto", "low", "high", "max"],
       thinkingFields: {
         low: { thinking: { type: "enabled" }, reasoning_effort: "low" },
         high: { thinking: { type: "enabled" }, reasoning_effort: "high" },
@@ -765,16 +845,37 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
       models: ["doubao-seed-2-1-lite-260915", "doubao-seed-2-1-turbo-260628"],
       authHeader: "bearer",
+      thinkingLevels: ["off", "auto"],
+      thinkingFields: { off: { thinking: { type: "disabled" } } },
       disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
       stream: false
     },
   ];
 
+  // 该平台「思考强度」下拉可选的档位；未声明的平台只提供 关闭 / 模型默认。
+  function getPlatformThinkingLevels(id) {
+    const preset = getPlatformPreset(id);
+    const levels = Array.isArray(preset?.thinkingLevels) && preset.thinkingLevels.length ? preset.thinkingLevels : ["off", "auto"];
+    return levels.filter((level) => typeof level === "string" && level);
+  }
+
+  function thinkingLevelLabel(level) {
+    return THINKING_LEVEL_LABELS[level] || String(level);
+  }
+
+  // 把任意值收敛到该平台支持的档位；不支持的档位回落到该平台的第一项。
+  function clampThinkingLevel(id, value) {
+    const levels = getPlatformThinkingLevels(id);
+    const mode = String(value || "").trim().toLowerCase();
+    return levels.indexOf(mode) >= 0 ? mode : (levels[0] || "off");
+  }
+
   function normalizeThinkingValues(value) {
     if (!isRecord(value)) return {};
     const result = {};
-    for (const mode of ["off", "low", "high", "max"]) {
+    // 覆盖所有平台可能出现的档位，否则 minimal/medium/xhigh 会被丢掉。
+    for (const mode of ["off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"]) {
       if (Object.prototype.hasOwnProperty.call(value, mode) && isRecord(value[mode])) result[mode] = value[mode];
     }
     return result;
@@ -987,6 +1088,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       endpoint: normalizeEndpoint(String(src.endpoint || preset.endpoint || "")),
       model: String(src.model || ""),
       models: Array.isArray(preset.models) ? preset.models : [],
+      thinkingLevels: getPlatformThinkingLevels(preset.id),
       apiKey: String(src.apiKey || ""),
       authHeader,
       authHeaderName: authHeader === "api-key" ? "api-key" : "Authorization",
@@ -1103,7 +1205,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     return value;
   }
 
-  var THINKING_MODES = ["off", "low", "high", "max", "auto"];
+  var THINKING_MODES = ["off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"];
   // 兼容旧布尔字段：true=关闭，false=不干预；其余按模式枚举原样保留。
   function normalizeThinkingMode(value) {
     if (value === true || value === "true" || value === "disabled" || value === "close") return "off";
@@ -1162,6 +1264,19 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     return "";
   }
 
+  // 读取响应里的用量：DeepSeek 用 prompt_cache_hit_tokens，
+  // 其他 OpenAI 兼容平台用 prompt_tokens_details.cached_tokens。无 usage 时返回 null。
+  function extractUsage(body) {
+    const usage = body?.usage || {};
+    const details = usage.prompt_tokens_details || {};
+    const prompt = Number(usage.prompt_tokens ?? 0) || 0;
+    const completion = Number(usage.completion_tokens ?? 0) || 0;
+    const cached = Number(usage.prompt_cache_hit_tokens ?? details.cached_tokens ?? 0) || 0;
+    const reasoning = Number(usage.completion_tokens_details?.reasoning_tokens ?? 0) || 0;
+    if (!prompt && !completion && !cached) return null;
+    return { prompt, completion, cached, reasoning };
+  }
+
   async function chatCompletion(service, messages, options = {}) {
     // 所有请求统一为 Chat Completions：平台档案只影响鉴权头、思考字段与 JSON 模式字段。
     const profile = resolveProfile(service);
@@ -1197,7 +1312,14 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       });
       try {
         const response = options.rateLimiter ? await options.rateLimiter.run(execute, options.estimatedTokens ?? 0) : await execute();
-        const content = extractContent(parseJsonResponse(response.responseText));
+        const body = parseJsonResponse(response.responseText);
+        const content = extractContent(body);
+        // usage 是响应自带字段，读取它不会产生任何额外 token。
+        if (typeof options.onUsage === "function") {
+          try {
+            options.onUsage(extractUsage(body));
+          } catch { /* 回调异常不影响批改 */ }
+        }
         if (typeof content === "string" && content) return content;
         throw new Error("\u63A5\u53E3\u54CD\u5E94\u7F3A\u5C11\u6587\u672C\u5185\u5BB9");
       } catch (error) {
@@ -1471,7 +1593,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       return Number.isFinite(number) && number > 0 ? number : fallback;
     };
     const resolved = {
-      profile: String(image.profile || "balanced"),
       maxEdge: Math.min(2400, Math.max(600, positive(image.maxEdge, 1600))),
       quality: Math.min(1, Math.max(0.5, positive(image.quality, 0.82))),
       detail: ["high", "auto", "low"].includes(image.detail) ? image.detail : "high",
@@ -1619,7 +1740,17 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
   }
 
 // src/core/prompt.ts
-var PROMPT_VERSION = "zygr-prompt-v5-vlm";
+var PROMPT_VERSION = "zygr-prompt-v6-vlm";
+// 输出档位：直接决定模型要写多少字，也就决定输出 token。
+var OUTPUT_MODES = {
+  brief: { label: "\u7B80\u7565\uFF08\u53EA\u7ED9\u5206\uFF0C\u6700\u7701 token\uFF09", maxTokens: 400 },
+  standard: { label: "\u6807\u51C6\uFF08\u603B\u8BC4\u8BED + \u6263\u5206\u7406\u7531\uFF09", maxTokens: 800 },
+  detailed: { label: "\u8BE6\u7EC6\uFF08\u6BCF\u9898\u7ED9\u4F9D\u636E\uFF0C\u66F4\u8D39 token\uFF09", maxTokens: 1400 }
+};
+function normalizeOutputMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(OUTPUT_MODES, mode) ? mode : "standard";
+}
 function clip(text, max) {
   const value = String(text ?? "").trim();
   if (!value) return "\uFF08\u65E0\uFF09";
@@ -1634,17 +1765,27 @@ function maxScoreLine(context, question) {
   const max = context.maxScore > 0 ? context.maxScore : question.maxScore;
   return max > 0 ? `\u6EE1\u5206 ${max} \u5206` : "\u6EE1\u5206\u672A\u6307\u5B9A\uFF0C\u6309\u5E38\u89C4\u5224\u65AD";
 }
+function schemaLine(mode) {
+  if (mode === "brief") {
+    return "\u5B57\u6BB5\uFF1As\uFF08l \u53EF\u8FA8\u8BA4 / p \u90E8\u5206\u4E0D\u6E05 / i \u65E0\u6CD5\u8FA8\u8BA4 / b \u672A\u4F5C\u7B54\uFF09\u3001sc\uFF08\u5F97\u5206\u6570\u5B57\uFF09\u3001c\uFF08\u7F6E\u4FE1\u5EA6 0-1\uFF0C\u4E00\u4F4D\u5C0F\u6570\uFF09\u3001sub\uFF08\u6570\u7EC4\uFF1Ai \u5C0F\u9898\u5E8F\u53F7\u4ECE 0 \u5F00\u59CB\u3001sc \u5F97\u5206\uFF09\u3002\u4E0D\u8981\u8F93\u51FA\u4EFB\u4F55\u7406\u7531\u3001\u8BC4\u8BED\u6216\u89E3\u91CA\u3002";
+  }
+  if (mode === "detailed") {
+    return "\u5B57\u6BB5\uFF1As\uFF08l \u53EF\u8FA8\u8BA4 / p \u90E8\u5206\u4E0D\u6E05 / i \u65E0\u6CD5\u8FA8\u8BA4 / b \u672A\u4F5C\u7B54\uFF09\u3001sc\uFF08\u5F97\u5206\u6570\u5B57\uFF09\u3001c\uFF08\u7F6E\u4FE1\u5EA6 0-1\uFF0C\u4E00\u4F4D\u5C0F\u6570\uFF09\u3001r\uFF08\u603B\u8BC4\u8BED\uFF0C\u4E0D\u8D85\u8FC7 60 \u5B57\uFF0C\u5199\u660E\u4E3B\u8981\u5F97\u5206\u70B9\u4E0E\u6263\u5206\u70B9\uFF09\u3001sub\uFF08\u6570\u7EC4\uFF1Ai \u5C0F\u9898\u5E8F\u53F7\u4ECE 0 \u5F00\u59CB\u3001sc \u5F97\u5206\u3001r \u6BCF\u9898\u4E0D\u8D85\u8FC7 40 \u5B57\uFF0C\u5199\u660E\u4F9D\u636E\uFF09\u3002";
+  }
+  return "\u5B57\u6BB5\uFF08\u52A1\u5FC5\u7CBE\u7B80\uFF09\uFF1As\uFF08l \u53EF\u8FA8\u8BA4 / p \u90E8\u5206\u4E0D\u6E05 / i \u65E0\u6CD5\u8FA8\u8BA4 / b \u672A\u4F5C\u7B54\uFF09\u3001sc\uFF08\u5F97\u5206\u6570\u5B57\uFF09\u3001c\uFF08\u7F6E\u4FE1\u5EA6 0-1\uFF0C\u4E00\u4F4D\u5C0F\u6570\uFF09\u3001r\uFF08\u603B\u8BC4\u8BED\uFF0C\u4E0D\u8D85\u8FC7 30 \u5B57\uFF09\u3001sub\uFF08\u6570\u7EC4\uFF1Ai \u5C0F\u9898\u5E8F\u53F7\u4ECE 0 \u5F00\u59CB\u3001sc \u5F97\u5206\u3001r \u4EC5\u5728\u6263\u5206\u65F6\u7ED9\u4E0D\u8D85\u8FC7 20 \u5B57\u7684\u6263\u5206\u539F\u56E0\uFF09\u3002";
+}
 // 固定段落（角色/规则/输出协议）必须逐字不变，才能命中平台侧前缀缓存；
 // 动态内容一律放到后面的【输入】段，且不得插入固定段落之间。
 function buildGradingPrompt(question, context, options) {
+  const mode = normalizeOutputMode(options?.outputMode);
   const answer = "\u3010\u5B66\u751F\u4F5C\u7B54\u3011\n\u89C1\u968F\u9644\u56FE\u7247\uFF0C\u6309\u56FE\u7247\u5185\u5BB9\u5224\u65AD";
   const sections = [
     "\u4F60\u662F\u9605\u5377\u52A9\u624B\u3002\u53EA\u4F9D\u636E\u7ED9\u5B9A\u5185\u5BB9\u4E0E\u968F\u9644\u56FE\u7247\u8BC4\u5206\uFF0C\u4E0D\u8981\u81C6\u6D4B\u3002",
     "\u4E25\u683C\u8F93\u51FA\u4E00\u4E2A JSON \u5BF9\u8C61\uFF0C\u4E0D\u8981 Markdown \u4EE3\u7801\u5757\uFF0C\u4E0D\u8981\u989D\u5916\u89E3\u91CA\u3002\u4E0D\u8981\u56DE\u5199\u9898\u76EE\u3001\u53C2\u8003\u7B54\u6848\u3001\u5C0F\u9898\u540D\u79F0\u4E0E\u6EE1\u5206\u3002",
-    "\u5B57\u6BB5\uFF08\u52A1\u5FC5\u7CBE\u7B80\uFF09\uFF1As\uFF08l \u53EF\u8FA8\u8BA4 / p \u90E8\u5206\u4E0D\u6E05 / i \u65E0\u6CD5\u8FA8\u8BA4 / b \u672A\u4F5C\u7B54\uFF09\u3001sc\uFF08\u5F97\u5206\u6570\u5B57\uFF09\u3001c\uFF08\u7F6E\u4FE1\u5EA6 0-1\uFF0C\u4E00\u4F4D\u5C0F\u6570\uFF09\u3001r\uFF08\u603B\u8BC4\u8BED\uFF0C\u4E0D\u8D85\u8FC7 30 \u5B57\uFF09\u3001sub\uFF08\u6570\u7EC4\uFF1Ai \u5C0F\u9898\u5E8F\u53F7\u4ECE 0 \u5F00\u59CB\u3001sc \u5F97\u5206\u3001r \u4EC5\u5728\u6263\u5206\u65F6\u7ED9\u4E0D\u8D85\u8FC7 20 \u5B57\u7684\u6263\u5206\u539F\u56E0\uFF09\u3002",
-    "\u89C4\u5219\uFF1A\u672A\u4F5C\u7B54\u4E0D\u5F97\u7ED9\u6B63\u5206\uFF1B\u5212\u53BB\u7684\u5185\u5BB9\u4E0D\u8BA1\u5206\uFF1B\u7B49\u4EF7\u89E3\u6CD5\u5E94\u7ED9\u5206\uFF1B\u5206\u6570\u4E0D\u5F97\u8D85\u8FC7\u6EE1\u5206\uFF1B\u65E0\u6CD5\u8FA8\u8BA4\u65F6\u7528 i/p \u5E76\u8BF4\u660E\uFF1B\u6EE1\u5206\u5C0F\u9898\u4E0D\u5199\u6263\u5206\u539F\u56E0\u3002",
+    schemaLine(mode),
+    "\u89C4\u5219\uFF1A\u672A\u4F5C\u7B54\u4E0D\u5F97\u7ED9\u6B63\u5206\uFF1B\u5212\u53BB\u7684\u5185\u5BB9\u4E0D\u8BA1\u5206\uFF1B\u7B49\u4EF7\u89E3\u6CD5\u5E94\u7ED9\u5206\uFF1B\u5206\u6570\u4E0D\u5F97\u8D85\u8FC7\u6EE1\u5206\uFF1B\u65E0\u6CD5\u8FA8\u8BA4\u65F6\u7528 i/p \u5E76\u8BF4\u660E\u3002",
     question.subQuestions.length > 0 ? "\u5FC5\u987B\u9010\u5C0F\u9898\u8FD4\u56DE sub\uFF0Ci \u4ECE 0 \u5F00\u59CB\u3001\u4E0E\u3010\u5C0F\u9898\u3011\u5217\u8868\u7F16\u53F7\u4E00\u4E00\u5BF9\u5E94\uFF0C\u4E0D\u8DF3\u53F7\u3001\u4E0D\u5408\u5E76\u3001\u4E0D\u91CD\u6392\uFF1B\u56FE\u4E2D\u5E76\u6392\u7684\u591A\u4E2A\u7B54\u9898\u533A\u6309\u4ECE\u5DE6\u5230\u53F3\u3001\u4ECE\u4E0A\u5230\u4E0B\u4E0E\u5C0F\u9898\u987A\u5E8F\u5BF9\u5E94\uFF1B\u603B\u5206 sc \u7B49\u4E8E\u5404\u5C0F\u9898 sc \u4E4B\u548C\u3002" : "sub \u8FD4\u56DE\u7A7A\u6570\u7EC4\u5373\u53EF\u3002",
-    question.subQuestions.length > 0 ? "\u6EE1\u5206\u5C0F\u9898\u7684 sub.r \u7701\u7565\uFF1B\u6263\u5206\u5C0F\u9898\u7684 sub.r \u53EA\u5199\u5173\u952E\u6263\u5206\u70B9\u3002" : "",
+    mode === "brief" ? "" : mode === "detailed" ? "\u6BCF\u4E2A\u5C0F\u9898\u90FD\u8981\u5199 sub.r\uFF0C\u5199\u6E05\u5F97\u5206\u4F9D\u636E\u4E0E\u6263\u5206\u4F9D\u636E\uFF1B\u4E0D\u8981\u590D\u8FF0\u5B66\u751F\u539F\u6587\u3002" : "\u6EE1\u5206\u5C0F\u9898\u7684 sub.r \u7701\u7565\uFF1B\u6263\u5206\u5C0F\u9898\u7684 sub.r \u53EA\u5199\u5173\u952E\u6263\u5206\u70B9\u3002",
     "===== \u8F93\u5165 =====",
     `\u3010\u9898\u76EE\u3011
 ${clip(context.question || question.questionText, 6e3)}`,
@@ -1909,96 +2050,118 @@ ${subQuestionLines(question)}`,
     return fromJson(raw, maxScore, subQuestions) ?? fromText(raw, maxScore, subQuestions);
   }
 
-  // src/core/pipeline.ts
-  function configured(service) {
-    return Boolean(service.endpoint.trim() && service.model.trim());
-  }
-  async function runGrade(service, question, maxScore, prompt, images, config, rateLimiter, imageOptions) {
-    const detail = imageOptions?.detail || "high";
-    const content = [
-      { type: "text", text: prompt },
-      ...images.map((image) => ({ type: "image_url", image_url: { url: image.dataUrl, detail } }))
-    ];
-    const messages = [
-      { role: "system", content: "\u4F60\u662F\u4E25\u683C\u4F46\u516C\u6B63\u7684\u9605\u5377\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA JSON\u3002" },
-      { role: "user", content }
-    ];
-    // 思考模式会额外消耗输出预算，开启时放宽上限避免 JSON 被截断。
-    const maxTokens = normalizeThinkingMode(service.thinkingMode) === "off" ? 800 : 1600;
-    const raw = await chatCompletion(service, messages, {
-      rateLimiter,
-      timeoutMs: config.pipeline.timeoutMs,
-      jsonMode: true,
-      maxTokens,
-      estimatedTokens: estimateTokens(prompt, images.length)
-    });
-    if (!raw.trim()) throw new Error("\u6A21\u578B\u8FD4\u56DE\u4E3A\u7A7A");
-    return parseGrade(raw, maxScore, question.subQuestions);
-  }
-  async function gradeQuestion(options) {
-    const { config, question, cache, rateLimiter } = options;
-    config.pipeline.vlm.thinkingMode = normalizeThinkingMode(config.pipeline.thinkingMode !== void 0 ? config.pipeline.thinkingMode : config.pipeline.disableThinking);
-    const startedAt = Date.now();
-    const stage = (name, detail) => options.events?.onStage?.(name, detail);
-    const reviewReasons = [];
-    const maxScore = config.context.maxScore > 0 ? config.context.maxScore : question.maxScore;
-    const gradeService = config.pipeline.vlm;
-    if (!configured(gradeService)) throw new Error("\u6279\u6539\u670D\u52A1\u672A\u914D\u7F6E\u5B8C\u6574\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u591A\u6A21\u6001\u670D\u52A1\u7684\u63A5\u53E3\u5730\u5740\u4E0E\u6A21\u578B");
-    stage("\u51C6\u5907\u4F5C\u7B54\u56FE\u7247");
-    // 学科策略优先于手动尺寸；未选学科时完全按手动参数。
-    const imageOptions = resolveImageOptions(config);
-    const preparedList = (await Promise.all(
-      question.images.map((src) => prepareImage(src, imageOptions).catch(() => null))
-    )).filter((item) => item !== null);
-    const prepared = dedupePrepared(preparedList);
-    const removed = prepared.filter((image) => isBlankImage(image) || isWasteImage(image));
-    const usable = prepared.filter((image) => !isBlankImage(image) && !isWasteImage(image));
-    if (removed.length > 0) reviewReasons.push(`\u5DF2\u5254\u9664 ${removed.length} \u5F20\u5E9F\u56FE`);
-    const lowResCount = usable.filter((image) => image.lowRes).length;
-    if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
-    if (imageOptions.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
-    if (usable.length === 0) {
-      throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF0C\u8BF7\u7B49\u5F85\u9605\u5377\u9875\u56FE\u7247\u52A0\u8F7D\u5B8C\u6210\u540E\u91CD\u8BD5");
+// src/core/pipeline.ts
+function configured(service) {
+  return Boolean(service.endpoint.trim() && service.model.trim());
+}
+async function runGrade(service, question, maxScore, prompt, images, config, rateLimiter, imageOptions) {
+  const detail = imageOptions?.detail || "high";
+  const content = [
+    { type: "text", text: prompt },
+    ...images.map((image) => ({ type: "image_url", image_url: { url: image.dataUrl, detail } }))
+  ];
+  const messages = [
+    { role: "system", content: "\u4F60\u662F\u4E25\u683C\u4F46\u516C\u6B63\u7684\u9605\u5377\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA JSON\u3002" },
+    { role: "user", content }
+  ];
+  // 输出档位决定基础预算；思考模式会额外消耗输出预算，开启时放宽，避免 JSON 被截断。
+  const mode = normalizeOutputMode(config.pipeline?.outputMode);
+  const thinking = normalizeThinkingMode(service.thinkingMode);
+  const baseTokens = OUTPUT_MODES[mode]?.maxTokens || 800;
+  const maxTokens = thinking === "off" ? baseTokens : Math.round(baseTokens * 1.8);
+  let usage = null;
+  const raw = await chatCompletion(service, messages, {
+    rateLimiter,
+    timeoutMs: config.pipeline.timeoutMs,
+    jsonMode: true,
+    maxTokens,
+    estimatedTokens: estimateTokens(prompt, images.length),
+    onUsage: (value) => {
+      if (value) usage = value;
     }
-    const payloadImages = await mergePreparedImages(usable, imageOptions);
-    const prompt = buildGradingPrompt(question, config.context, {
-      profile: imageOptions.profile,
-      removedImages: removed.length
-    });
-    const cacheKey = makeGradeCacheKey({
-      question,
-      context: config.context,
-      model: gradeService.model,
-      image: imageOptions,
-      thinkingMode: config.pipeline.thinkingMode,
-      promptVersion: PROMPT_VERSION
-    });
-    const cached = cache.get(cacheKey);
-    if (cached) {
-      stage("\u8BC4\u5206\u7F13\u5B58\u547D\u4E2D");
-      return { ...cached, cacheHit: true, elapsedMs: Date.now() - startedAt, cacheKey };
-    }
-    stage("\u6A21\u578B\u8BC4\u5206", gradeService.model);
-    const grade = await runGrade(gradeService, question, maxScore, prompt, payloadImages, config, rateLimiter, imageOptions);
-    if (grade.status === "blank" && grade.score > 0) {
-      reviewReasons.push("\u8BC6\u522B\u4E3A\u672A\u4F5C\u7B54\u4F46\u7ED9\u51FA\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u67E5");
-    }
-    if (grade.confidence < 0.5) reviewReasons.push("\u6A21\u578B\u7F6E\u4FE1\u5EA6\u8F83\u4F4E\uFF0C\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
-    const result = {
-      ...grade,
-      maxScore,
-      pipeline: "vlm",
-      needsReview: reviewReasons.length > 0,
-      reviewReasons,
-      cacheHit: false,
-      cacheKey,
-      elapsedMs: Date.now() - startedAt,
-      model: gradeService.model,
-      createdAt: Date.now()
-    };
-    cache.set(cacheKey, result);
-    return result;
+  });
+  if (!raw.trim()) throw new Error("\u6A21\u578B\u8FD4\u56DE\u4E3A\u7A7A");
+  const grade = parseGrade(raw, maxScore, question.subQuestions);
+  grade.usage = usage;
+  grade.outputMode = mode;
+  return grade;
+}
+async function gradeQuestion(options) {
+  const { config, question, cache, rateLimiter } = options;
+  const wanted = normalizeThinkingMode(config.pipeline.thinkingMode !== void 0 ? config.pipeline.thinkingMode : config.pipeline.disableThinking);
+  // 各平台档位不同：不在该平台列表里的档位收敛到平台首项（默认关闭）。
+  config.pipeline.vlm.thinkingMode = clampThinkingLevel(config.pipeline.vlm.platform, wanted);
+  const startedAt = Date.now();
+  const stage = (name, detail) => options.events?.onStage?.(name, detail);
+  const reviewReasons = [];
+  const maxScore = config.context.maxScore > 0 ? config.context.maxScore : question.maxScore;
+  const gradeService = config.pipeline.vlm;
+  if (!configured(gradeService)) throw new Error("\u6279\u6539\u670D\u52A1\u672A\u914D\u7F6E\u5B8C\u6574\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u591A\u6A21\u6001\u670D\u52A1\u7684\u63A5\u53E3\u5730\u5740\u4E0E\u6A21\u578B");
+  stage("\u51C6\u5907\u4F5C\u7B54\u56FE\u7247");
+  // 学科策略优先于手动尺寸；未选学科时完全按手动参数。
+  const imageOptions = resolveImageOptions(config);
+  const preparedList = (await Promise.all(
+    question.images.map((src) => prepareImage(src, imageOptions).catch(() => null))
+  )).filter((item) => item !== null);
+  const prepared = dedupePrepared(preparedList);
+  const removed = prepared.filter((image) => isBlankImage(image) || isWasteImage(image));
+  const usable = prepared.filter((image) => !isBlankImage(image) && !isWasteImage(image));
+  if (removed.length > 0) reviewReasons.push(`\u5DF2\u5254\u9664 ${removed.length} \u5F20\u5E9F\u56FE`);
+  const lowResCount = usable.filter((image) => image.lowRes).length;
+  if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
+  if (imageOptions.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
+  if (usable.length === 0) {
+    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF0C\u8BF7\u7B49\u5F85\u9605\u5377\u9875\u56FE\u7247\u52A0\u8F7D\u5B8C\u6210\u540E\u91CD\u8BD5");
   }
+  const payloadImages = await mergePreparedImages(usable, imageOptions);
+  const outputMode = normalizeOutputMode(config.pipeline?.outputMode);
+  const prompt = buildGradingPrompt(question, config.context, {
+    outputMode,
+    removedImages: removed.length
+  });
+  const cacheKey = makeGradeCacheKey({
+    question,
+    context: config.context,
+    model: gradeService.model,
+    image: imageOptions,
+    thinkingMode: config.pipeline.thinkingMode,
+    outputMode,
+    promptVersion: PROMPT_VERSION
+  });
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    stage("\u8BC4\u5206\u7F13\u5B58\u547D\u4E2D");
+    recordUsage({ graded: true, localHit: true });
+    return { ...cached, cacheHit: true, elapsedMs: Date.now() - startedAt, cacheKey, usage: null };
+  }
+  stage("\u6A21\u578B\u8BC4\u5206", gradeService.model);
+  const grade = await runGrade(gradeService, question, maxScore, prompt, payloadImages, config, rateLimiter, imageOptions);
+  if (grade.status === "blank" && grade.score > 0) {
+    reviewReasons.push("\u8BC6\u522B\u4E3A\u672A\u4F5C\u7B54\u4F46\u7ED9\u51FA\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u67E5");
+  }
+  if (grade.confidence < 0.5) reviewReasons.push("\u6A21\u578B\u7F6E\u4FE1\u5EA6\u8F83\u4F4E\uFF0C\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
+  const result = {
+    ...grade,
+    maxScore,
+    pipeline: "vlm",
+    needsReview: reviewReasons.length > 0,
+    reviewReasons,
+    cacheHit: false,
+    cacheKey,
+    elapsedMs: Date.now() - startedAt,
+    model: gradeService.model,
+    createdAt: Date.now()
+  };
+  cache.set(cacheKey, result);
+  recordUsage({
+    graded: true,
+    request: true,
+    prompt: grade.usage?.prompt || 0,
+    cached: grade.usage?.cached || 0,
+    completion: grade.usage?.completion || 0
+  });
+  return result;
+}
   // src/infra/rate-limit.ts
   var RateLimiter = class {
     constructor(options) {
@@ -2459,7 +2622,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       }
       const meta = document.createElement("div");
       meta.className = "zygr-reason";
-      meta.textContent = `\u94FE\u8DEF ${result.pipeline} \xB7 \u6A21\u578B ${result.model} \xB7 \u8017\u65F6 ${(result.elapsedMs / 1e3).toFixed(1)}s`;
+      // 用量直接取自响应里的 usage，读取它不消耗 token。
+      const usage = result.usage;
+      const usageText = usage && (usage.prompt || usage.completion)
+        ? ` \xB7 \u8F93\u5165 ${usage.prompt}${usage.cached ? `\uFF08\u524D\u7F00\u547D\u4E2D ${usage.cached}\uFF09` : ""} \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`
+        : "";
+      meta.textContent = `\u94FE\u8DEF ${result.pipeline} \xB7 \u6A21\u578B ${result.model} \xB7 \u8017\u65F6 ${(result.elapsedMs / 1e3).toFixed(1)}s${usageText}`;
       container.appendChild(meta);
       this.setCache(result.cacheHit ? "\u7F13\u5B58\u547D\u4E2D" : "\u65B0\u7ED3\u679C", result.cacheHit ? "ok" : result.needsReview ? "warn" : "idle");
       this.setStage("\u5B8C\u6210");
@@ -2681,9 +2849,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 
           <h3>\u591A\u6A21\u6001\u76F4\u8BC4</h3>
           <p class="zygr-hint">\u8BC4\u5206\u53EA\u4F7F\u7528\u591A\u6A21\u6001\u89C6\u89C9\u6A21\u578B\uFF1A\u76F4\u63A5\u8BFB\u53D6\u4F5C\u7B54\u56FE\u7247\u5E76\u6309\u8BC4\u5206\u6807\u51C6\u8F93\u51FA JSON\u3002\u6A21\u578B\u5FC5\u987B\u652F\u6301\u56FE\u7247\u8F93\u516E\u3002</p>
-          ${select("\u601D\u8003\u6A21\u5F0F", "pipeline.thinkingMode", [["off", "\u5173\u95ED\u601D\u8003\uFF08\u7701 Token\u3001\u66F4\u5FEB\uFF09"], ["low", "low \u4F4E\u5F3A\u5EA6"], ["high", "high \u9AD8\u5F3A\u5EA6"], ["max", "max \u6700\u9AD8\u5F3A\u5EA6"], ["auto", "\u4E0D\u5E72\u9884\uFF08\u4F7F\u7528\u6A21\u578B\u9ED8\u8BA4\uFF09"]])}
+          ${select("\u601D\u8003\u5F3A\u5EA6", "pipeline.thinkingMode", [["off", thinkingLevelLabel("off")], ["auto", thinkingLevelLabel("auto")]])}
           <div class="zygr-row"><button class="zygr-btn zygr-ghost" data-act="test-thinking">\u6D4B\u8BD5\u5F53\u524D\u601D\u8003\u6A21\u5F0F\u662F\u5426\u751F\u6548</button><span class="zygr-test-status" data-status="thinking"></span></div>
-          <p class="zygr-hint">\u59CB\u7EC8\u601D\u8003\u7684\u6A21\u578B\uFF08\u5982\u667A\u8C31 glm-5\uFF09\u8BF7\u9009 low/high/max\uFF1B\u5141\u8BB8\u5173\u95ED\u7684\u7528\u300C\u5173\u95ED\u300D\u3002\u4E0D\u786E\u5B9A\u65F6\u9009\u300C\u4E0D\u5E72\u9884\u300D\u3002\u70B9\u6D4B\u8BD5\u53EF\u9A8C\u8BC1\u3002</p>
+          <p class="zygr-hint">\u9ED8\u8BA4\u5173\u95ED\u601D\u8003\u3002\u4E0B\u62C9\u9009\u9879\u4F1A\u968F\u5E73\u53F0\u53D8\u5316\uFF08\u5982 DeepSeek\uFF1A\u5173\u95ED / \u6A21\u578B\u9ED8\u8BA4 / low / high / max\uFF1B\u5546\u6C64\u65E5\u65E5\u65B0\uFF1A\u5173\u95ED / \u6A21\u578B\u9ED8\u8BA4 / minimal \u81F3 max\uFF09\uFF1B\u9009\u300C\u6A21\u578B\u9ED8\u8BA4\u300D\u65F6\u4E0D\u4F20\u5F3A\u5EA6\u53C2\u6570\u3002\u667A\u8C31 glm-5 \u7C7B\u59CB\u7EC8\u601D\u8003\u7684\u6A21\u578B\u65E0\u6CD5\u5173\u95ED\uFF0C\u53EA\u80FD\u4ECE low \u8D77\u9009\uFF1B\u300C\u81EA\u5B9A\u4E49\u300D\u5E73\u53F0\u4E0D\u6CE8\u5165\u4EFB\u4F55\u53C2\u6570\uFF0C\u5F00\u5173\u9760\u6A21\u578B\u81EA\u8EAB\u9ED8\u8BA4\u3002</p>
 
           ${platformSelect("\u5E73\u53F0\u9884\u8BBE", "pipeline.vlm.platform")}
           <h3>\u591A\u6A21\u6001\u670D\u52A1</h3>
@@ -2717,7 +2885,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           <h3>\u56FE\u7247\u4E0E\u63D0\u793A\u8BCD</h3>
           <div class="zygr-grid">
             ${select("\u56FE\u7247\u7CBE\u5EA6", "image.detail", [["high", "\u9AD8\u7CBE\u5EA6\uFF08\u63A8\u8350\uFF0C\u624B\u5199\u5FC5\u9009\uFF09"], ["auto", "\u81EA\u52A8\uFF08\u7531\u5E73\u53F0\u51B3\u5B9A\uFF09"], ["low", "\u4F4E\u7CBE\u5EA6\uFF08\u4EC5\u9009\u62E9/\u586B\u7A7A\u5224\u5BF9\u9519\uFF09"]])}
-            ${select("\u7701 Token \u6863\u4F4D", "image.profile", [["clarity", "\u6E05\u6670\u4F18\u5148"], ["balanced", "\u5747\u8861"], ["saving", "\u7701 Token"]])}
+            ${select("\u8F93\u51FA\u6863\u4F4D", "pipeline.outputMode", [["brief", OUTPUT_MODES.brief.label], ["standard", OUTPUT_MODES.standard.label], ["detailed", OUTPUT_MODES.detailed.label]])}
             ${field("\u56FE\u7247\u957F\u8FB9\u4E0A\u9650\uFF08px\uFF09", "image.maxEdge", "number")}
             ${field("JPEG \u8D28\u91CF\uFF080.5-1\uFF09", "image.quality", "number")}
             ${field("\u5386\u53F2\u4FDD\u7559\u6761\u6570", "historyLimit", "number")}
@@ -2728,7 +2896,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           <label class="zygr-row"><input type="checkbox" data-field="image.splitWideStrip"> \u5BBD\u6241\u4F5C\u7B54\u6761\u5207\u5757\u91CD\u6392\uFF08\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4EC5\u5F53\u5E76\u6392\u5C0F\u7A7A\u4F1A\u88AB\u6253\u4E71\uFF0C\u52FF\u5F00\uFF09</label>
           <label class="zygr-row"><input type="checkbox" data-field="image.autoBySubject"> \u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF08\u5DF2\u9009\u5B66\u79D1\u65F6\u751F\u6548\uFF09</label>
           <label class="zygr-row"><input type="checkbox" data-field="image.mergeImages"> \u540C\u9898\u591A\u56FE\u5408\u5E76\u6210\u4E00\u5F20\uFF08\u7701\u56FA\u5B9A\u5F00\u9500\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4F1A\u7565\u964D\u5355\u9875\u6E05\u6670\u5EA6\uFF09</label>
-          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\uFF1B\u591A\u56FE\u5408\u5E76\u4EC5\u5728\u4E24\u5F20\u56FE\u90FD\u4E0D\u5C0F\u4E8E 1100px \u4E14\u5408\u5E76\u540E\u4E0D\u8FC7\u9AD8\u65F6\u751F\u6548\uFF0C\u5426\u5219\u81EA\u52A8\u653E\u5F03\u3002\u88C1\u5207\u4E0E\u5207\u5757\u91CD\u6392\u4F1A\u6539\u53D8\u7248\u9762\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u5E76\u6392\u5C0F\u7A7A\u9898\u578B\u4E0D\u5EFA\u8BAE\u5F00\u542F\u3002</p>
+          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u8F93\u51FA\u6863\u4F4D\u76F4\u63A5\u5F71\u54CD\u8F93\u51FA token\uFF1A\u7B80\u7565\u6700\u7701\u3001\u6807\u51C6\u9002\u4E2D\u3001\u8BE6\u7EC6\u6700\u8D35\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\uFF1B\u591A\u56FE\u5408\u5E76\u4EC5\u5728\u4E24\u5F20\u56FE\u90FD\u4E0D\u5C0F\u4E8E 1100px \u4E14\u5408\u5E76\u540E\u4E0D\u8FC7\u9AD8\u65F6\u751F\u6548\uFF0C\u5426\u5219\u81EA\u52A8\u653E\u5F03\u3002\u88C1\u5207\u4E0E\u5207\u5757\u91CD\u6392\u4F1A\u6539\u53D8\u7248\u9762\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u5E76\u6392\u5C0F\u7A7A\u9898\u578B\u4E0D\u5EFA\u8BAE\u5F00\u542F\u3002</p>
+          <p class="zygr-hint" data-stats>\u7D2F\u8BA1\u7528\u91CF\uFF1A\u6682\u65E0</p>
           <h3>\u9650\u901F\u4E0E\u8D85\u65F6</h3>
           <div class="zygr-grid">
             ${field("\u5E76\u53D1\u4E0A\u9650", "pipeline.maxConcurrent", "number")}
@@ -2866,27 +3035,33 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           target.value = "";
         }
         if (target.hasAttribute("data-platform-select")) this.applyPlatform(target.dataset.field || "", target.value);
-        if (target.dataset.field === "image.profile") this.applyImageProfile(target.value);
         if (target.hasAttribute("data-config-file") && target.files?.[0]) {
           void this.importConfig(target.files[0]);
           target.value = "";
         }
       });
     }
-    // 档位只是"尺寸建议"：细节精度保持高精度，低精度只能手动选。
-    applyImageProfile(id) {
-      const presets = {
-        clarity: { label: "\u6E05\u6670\u4F18\u5148", maxEdge: 1600, detail: "high" },
-        balanced: { label: "\u5747\u8861", maxEdge: 1440, detail: "high" },
-        saving: { label: "\u7701 Token", maxEdge: 1280, detail: "high" }
-      };
-      const preset = presets[id];
-      if (!preset) return;
-      const edge = this.shadow.querySelector('[data-field="image.maxEdge"]');
-      const detail = this.shadow.querySelector('[data-field="image.detail"]');
-      if (edge) edge.value = String(preset.maxEdge);
-      if (detail) detail.value = preset.detail;
-      this.toast(`\u5DF2\u5957\u7528\u300C${preset.label}\u300D\u5EFA\u8BAE\uFF1A\u957F\u8FB9 ${preset.maxEdge}px\u3001\u9AD8\u7CBE\u5EA6`);
+    // 思考强度下拉随平台变化：只列出该平台文档支持的档位。
+    refreshThinkingLevels(platformId) {
+      const element = this.shadow.querySelector('[data-field="pipeline.thinkingMode"]');
+      if (!(element instanceof HTMLSelectElement)) return;
+      const levels = getPlatformThinkingLevels(platformId);
+      const current = element.value;
+      element.innerHTML = levels.map((level) => `<option value="${level}">${thinkingLevelLabel(level)}</option>`).join("");
+      element.value = levels.indexOf(current) >= 0 ? current : levels[0];
+    }
+    // 累计用量来自本地计数，不触发任何请求。
+    refreshStats() {
+      const element = this.shadow.querySelector("[data-stats]");
+      if (!element) return;
+      const stats = loadUsageStats();
+      if (!stats.graded) {
+        element.textContent = "\u7D2F\u8BA1\u7528\u91CF\uFF1A\u6682\u65E0";
+        return;
+      }
+      const hitRate = stats.graded > 0 ? Math.round((stats.localHits / stats.graded) * 100) : 0;
+      const cacheRate = stats.promptTokens > 0 ? Math.round((stats.cachedTokens / stats.promptTokens) * 100) : 0;
+      element.textContent = `\u7D2F\u8BA1\uFF1A\u6279\u6539 ${stats.graded} \u6B21 \xB7 \u672C\u5730\u547D\u4E2D ${stats.localHits} \u6B21\uFF08${hitRate}%\uFF09 \xB7 \u8BF7\u6C42 ${stats.requests} \u6B21 \xB7 \u8F93\u5165 ${stats.promptTokens} token\uFF08\u524D\u7F00\u547D\u4E2D ${stats.cachedTokens}\uFF0C${cacheRate}%\uFF09 \xB7 \u8F93\u51FA ${stats.completionTokens} token`;
     }
     refreshPlatformSelects() {
       const presets = listPlatformPresets();
@@ -2924,7 +3099,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         modelElement.value = rememberedModel;
         modelElement.dataset.platformBound = id;
       }
-      if (thinkingElement && rememberedThinking) thinkingElement.value = rememberedThinking;
+      // 档位随平台切换：先换选项，再落到该平台支持的档位。
+      this.refreshThinkingLevels(id);
+      if (thinkingElement) thinkingElement.value = clampThinkingLevel(id, rememberedThinking || thinkingElement.value || "off");
       if (preset.endpoint) setField(`${base}.endpoint`, preset.endpoint);
       this.toast(`\u5DF2\u5207\u6362\u5230\u300C${preset.label}\u300D\uFF0C\u5DF2\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 API Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F`);
     }
@@ -3135,17 +3312,20 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     show(config) {
       this.config = config;
       this.mount();
+      const boundPlatform = getPath(config, "pipeline.vlm.platform") || "custom";
+      // 先按平台重建下拉选项，再回填数值，否则不在选项里的档位会被浏览器清空。
+      this.refreshPlatformSelects();
+      this.refreshThinkingLevels(boundPlatform);
       this.shadow.querySelectorAll("[data-field]").forEach((element) => {
         const value = getPath(config, element.dataset.field ?? "");
         if (element instanceof HTMLInputElement && element.type === "checkbox") element.checked = Boolean(value);
         else element.value = value === void 0 || value === null ? "" : String(value);
       });
-      const boundPlatform = getPath(config, "pipeline.vlm.platform") || "custom";
       const keyElement = this.shadow.querySelector('[data-field="pipeline.vlm.apiKey"]');
       const modelElement = this.shadow.querySelector('[data-field="pipeline.vlm.model"]');
       if (keyElement) keyElement.dataset.platformBound = boundPlatform;
       if (modelElement) modelElement.dataset.platformBound = boundPlatform;
-      this.refreshPlatformSelects();
+      this.refreshStats();
       this.populateRubricTypes();
       this.q(".zygr-overlay").hidden = false;
     }

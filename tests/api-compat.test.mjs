@@ -30,7 +30,7 @@ function loadModules(queue = []) {
   const files = ['src/infra/storage.ts', 'src/config.ts', 'src/infra/platforms.ts', 'src/infra/api.ts'];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG };`, context);
+  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG, getPlatformThinkingLevels, thinkingLevelLabel, clampThinkingLevel, THINKING_LEVEL_LABELS };`, context);
   return { api: context.__exposed, calls, store };
 }
 
@@ -57,7 +57,7 @@ function loadCore() {
   ];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, parseGrade, buildGradingPrompt, PROMPT_VERSION, resolveImageOptions, SUBJECT_IMAGE_PROFILES, loadConfig, DEFAULT_CONFIG, STORAGE_KEYS };`, context);
+  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, parseGrade, buildGradingPrompt, PROMPT_VERSION, OUTPUT_MODES, normalizeOutputMode, resolveImageOptions, SUBJECT_IMAGE_PROFILES, loadConfig, loadUsageStats, recordUsage, DEFAULT_CONFIG, STORAGE_KEYS };`, context);
   return { core: context.__core, store };
 }
 
@@ -536,6 +536,40 @@ test('旧配置里被打开的裁切/重排开关在加载时归位', () => {
   assert.equal(config.pipeline.thinkingMode, 'off');
 });
 
+test('输出档位越详细，要求写的理由越多', () => {
+  const { core } = loadCore();
+  const question = { questionText: '题干', subQuestions: [{ label: '第1问', maxScore: 2 }] };
+  const context = { question: '', answer: '答案', rubric: '标准', maxScore: 5 };
+  const brief = core.buildGradingPrompt(question, context, { outputMode: 'brief' });
+  const standard = core.buildGradingPrompt(question, context, { outputMode: 'standard' });
+  const detailed = core.buildGradingPrompt(question, context, { outputMode: 'detailed' });
+  assert.match(brief, /不要输出任何理由/);
+  assert.doesNotMatch(brief, /30 字/);
+  assert.match(standard, /不超过 30 字/);
+  assert.match(detailed, /不超过 60 字/);
+  assert.match(detailed, /不超过 40 字/);
+  assert.notEqual(brief, standard);
+  assert.notEqual(standard, detailed);
+  // 未知档位回落到标准
+  assert.equal(core.normalizeOutputMode('unknown'), 'standard');
+  assert.equal(core.OUTPUT_MODES.brief.maxTokens < core.OUTPUT_MODES.detailed.maxTokens, true);
+});
+
+test('累计用量只做本地累加，不触发请求', () => {
+  const { core, store } = loadCore();
+  assert.equal(core.loadUsageStats().graded, 0);
+  core.recordUsage({ graded: true, request: true, prompt: 1000, cached: 800, completion: 120 });
+  core.recordUsage({ graded: true, localHit: true });
+  const stats = core.loadUsageStats();
+  assert.equal(stats.graded, 2);
+  assert.equal(stats.localHits, 1);
+  assert.equal(stats.requests, 1);
+  assert.equal(stats.promptTokens, 1000);
+  assert.equal(stats.cachedTokens, 800);
+  assert.equal(stats.completionTokens, 120);
+  assert.ok(store.has('zygr.stats.v1'));
+});
+
 test('缓存批量写入并剔除模型原文', () => {
   const { core, store } = loadCore();
   const cache = new core.CacheStore(30, 2000);
@@ -730,6 +764,55 @@ test('旧配置备份中的 disableThinking 自动迁移为 thinkingMode', () =>
 test('界面使用思考模式下拉菜单而非关闭勾选框', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
   assert.match(built, /pipeline\.thinkingMode/);
-  assert.match(built, /low \\u4F4E\\u5F3A\\u5EA6/);
+  assert.match(built, /THINKING_LEVEL_LABELS/);
+  assert.match(built, /getPlatformThinkingLevels/);
   assert.doesNotMatch(built, /data-field="pipeline\.disableThinking"/);
+});
+
+test('思考档位随平台变化：DeepSeek / 商汤 / 智谱 各不同', () => {
+  const { api } = loadModules();
+  assert.equal(Array.from(api.resolveProfile({ platform: 'deepseek' }).thinkingLevels).join(','), 'off,auto,low,high,max');
+  assert.equal(
+    Array.from(api.resolveProfile({ platform: 'sensenova' }).thinkingLevels).join(','),
+    'off,auto,minimal,low,medium,high,xhigh,max'
+  );
+  // 智谱 glm-5 类模型无法关闭思考，最低 low
+  assert.equal(Array.from(api.resolveProfile({ platform: 'zhipu' }).thinkingLevels).join(','), 'auto,low,high,max');
+  assert.equal(Array.from(api.resolveProfile({ platform: 'custom' }).thinkingLevels).join(','), 'off,auto');
+  assert.equal(api.getPlatformPreset('sensenova').endpoint, 'https://api.sensenova.cn/compatible-mode/v1/chat/completions');
+});
+
+test('不支持的思考档位收敛到该平台首项', () => {
+  const { api } = loadModules();
+  assert.equal(api.clampThinkingLevel('zhipu', 'off'), 'auto');
+  assert.equal(api.clampThinkingLevel('deepseek', 'minimal'), 'off');
+  assert.equal(api.clampThinkingLevel('sensenova', 'xhigh'), 'xhigh');
+  assert.equal(api.clampThinkingLevel('custom', 'max'), 'off');
+});
+
+test('商汤日日新的强度参数按档位传递', async () => {
+  const { api, calls } = loadModules([{ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }]);
+  const service = { platform: 'sensenova', endpoint: 'https://api.sensenova.cn/compatible-mode/v1/chat/completions', model: 'm', apiKey: 'k', thinkingMode: 'xhigh' };
+  await api.chatCompletion(service, [{ role: 'user', content: 'hi' }], {});
+  assert.equal(JSON.parse(calls[0].data).reasoning_effort, 'xhigh');
+});
+
+test('响应里的 usage 会被回传，且不产生额外请求', async () => {
+  const { api, calls } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({
+      choices: [{ message: { content: 'ok' } }],
+      usage: { prompt_tokens: 1200, completion_tokens: 180, prompt_cache_hit_tokens: 900 }
+    })
+  }]);
+  let usage = null;
+  await api.chatCompletion(
+    { platform: 'custom', endpoint: 'https://example.com/v1/chat/completions', model: 'm', apiKey: 'k' },
+    [{ role: 'user', content: 'hi' }],
+    { onUsage: (value) => { usage = value; } }
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(usage.prompt, 1200);
+  assert.equal(usage.completion, 180);
+  assert.equal(usage.cached, 900);
 });

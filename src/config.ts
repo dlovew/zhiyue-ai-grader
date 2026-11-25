@@ -4,6 +4,7 @@
     pipeline: {
       vlm: { endpoint: "", apiKey: "", model: "", platform: "custom", compat: {} },
       thinkingMode: "off",
+      outputMode: "standard",
       maxConcurrent: 2,
       maxRpm: 60,
       maxTpm: 6e4,
@@ -19,7 +20,6 @@
     image: {
       // 图片策略版本：2 起裁切/切块重排/多图合并默认全关，旧配置在加载时一次性归位。
       policyVersion: 2,
-      profile: "balanced",
       maxEdge: 1600,
       quality: 0.82,
       detail: "high",
@@ -113,6 +113,7 @@
     removeKey(STORAGE_KEYS.config);
     removeKey(STORAGE_KEYS.history);
     removeKey(STORAGE_KEYS.cache);
+    removeKey(STORAGE_KEYS.stats);
     removeKey(PRESET_STORAGE_KEY);
     removeKey(PLATFORM_KEYS_KEY);
     removeKey(PLATFORM_MODELS_KEY);

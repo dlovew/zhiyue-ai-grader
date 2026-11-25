@@ -126,7 +126,6 @@
       return Number.isFinite(number) && number > 0 ? number : fallback;
     };
     const resolved = {
-      profile: String(image.profile || "balanced"),
       maxEdge: Math.min(2400, Math.max(600, positive(image.maxEdge, 1600))),
       quality: Math.min(1, Math.max(0.5, positive(image.quality, 0.82))),
       detail: ["high", "auto", "low"].includes(image.detail) ? image.detail : "high",

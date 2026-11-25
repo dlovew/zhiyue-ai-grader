@@ -102,7 +102,7 @@
     return value;
   }
 
-  var THINKING_MODES = ["off", "low", "high", "max", "auto"];
+  var THINKING_MODES = ["off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"];
   // 兼容旧布尔字段：true=关闭，false=不干预；其余按模式枚举原样保留。
   function normalizeThinkingMode(value) {
     if (value === true || value === "true" || value === "disabled" || value === "close") return "off";
@@ -161,6 +161,19 @@
     return "";
   }
 
+  // 读取响应里的用量：DeepSeek 用 prompt_cache_hit_tokens，
+  // 其他 OpenAI 兼容平台用 prompt_tokens_details.cached_tokens。无 usage 时返回 null。
+  function extractUsage(body) {
+    const usage = body?.usage || {};
+    const details = usage.prompt_tokens_details || {};
+    const prompt = Number(usage.prompt_tokens ?? 0) || 0;
+    const completion = Number(usage.completion_tokens ?? 0) || 0;
+    const cached = Number(usage.prompt_cache_hit_tokens ?? details.cached_tokens ?? 0) || 0;
+    const reasoning = Number(usage.completion_tokens_details?.reasoning_tokens ?? 0) || 0;
+    if (!prompt && !completion && !cached) return null;
+    return { prompt, completion, cached, reasoning };
+  }
+
   async function chatCompletion(service, messages, options = {}) {
     // 所有请求统一为 Chat Completions：平台档案只影响鉴权头、思考字段与 JSON 模式字段。
     const profile = resolveProfile(service);
@@ -196,7 +209,14 @@
       });
       try {
         const response = options.rateLimiter ? await options.rateLimiter.run(execute, options.estimatedTokens ?? 0) : await execute();
-        const content = extractContent(parseJsonResponse(response.responseText));
+        const body = parseJsonResponse(response.responseText);
+        const content = extractContent(body);
+        // usage 是响应自带字段，读取它不会产生任何额外 token。
+        if (typeof options.onUsage === "function") {
+          try {
+            options.onUsage(extractUsage(body));
+          } catch { /* 回调异常不影响批改 */ }
+        }
         if (typeof content === "string" && content) return content;
         throw new Error("\u63A5\u53E3\u54CD\u5E94\u7F3A\u5C11\u6587\u672C\u5185\u5BB9");
       } catch (error) {

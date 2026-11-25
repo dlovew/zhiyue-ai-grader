@@ -67,9 +67,9 @@
 
           <h3>\u591A\u6A21\u6001\u76F4\u8BC4</h3>
           <p class="zygr-hint">\u8BC4\u5206\u53EA\u4F7F\u7528\u591A\u6A21\u6001\u89C6\u89C9\u6A21\u578B\uFF1A\u76F4\u63A5\u8BFB\u53D6\u4F5C\u7B54\u56FE\u7247\u5E76\u6309\u8BC4\u5206\u6807\u51C6\u8F93\u51FA JSON\u3002\u6A21\u578B\u5FC5\u987B\u652F\u6301\u56FE\u7247\u8F93\u516E\u3002</p>
-          ${select("\u601D\u8003\u6A21\u5F0F", "pipeline.thinkingMode", [["off", "\u5173\u95ED\u601D\u8003\uFF08\u7701 Token\u3001\u66F4\u5FEB\uFF09"], ["low", "low \u4F4E\u5F3A\u5EA6"], ["high", "high \u9AD8\u5F3A\u5EA6"], ["max", "max \u6700\u9AD8\u5F3A\u5EA6"], ["auto", "\u4E0D\u5E72\u9884\uFF08\u4F7F\u7528\u6A21\u578B\u9ED8\u8BA4\uFF09"]])}
+          ${select("\u601D\u8003\u5F3A\u5EA6", "pipeline.thinkingMode", [["off", thinkingLevelLabel("off")], ["auto", thinkingLevelLabel("auto")]])}
           <div class="zygr-row"><button class="zygr-btn zygr-ghost" data-act="test-thinking">\u6D4B\u8BD5\u5F53\u524D\u601D\u8003\u6A21\u5F0F\u662F\u5426\u751F\u6548</button><span class="zygr-test-status" data-status="thinking"></span></div>
-          <p class="zygr-hint">\u59CB\u7EC8\u601D\u8003\u7684\u6A21\u578B\uFF08\u5982\u667A\u8C31 glm-5\uFF09\u8BF7\u9009 low/high/max\uFF1B\u5141\u8BB8\u5173\u95ED\u7684\u7528\u300C\u5173\u95ED\u300D\u3002\u4E0D\u786E\u5B9A\u65F6\u9009\u300C\u4E0D\u5E72\u9884\u300D\u3002\u70B9\u6D4B\u8BD5\u53EF\u9A8C\u8BC1\u3002</p>
+          <p class="zygr-hint">\u9ED8\u8BA4\u5173\u95ED\u601D\u8003\u3002\u4E0B\u62C9\u9009\u9879\u4F1A\u968F\u5E73\u53F0\u53D8\u5316\uFF08\u5982 DeepSeek\uFF1A\u5173\u95ED / \u6A21\u578B\u9ED8\u8BA4 / low / high / max\uFF1B\u5546\u6C64\u65E5\u65E5\u65B0\uFF1A\u5173\u95ED / \u6A21\u578B\u9ED8\u8BA4 / minimal \u81F3 max\uFF09\uFF1B\u9009\u300C\u6A21\u578B\u9ED8\u8BA4\u300D\u65F6\u4E0D\u4F20\u5F3A\u5EA6\u53C2\u6570\u3002\u667A\u8C31 glm-5 \u7C7B\u59CB\u7EC8\u601D\u8003\u7684\u6A21\u578B\u65E0\u6CD5\u5173\u95ED\uFF0C\u53EA\u80FD\u4ECE low \u8D77\u9009\uFF1B\u300C\u81EA\u5B9A\u4E49\u300D\u5E73\u53F0\u4E0D\u6CE8\u5165\u4EFB\u4F55\u53C2\u6570\uFF0C\u5F00\u5173\u9760\u6A21\u578B\u81EA\u8EAB\u9ED8\u8BA4\u3002</p>
 
           ${platformSelect("\u5E73\u53F0\u9884\u8BBE", "pipeline.vlm.platform")}
           <h3>\u591A\u6A21\u6001\u670D\u52A1</h3>
@@ -103,7 +103,7 @@
           <h3>\u56FE\u7247\u4E0E\u63D0\u793A\u8BCD</h3>
           <div class="zygr-grid">
             ${select("\u56FE\u7247\u7CBE\u5EA6", "image.detail", [["high", "\u9AD8\u7CBE\u5EA6\uFF08\u63A8\u8350\uFF0C\u624B\u5199\u5FC5\u9009\uFF09"], ["auto", "\u81EA\u52A8\uFF08\u7531\u5E73\u53F0\u51B3\u5B9A\uFF09"], ["low", "\u4F4E\u7CBE\u5EA6\uFF08\u4EC5\u9009\u62E9/\u586B\u7A7A\u5224\u5BF9\u9519\uFF09"]])}
-            ${select("\u7701 Token \u6863\u4F4D", "image.profile", [["clarity", "\u6E05\u6670\u4F18\u5148"], ["balanced", "\u5747\u8861"], ["saving", "\u7701 Token"]])}
+            ${select("\u8F93\u51FA\u6863\u4F4D", "pipeline.outputMode", [["brief", OUTPUT_MODES.brief.label], ["standard", OUTPUT_MODES.standard.label], ["detailed", OUTPUT_MODES.detailed.label]])}
             ${field("\u56FE\u7247\u957F\u8FB9\u4E0A\u9650\uFF08px\uFF09", "image.maxEdge", "number")}
             ${field("JPEG \u8D28\u91CF\uFF080.5-1\uFF09", "image.quality", "number")}
             ${field("\u5386\u53F2\u4FDD\u7559\u6761\u6570", "historyLimit", "number")}
@@ -114,7 +114,8 @@
           <label class="zygr-row"><input type="checkbox" data-field="image.splitWideStrip"> \u5BBD\u6241\u4F5C\u7B54\u6761\u5207\u5757\u91CD\u6392\uFF08\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4EC5\u5F53\u5E76\u6392\u5C0F\u7A7A\u4F1A\u88AB\u6253\u4E71\uFF0C\u52FF\u5F00\uFF09</label>
           <label class="zygr-row"><input type="checkbox" data-field="image.autoBySubject"> \u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF08\u5DF2\u9009\u5B66\u79D1\u65F6\u751F\u6548\uFF09</label>
           <label class="zygr-row"><input type="checkbox" data-field="image.mergeImages"> \u540C\u9898\u591A\u56FE\u5408\u5E76\u6210\u4E00\u5F20\uFF08\u7701\u56FA\u5B9A\u5F00\u9500\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4F1A\u7565\u964D\u5355\u9875\u6E05\u6670\u5EA6\uFF09</label>
-          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\uFF1B\u591A\u56FE\u5408\u5E76\u4EC5\u5728\u4E24\u5F20\u56FE\u90FD\u4E0D\u5C0F\u4E8E 1100px \u4E14\u5408\u5E76\u540E\u4E0D\u8FC7\u9AD8\u65F6\u751F\u6548\uFF0C\u5426\u5219\u81EA\u52A8\u653E\u5F03\u3002\u88C1\u5207\u4E0E\u5207\u5757\u91CD\u6392\u4F1A\u6539\u53D8\u7248\u9762\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u5E76\u6392\u5C0F\u7A7A\u9898\u578B\u4E0D\u5EFA\u8BAE\u5F00\u542F\u3002</p>
+          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u8F93\u51FA\u6863\u4F4D\u76F4\u63A5\u5F71\u54CD\u8F93\u51FA token\uFF1A\u7B80\u7565\u6700\u7701\u3001\u6807\u51C6\u9002\u4E2D\u3001\u8BE6\u7EC6\u6700\u8D35\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\uFF1B\u591A\u56FE\u5408\u5E76\u4EC5\u5728\u4E24\u5F20\u56FE\u90FD\u4E0D\u5C0F\u4E8E 1100px \u4E14\u5408\u5E76\u540E\u4E0D\u8FC7\u9AD8\u65F6\u751F\u6548\uFF0C\u5426\u5219\u81EA\u52A8\u653E\u5F03\u3002\u88C1\u5207\u4E0E\u5207\u5757\u91CD\u6392\u4F1A\u6539\u53D8\u7248\u9762\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u5E76\u6392\u5C0F\u7A7A\u9898\u578B\u4E0D\u5EFA\u8BAE\u5F00\u542F\u3002</p>
+          <p class="zygr-hint" data-stats>\u7D2F\u8BA1\u7528\u91CF\uFF1A\u6682\u65E0</p>
           <h3>\u9650\u901F\u4E0E\u8D85\u65F6</h3>
           <div class="zygr-grid">
             ${field("\u5E76\u53D1\u4E0A\u9650", "pipeline.maxConcurrent", "number")}
@@ -252,27 +253,33 @@
           target.value = "";
         }
         if (target.hasAttribute("data-platform-select")) this.applyPlatform(target.dataset.field || "", target.value);
-        if (target.dataset.field === "image.profile") this.applyImageProfile(target.value);
         if (target.hasAttribute("data-config-file") && target.files?.[0]) {
           void this.importConfig(target.files[0]);
           target.value = "";
         }
       });
     }
-    // 档位只是"尺寸建议"：细节精度保持高精度，低精度只能手动选。
-    applyImageProfile(id) {
-      const presets = {
-        clarity: { label: "\u6E05\u6670\u4F18\u5148", maxEdge: 1600, detail: "high" },
-        balanced: { label: "\u5747\u8861", maxEdge: 1440, detail: "high" },
-        saving: { label: "\u7701 Token", maxEdge: 1280, detail: "high" }
-      };
-      const preset = presets[id];
-      if (!preset) return;
-      const edge = this.shadow.querySelector('[data-field="image.maxEdge"]');
-      const detail = this.shadow.querySelector('[data-field="image.detail"]');
-      if (edge) edge.value = String(preset.maxEdge);
-      if (detail) detail.value = preset.detail;
-      this.toast(`\u5DF2\u5957\u7528\u300C${preset.label}\u300D\u5EFA\u8BAE\uFF1A\u957F\u8FB9 ${preset.maxEdge}px\u3001\u9AD8\u7CBE\u5EA6`);
+    // 思考强度下拉随平台变化：只列出该平台文档支持的档位。
+    refreshThinkingLevels(platformId) {
+      const element = this.shadow.querySelector('[data-field="pipeline.thinkingMode"]');
+      if (!(element instanceof HTMLSelectElement)) return;
+      const levels = getPlatformThinkingLevels(platformId);
+      const current = element.value;
+      element.innerHTML = levels.map((level) => `<option value="${level}">${thinkingLevelLabel(level)}</option>`).join("");
+      element.value = levels.indexOf(current) >= 0 ? current : levels[0];
+    }
+    // 累计用量来自本地计数，不触发任何请求。
+    refreshStats() {
+      const element = this.shadow.querySelector("[data-stats]");
+      if (!element) return;
+      const stats = loadUsageStats();
+      if (!stats.graded) {
+        element.textContent = "\u7D2F\u8BA1\u7528\u91CF\uFF1A\u6682\u65E0";
+        return;
+      }
+      const hitRate = stats.graded > 0 ? Math.round((stats.localHits / stats.graded) * 100) : 0;
+      const cacheRate = stats.promptTokens > 0 ? Math.round((stats.cachedTokens / stats.promptTokens) * 100) : 0;
+      element.textContent = `\u7D2F\u8BA1\uFF1A\u6279\u6539 ${stats.graded} \u6B21 \xB7 \u672C\u5730\u547D\u4E2D ${stats.localHits} \u6B21\uFF08${hitRate}%\uFF09 \xB7 \u8BF7\u6C42 ${stats.requests} \u6B21 \xB7 \u8F93\u5165 ${stats.promptTokens} token\uFF08\u524D\u7F00\u547D\u4E2D ${stats.cachedTokens}\uFF0C${cacheRate}%\uFF09 \xB7 \u8F93\u51FA ${stats.completionTokens} token`;
     }
     refreshPlatformSelects() {
       const presets = listPlatformPresets();
@@ -310,7 +317,9 @@
         modelElement.value = rememberedModel;
         modelElement.dataset.platformBound = id;
       }
-      if (thinkingElement && rememberedThinking) thinkingElement.value = rememberedThinking;
+      // 档位随平台切换：先换选项，再落到该平台支持的档位。
+      this.refreshThinkingLevels(id);
+      if (thinkingElement) thinkingElement.value = clampThinkingLevel(id, rememberedThinking || thinkingElement.value || "off");
       if (preset.endpoint) setField(`${base}.endpoint`, preset.endpoint);
       this.toast(`\u5DF2\u5207\u6362\u5230\u300C${preset.label}\u300D\uFF0C\u5DF2\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 API Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F`);
     }
@@ -521,17 +530,20 @@
     show(config) {
       this.config = config;
       this.mount();
+      const boundPlatform = getPath(config, "pipeline.vlm.platform") || "custom";
+      // 先按平台重建下拉选项，再回填数值，否则不在选项里的档位会被浏览器清空。
+      this.refreshPlatformSelects();
+      this.refreshThinkingLevels(boundPlatform);
       this.shadow.querySelectorAll("[data-field]").forEach((element) => {
         const value = getPath(config, element.dataset.field ?? "");
         if (element instanceof HTMLInputElement && element.type === "checkbox") element.checked = Boolean(value);
         else element.value = value === void 0 || value === null ? "" : String(value);
       });
-      const boundPlatform = getPath(config, "pipeline.vlm.platform") || "custom";
       const keyElement = this.shadow.querySelector('[data-field="pipeline.vlm.apiKey"]');
       const modelElement = this.shadow.querySelector('[data-field="pipeline.vlm.model"]');
       if (keyElement) keyElement.dataset.platformBound = boundPlatform;
       if (modelElement) modelElement.dataset.platformBound = boundPlatform;
-      this.refreshPlatformSelects();
+      this.refreshStats();
       this.populateRubricTypes();
       this.q(".zygr-overlay").hidden = false;
     }

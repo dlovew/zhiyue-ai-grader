@@ -4,8 +4,21 @@
   var PLATFORM_MODELS_KEY = "zygr.platform.models.v1";
   var PLATFORM_THINKING_KEY = "zygr.platform.thinking.v1";
 
+  // 思考强度档位名称：各平台可选项不同，统一取这套标签。
+  var THINKING_LEVEL_LABELS = {
+    off: "\u5173\u95ED\u601D\u8003",
+    auto: "\u6A21\u578B\u9ED8\u8BA4\uFF08\u4E0D\u4F20\u5F3A\u5EA6\u53C2\u6570\uFF09",
+    minimal: "minimal \u6700\u4F4E",
+    low: "low \u4F4E",
+    medium: "medium \u4E2D",
+    high: "high \u9AD8",
+    xhigh: "xhigh \u6781\u9AD8",
+    max: "max \u6700\u9AD8"
+  };
+
   // 内置预设只提供建议端点/模型与协议档案；用户已填写的 endpoint / model / apiKey 始终优先。
   // authHeader: bearer | api-key | none；全部请求统一为 Chat Completions。
+  // thinkingLevels 决定该平台「思考强度」下拉的选项，thinkingFields 是档位到请求字段的映射。
   // disableThinkingKey / jsonModeKey 为 null 表示不向该平台注入对应字段。
   var BUILTIN_PLATFORM_PRESETS = [
     {
@@ -14,6 +27,7 @@
       endpoint: "",
       models: [],
       authHeader: "bearer",
+      thinkingLevels: ["off", "auto"],
       disableThinkingKey: null,
       jsonModeKey: "response_format",
       stream: false
@@ -24,6 +38,7 @@
       endpoint: "https://opencode.ai/inference/openai/v1/chat/completions",
       models: ["hy4-flash-free"],
       authHeader: "bearer",
+      thinkingLevels: ["off", "auto"],
       disableThinkingKey: null,
       jsonModeKey: "response_format",
       stream: false
@@ -32,8 +47,38 @@
       id: "deepseek",
       label: "DeepSeek",
       endpoint: "https://api.deepseek.com/chat/completions",
-      models: ["deepseek-chat", "deepseek-reasoner"],
+      models: ["deepseek-flash", "deepseek-v4-pro"],
       authHeader: "bearer",
+      // 官方文档（2026）：thinking.type 控制开关，reasoning_effort 取 none|low|high|max，
+      // 省略即"模型默认"（默认开启思考）；minimal→low、medium/xhigh→high。
+      thinkingLevels: ["off", "auto", "low", "high", "max"],
+      thinkingFields: {
+        off: { reasoning_effort: "none" },
+        low: { reasoning_effort: "low" },
+        high: { reasoning_effort: "high" },
+        max: { reasoning_effort: "max" }
+      },
+      disableThinkingKey: "thinking",
+      jsonModeKey: "response_format",
+      stream: false
+    },
+    {
+      id: "sensenova",
+      label: "商汤日日新（SenseNova）",
+      endpoint: "https://api.sensenova.cn/compatible-mode/v1/chat/completions",
+      models: [],
+      authHeader: "bearer",
+      // 日日新兼容模式：强度档位为 minimal / low / medium / high / xhigh / max。
+      thinkingLevels: ["off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"],
+      thinkingFields: {
+        off: { thinking: { type: "disabled" } },
+        minimal: { reasoning_effort: "minimal" },
+        low: { reasoning_effort: "low" },
+        medium: { reasoning_effort: "medium" },
+        high: { reasoning_effort: "high" },
+        xhigh: { reasoning_effort: "xhigh" },
+        max: { reasoning_effort: "max" }
+      },
       disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
       stream: false
@@ -47,6 +92,7 @@
       disableThinkingKey: "enable_thinking",
       // 硅基流动 enable_thinking 只接受布尔值；强度用顶层 reasoning_effort。
       // 官方文档：枚举 high|max，其中 low/medium 会被服务端映射为 high。
+      thinkingLevels: ["off", "auto", "high", "max"],
       thinkingFields: {
         off: { enable_thinking: false },
         low: { reasoning_effort: "high" },
@@ -62,7 +108,9 @@
       endpoint: "https://api.moonshot.cn/v1/chat/completions",
       models: ["moonshot-v1-8k-vision-preview", "moonshot-v1-32k", "moonshot-v1-128k"],
       authHeader: "bearer",
-      disableThinkingKey: null,
+      thinkingLevels: ["off", "auto"],
+      thinkingFields: { off: { thinking: { type: "disabled" } } },
+      disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
       stream: false
     },
@@ -72,6 +120,8 @@
       endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
       models: ["qwen-vl-max", "qwen-vl-plus", "qwen-plus"],
       authHeader: "bearer",
+      thinkingLevels: ["off", "auto"],
+      thinkingFields: { off: { enable_thinking: false } },
       disableThinkingKey: "enable_thinking",
       jsonModeKey: "response_format",
       stream: false
@@ -86,6 +136,8 @@
       // 智谱官方格式：thinking.type 只接受 enabled（glm-5.x 强制思考），
       // 强度由独立的 reasoning_effort 字段控制（low/high/max，默认 max）。
       // 关闭写了 disabled 会触发错误码 1210「该模型始终思考，不支持关闭思考」。
+      // 因此该平台不提供「关闭」档，最低只能选 low。
+      thinkingLevels: ["auto", "low", "high", "max"],
       thinkingFields: {
         low: { thinking: { type: "enabled" }, reasoning_effort: "low" },
         high: { thinking: { type: "enabled" }, reasoning_effort: "high" },
@@ -100,16 +152,37 @@
       endpoint: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
       models: ["doubao-seed-2-1-lite-260915", "doubao-seed-2-1-turbo-260628"],
       authHeader: "bearer",
+      thinkingLevels: ["off", "auto"],
+      thinkingFields: { off: { thinking: { type: "disabled" } } },
       disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
       stream: false
     },
   ];
 
+  // 该平台「思考强度」下拉可选的档位；未声明的平台只提供 关闭 / 模型默认。
+  function getPlatformThinkingLevels(id) {
+    const preset = getPlatformPreset(id);
+    const levels = Array.isArray(preset?.thinkingLevels) && preset.thinkingLevels.length ? preset.thinkingLevels : ["off", "auto"];
+    return levels.filter((level) => typeof level === "string" && level);
+  }
+
+  function thinkingLevelLabel(level) {
+    return THINKING_LEVEL_LABELS[level] || String(level);
+  }
+
+  // 把任意值收敛到该平台支持的档位；不支持的档位回落到该平台的第一项。
+  function clampThinkingLevel(id, value) {
+    const levels = getPlatformThinkingLevels(id);
+    const mode = String(value || "").trim().toLowerCase();
+    return levels.indexOf(mode) >= 0 ? mode : (levels[0] || "off");
+  }
+
   function normalizeThinkingValues(value) {
     if (!isRecord(value)) return {};
     const result = {};
-    for (const mode of ["off", "low", "high", "max"]) {
+    // 覆盖所有平台可能出现的档位，否则 minimal/medium/xhigh 会被丢掉。
+    for (const mode of ["off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"]) {
       if (Object.prototype.hasOwnProperty.call(value, mode) && isRecord(value[mode])) result[mode] = value[mode];
     }
     return result;
@@ -322,6 +395,7 @@
       endpoint: normalizeEndpoint(String(src.endpoint || preset.endpoint || "")),
       model: String(src.model || ""),
       models: Array.isArray(preset.models) ? preset.models : [],
+      thinkingLevels: getPlatformThinkingLevels(preset.id),
       apiKey: String(src.apiKey || ""),
       authHeader,
       authHeaderName: authHeader === "api-key" ? "api-key" : "Authorization",
