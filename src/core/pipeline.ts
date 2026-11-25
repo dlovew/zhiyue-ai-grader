@@ -39,6 +39,7 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
   grade.usage = usage;
   grade.outputMode = mode;
   grade.thinkingForced = forcedDetected || Boolean(forcedByModel);
+  return grade;
 }
 async function gradeQuestion(options) {
   const { config, question, cache, rateLimiter } = options;

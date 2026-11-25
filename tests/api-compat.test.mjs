@@ -27,10 +27,10 @@ function loadModules(queue = []) {
     }
   };
   context.globalThis = context;
-  const files = ['src/infra/storage.ts', 'src/config.ts', 'src/infra/platforms.ts', 'src/infra/api.ts'];
+  const files = ['src/infra/storage.ts', 'src/config.ts', 'src/infra/platforms.ts', 'src/infra/api.ts', 'src/core/prompt.ts', 'src/core/parse.ts', 'src/core/pipeline.ts'];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG, getPlatformThinkingLevels, thinkingLevelLabel, clampThinkingLevel, THINKING_LEVEL_LABELS, isForcedThinkingModel, markForcedThinking, loadForcedThinking };`, context);
+  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG, getPlatformThinkingLevels, thinkingLevelLabel, clampThinkingLevel, THINKING_LEVEL_LABELS, isForcedThinkingModel, markForcedThinking, loadForcedThinking, runGrade };`, context);
   return { api: context.__exposed, calls, store };
 }
 
@@ -424,6 +424,27 @@ test('平台不支持在线列表时只提示手动填写，不回退预设模�
   assert.equal(none.length, 0);
   assert.equal(none.manual, true);
   assert.match(none.message, /请手动填写模型名称/);
+});
+
+test('runGrade 必须返回完整评分对象（回归：曾漏 return 导致 status 崩溃）', async () => {
+  const { api } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ message: { content: '{"s":"l","sc":3,"c":0.9,"r":"ok","sub":[]}' } }] })
+  }]);
+  const config = { pipeline: { timeoutMs: 5000, outputMode: 'standard' } };
+  const service = {
+    platform: 'custom',
+    endpoint: 'https://example.com/v1/chat/completions',
+    model: 'm',
+    apiKey: 'k',
+    thinkingMode: 'off'
+  };
+  const result = await api.runGrade(service, { subQuestions: [] }, 5, 'p', [], config, null, { detail: 'high' }, false);
+  assert.ok(result, 'runGrade 不能返回 undefined');
+  assert.equal(result.status, 'legible');
+  assert.equal(result.score, 3);
+  assert.equal(result.outputMode, 'standard');
+  assert.equal(result.thinkingForced, false);
 });
 
 test('批改请求带上 max_tokens 上限以限制输出长尾', async () => {

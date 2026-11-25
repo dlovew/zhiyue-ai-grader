@@ -1195,10 +1195,15 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       const request = GM_xmlhttpRequest({
         ...details,
         onload: (response) => {
-          if (response.status >= 200 && response.status < 300) return finish(resolve, response);
-          finish(reject, createApiError(response.status, response.responseText, response));
+          // 少数油猴实现会在异常路径下不传 response，这里兜底避免 "reading 'status'" 之类报错。
+          const status = Number(response?.status || 0);
+          if (status >= 200 && status < 300) return finish(resolve, response);
+          finish(reject, createApiError(status, response?.responseText || "", response));
         },
-        onerror: (response) => finish(reject, new Error(`\u7F51\u7EDC\u9519\u8BEF\uFF08HTTP ${response.status || 0}\uFF09`)),
+        onerror: (response) => {
+          const detail = response?.error ? `\uFF1A${response.error}` : "";
+          finish(reject, new Error(`\u7F51\u7EDC\u9519\u8BEF\uFF08HTTP ${response?.status || 0}\uFF09${detail}`));
+        },
         ontimeout: () => finish(reject, new Error("\u8BF7\u6C42\u8D85\u65F6"))
       });
       // 本地硬超时兜底：油猴少数实现不回调 ontimeout 时，仍保证 promise 结束、按钮不卡在"测试中"。
@@ -2132,6 +2137,7 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
   grade.usage = usage;
   grade.outputMode = mode;
   grade.thinkingForced = forcedDetected || Boolean(forcedByModel);
+  return grade;
 }
 async function gradeQuestion(options) {
   const { config, question, cache, rateLimiter } = options;
