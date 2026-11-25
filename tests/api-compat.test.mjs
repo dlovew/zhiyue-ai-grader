@@ -797,6 +797,31 @@ test('商汤日日新的强度参数按档位传递', async () => {
   assert.equal(JSON.parse(calls[0].data).reasoning_effort, 'xhigh');
 });
 
+test('商汤日日新用 token.sensenova.cn 拉模型列表，视觉模型排前', async () => {
+  const { api, calls } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({
+      data: [
+        { id: 'sensenova-text-1', input_modalities: ['text'] },
+        { id: 'sensenova-6.8-flash', input_modalities: ['text', 'image'], context_length: 1048576 },
+        { id: 'sensenova-6.8-pro', input_modalities: ['text', 'image'] }
+      ]
+    })
+  }]);
+  const models = await api.fetchModels({
+    platform: 'sensenova',
+    endpoint: 'https://api.sensenova.cn/compatible-mode/v1/chat/completions',
+    apiKey: 'k'
+  });
+  assert.equal(calls[0].url, 'https://token.sensenova.cn/v1/models');
+  assert.equal(Array.from(models).join(','), 'sensenova-6.8-flash,sensenova-6.8-pro,sensenova-text-1');
+  assert.equal(api.resolveProfile({ platform: 'sensenova' }).modelsUrl, 'https://token.sensenova.cn/v1/models');
+  // 其他平台仍按接口地址推导 /models
+  const other = loadModules([{ status: 200, responseText: JSON.stringify({ data: [] }) }]);
+  await other.api.fetchModels({ platform: 'deepseek', endpoint: 'https://api.deepseek.com/chat/completions', apiKey: 'k' }).catch(() => null);
+  assert.equal(other.calls[0].url, 'https://api.deepseek.com/models');
+});
+
 test('响应里的 usage 会被回传，且不产生额外请求', async () => {
   const { api, calls } = loadModules([{
     status: 200,

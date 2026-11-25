@@ -130,7 +130,7 @@
 | Kimi / 火山方舟 | 关闭 / 模型默认 | 关闭发 `thinking.type=disabled` |
 | 自定义 | 关闭 / 模型默认 | 不注入任何参数，靠模型自身默认 |
 
-商汤日日新的接口地址预填为兼容模式 `https://api.sensenova.cn/compatible-mode/v1/chat/completions`，模型名请按其文档填写（目前未预置默认模型）。
+商汤日日新的推理地址预填为兼容模式 `https://api.sensenova.cn/compatible-mode/v1/chat/completions`；模型列表按其官方文档走独立主机 `GET https://token.sensenova.cn/v1/models`，点「获取模型列表」即可拉取，返回里 `input_modalities` 含 `image` 的视觉模型会自动排在最前。若推理请求返回 404/401，请把接口地址改成其推理网关的 `/v1/chat/completions` 地址（模型名与档位参数以官方文档为准）。
 
 硅基流动使用说明：`enable_thinking` 只接受布尔值，所以「关闭」模式发送 `enable_thinking: false`；强度改用顶层 `reasoning_effort`（按官方文档 `low`/`medium` 由服务端映射为 `high`，`max` 原样发送）。选「模型默认」时不发送任何思考参数，但部分模型默认开启思考并生成长链推理，72B 等大模型处理图片时可能超过默认 120 秒超时——可在「高级」里调大请求超时，或换用更小的视觉模型，或选「关闭」模式关闭思考。
 

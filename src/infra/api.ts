@@ -258,7 +258,8 @@
   var MODELS_UNSUPPORTED_MESSAGE = "\u8BE5\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u83B7\u53D6\u6A21\u578B\u5217\u8868\uFF0C\u8BF7\u624B\u52A8\u586B\u5199\u6A21\u578B\u540D\u79F0";
   async function fetchModels(service, timeoutMs = 15e3) {
     const profile = resolveProfile(service);
-    const url = modelsEndpoint(profile.endpoint);
+    // 有些平台（如商汤日日新）的模型列表在独立主机上，预设可覆盖。
+    const url = String(profile.modelsUrl || "").trim() || modelsEndpoint(profile.endpoint);
     if (!url) throw new Error("\u8BF7\u5148\u586B\u5199\u63A5\u53E3\u5730\u5740");
     const headers = { "Content-Type": "application/json" };
     if (profile.authHeader === "api-key") headers["api-key"] = profile.apiKey;
@@ -278,7 +279,14 @@
     }
     const body = parseJsonResponse(response.responseText);
     const list = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : Array.isArray(body?.result) ? body.result : [];
-    const ids = list.map((item) => (typeof item === "string" ? item : item?.id)).filter((id) => typeof id === "string" && id.trim());
+    // 支持图片输入的模型排前面（阅卷必须用视觉模型），其余保持平台返回顺序。
+    const entries = list.map((item) => {
+      if (typeof item === "string") return { id: item, vision: false };
+      const modalities = Array.isArray(item?.input_modalities) ? item.input_modalities : [];
+      return { id: item?.id, vision: modalities.includes("image") };
+    }).filter((entry) => typeof entry.id === "string" && entry.id.trim());
+    entries.sort((a, b) => Number(b.vision) - Number(a.vision));
+    const ids = entries.map((entry) => entry.id);
     if (!ids.length) return manualOnly("\u63A5\u53E3\u672A\u8FD4\u56DE\u53EF\u7528\u6A21\u578B\u5217\u8868\uFF0C\u8BF7\u624B\u52A8\u586B\u5199\u6A21\u578B\u540D\u79F0");
     return ids;
   }

@@ -68,6 +68,8 @@
       endpoint: "https://api.sensenova.cn/compatible-mode/v1/chat/completions",
       models: [],
       authHeader: "bearer",
+      // 模型列表与推理不在同一主机：官方文档给出 GET https://token.sensenova.cn/v1/models。
+      modelsEndpoint: "https://token.sensenova.cn/v1/models",
       // 日日新兼容模式：强度档位为 minimal / low / medium / high / xhigh / max。
       thinkingLevels: ["off", "auto", "minimal", "low", "medium", "high", "xhigh", "max"],
       thinkingFields: {
@@ -395,6 +397,8 @@
       endpoint: normalizeEndpoint(String(src.endpoint || preset.endpoint || "")),
       model: String(src.model || ""),
       models: Array.isArray(preset.models) ? preset.models : [],
+      // 个别平台的模型列表接口与推理接口不同域，预设可单独指定。
+      modelsUrl: String(preset.modelsEndpoint || "").trim(),
       thinkingLevels: getPlatformThinkingLevels(preset.id),
       apiKey: String(src.apiKey || ""),
       authHeader,
