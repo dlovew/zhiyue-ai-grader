@@ -337,24 +337,28 @@
     const compat = isRecord(src.compat) ? src.compat : {};
     const legacyAuth = LEGACY_PLATFORM_AUTH[String(src.platform || "")];
     const authHeader = ["bearer", "api-key", "none"].includes(compat.authHeader) ? compat.authHeader : (legacyAuth || preset.authHeader || "bearer");
+    const endpoint = normalizeEndpoint(String(src.endpoint || preset.endpoint || ""));
+    // 用户也可能用「自定义」手填火山地址；按域名兜底，按火山预设处理思考字段。
+    const volcEndpoint = /\/\/ark\.[^/]*\.volces\.com\//i.test(endpoint);
+    const behaviorPreset = volcEndpoint ? (getPlatformPreset("volcengine-chat") || preset) : preset;
     return {
       id: preset.id || "custom",
       label: preset.label || "自定义",
-      endpoint: normalizeEndpoint(String(src.endpoint || preset.endpoint || "")),
+      endpoint,
       model: String(src.model || ""),
-      models: Array.isArray(preset.models) ? preset.models : [],
+      models: Array.isArray(behaviorPreset.models) ? behaviorPreset.models : [],
       // 个别平台的模型列表接口与推理接口不同域，预设可单独指定。
-      modelsUrl: String(preset.modelsEndpoint || "").trim(),
-      thinkingLevels: getPlatformThinkingLevels(preset.id),
+      modelsUrl: String(behaviorPreset.modelsEndpoint || "").trim(),
+      thinkingLevels: getPlatformThinkingLevels(behaviorPreset.id),
       apiKey: String(src.apiKey || ""),
       authHeader,
       authHeaderName: authHeader === "api-key" ? "api-key" : "Authorization",
-      disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (preset.disableThinkingKey ?? null),
-      thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(preset.thinkingValues),
-      thinkingFields: Object.prototype.hasOwnProperty.call(compat, "thinkingFields") ? normalizeThinkingValues(compat.thinkingFields) : normalizeThinkingValues(preset.thinkingFields),
+      disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (behaviorPreset.disableThinkingKey ?? null),
+      thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(behaviorPreset.thinkingValues),
+      thinkingFields: Object.prototype.hasOwnProperty.call(compat, "thinkingFields") ? normalizeThinkingValues(compat.thinkingFields) : normalizeThinkingValues(behaviorPreset.thinkingFields),
       jsonModeKey: Object.prototype.hasOwnProperty.call(compat, "jsonModeKey")
         ? compat.jsonModeKey
-        : (Object.prototype.hasOwnProperty.call(preset, "jsonModeKey") ? preset.jsonModeKey : "response_format"),
-      stream: typeof compat.stream === "boolean" ? compat.stream : Boolean(preset.stream)
+        : (Object.prototype.hasOwnProperty.call(behaviorPreset, "jsonModeKey") ? behaviorPreset.jsonModeKey : "response_format"),
+      stream: typeof compat.stream === "boolean" ? compat.stream : Boolean(behaviorPreset.stream)
     };
   }

@@ -163,7 +163,7 @@ async function jumpFindRecord(win, origin, markingPaperId, topicNumStr, userCode
 // 调页面自己的回评方法，再等作答图真的换成另一份。
 async function jumpApplyRecord(doc, record) {
   const found = jumpFindVue(doc);
-  if (!found) return { ok: false, error: "未找到阅卷页面的回评入口，请刷新阅卷页后重试" };
+  if (!found) return { ok: false, error: "未找到阅卷页面的回评入口，请按浏览器 F5 刷新当前页面后重试" };
   const before = answerSnapshot(doc).identity;
   const item = { id: record.id, userCode: record.userCode, totalScore: record.totalScore, score: record.score };
   try {
@@ -191,7 +191,7 @@ async function jumpToMarkedRecord(entry, options = {}) {
   // 身份里的题号是接口口径，优先用它；历史字段可能是 DOM 口径，统一转成 "43,1" 再查。
   const topicNumStr = jumpApiTopicNum(identity.topicNumStr || question.topicNumStr || "");
   if (!userCode) return { ok: false, error: "该记录没有学号，无法定位（旧版记录不支持定位）" };
-  if (!origin) return { ok: false, error: "尚未抓到阅卷接口地址，请刷新阅卷页后重试" };
+  if (!origin) return { ok: false, error: "尚未抓到阅卷接口地址，请按浏览器 F5 刷新当前页面后重试" };
   if (!markingPaperId) return { ok: false, error: "该记录缺少试卷 ID，无法定位" };
   // 批量阅卷开着时，回评会把整批一起拉进来，直接拒绝比悄悄改错卷安全。
   if (typeof hookCurrentBatchSize === "function" && hookCurrentBatchSize() > 0) {

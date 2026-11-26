@@ -67,6 +67,7 @@ export function buildOutput() {
     BANNER,
     '"use strict";',
     '(() => {',
+    `var ZYGR_VERSION = ${JSON.stringify(VERSION)};`,
     ...parts,
     '})();',
     '',

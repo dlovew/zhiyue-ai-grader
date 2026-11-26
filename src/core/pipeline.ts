@@ -12,13 +12,15 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
     { role: "system", content: "\u4F60\u662F\u4E25\u683C\u4F46\u516C\u6B63\u7684\u9605\u5377\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA JSON\u3002" },
     { role: "user", content }
   ];
-  // 输出档位决定基础预算；思考模式会额外消耗输出预算，开启时放宽，避免 JSON 被截断。
+  // 输出档位决定基础预算；思考与正文共享输出预算，强制思考的模型按 3 倍放宽。
+  // 上限只是天花板：模型不用就不计费，所以放宽本身不产生额外费用。
   const mode = normalizeOutputMode(config.pipeline?.outputMode);
   const thinking = normalizeThinkingMode(service.thinkingMode);
   const baseTokens = OUTPUT_MODES[mode]?.maxTokens || 800;
-  const maxTokens = thinking === "off" ? baseTokens : Math.round(baseTokens * 1.8);
+  const maxTokens = thinking === "off" ? baseTokens : Math.round(baseTokens * 3);
   let usage = null;
   let forcedDetected = false;
+  let truncated = false;
   const raw = await chatCompletion(service, messages, {
     rateLimiter,
     timeoutMs: config.pipeline.timeoutMs,
@@ -32,10 +34,18 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
     onThinkingForced: () => {
       forcedDetected = true;
       markForcedThinking(service.platform, service.model);
+    },
+    // 正文被截断：先尝试按已产出内容捞分，捞不出确定分数才作废。
+    onTruncated: () => {
+      truncated = true;
     }
   });
   if (!raw.trim()) throw new Error("\u6A21\u578B\u8FD4\u56DE\u4E3A\u7A7A");
   const grade = parseGrade(raw, maxScore, question.subQuestions);
+  if (truncated && grade.scoreUncertain) {
+    throw new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\uFF0C\u4E14\u6CA1\u80FD\u4ECE\u5DF2\u4EA7\u51FA\u5185\u5BB9\u4E2D\u89E3\u6790\u51FA\u786E\u5B9A\u5206\u6570\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");
+  }
+  if (truncated) grade.truncated = true;
   grade.usage = usage;
   grade.outputMode = mode;
   grade.thinkingForced = forcedDetected || Boolean(forcedByModel);
@@ -87,7 +97,7 @@ async function gradeQuestion(options) {
   if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
   if (imageOptions.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
   if (usable.length === 0) {
-    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF1A\u56FE\u7247\u94FE\u63A5\u53EF\u80FD\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u70B9\u9605\u5377\u9875\u300C\u5237\u65B0\u300D\u540E\u91CD\u8BD5");
+    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF1A\u56FE\u7247\u94FE\u63A5\u53EF\u80FD\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u6309\u6D4F\u89C8\u5668 F5 \u5237\u65B0\u5F53\u524D\u9605\u5377\u9875\uFF0C\u6216\u9000\u51FA\u540E\u91CD\u65B0\u8FDB\u5165\u9605\u5377\u4EFB\u52A1\u518D\u8BD5");
   }
   const payloadImages = usable;
   const prompt = buildGradingPrompt(question, config.context, {
@@ -104,6 +114,8 @@ async function gradeQuestion(options) {
     reviewReasons.push("\u8BC6\u522B\u4E3A\u65E0\u6CD5\u8FA8\u8BA4\u5374\u7ED9\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u5B9E");
   }
   if (grade.scoreUncertain) reviewReasons.push("\u672A\u80FD\u4ECE\u6A21\u578B\u8F93\u51FA\u4E2D\u786E\u5B9A\u5206\u6570\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u5B9A");
+  // 截断捞回的结果：总分可用但明细/评语可能不全，必须人工复核，不允许直接提交。
+  if (grade.truncated) reviewReasons.push("\u6A21\u578B\u8F93\u51FA\u88AB\u622A\u65AD\uFF0C\u5DF2\u6309\u5DF2\u4EA7\u51FA\u5185\u5BB9\u89E3\u6790\uFF0C\u8BF7\u4EBA\u5DE5\u590D\u6838");
   if (grade.scoreAdjusted) reviewReasons.push("\u603B\u5206\u4E0E\u5C0F\u9898\u5408\u8BA1\u4E0D\u4E00\u81F4\uFF0C\u5DF2\u6309\u5C0F\u9898\u91CD\u7B97");
   const missingSubs = question.subQuestions.length - grade.subScores.length;
   if (question.subQuestions.length > 0 && missingSubs > 0) {

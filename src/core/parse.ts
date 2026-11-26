@@ -56,10 +56,13 @@
       const base = index >= 0 && index < subQuestions.length ? subQuestions[index] : null;
       const label = String(record.label ?? base?.label ?? "").trim();
       if (!label) return [];
+      // 没写 sc 的条目（截断修复可能补全出残缺条目）直接丢弃：当成 0 分会拉低小题合计。
+      const rawScore = record.sc ?? record.score;
+      if (rawScore === void 0 || rawScore === null || rawScore === "") return [];
       const itemMax = clamp(Number(record.maxScore ?? base?.maxScore ?? 0), maxScore);
       return [{
         label,
-        score: clamp(Number(record.sc ?? record.score ?? 0), itemMax > 0 ? itemMax : maxScore),
+        score: clamp(Number(rawScore), itemMax > 0 ? itemMax : maxScore),
         maxScore: itemMax,
         reason: String(record.r ?? record.reason ?? "").slice(0, 200)
       }];
@@ -131,7 +134,68 @@
       raw
     };
   }
+  // 截断修复：思考 token 挤占输出预算时 JSON 可能只写了一半。
+  // 思路：从最后一个「完整元素」处截断、去掉悬挂逗号、按栈补齐括号，从后往前试有限的候选点，
+  // 能解析出对象就交给 fromJson 走正常口径（含小题合计校验）；修复不出来返回 null，由上层作废。
+  function repairTruncatedJson(raw) {
+    const text = String(raw || "");
+    const start = text.indexOf("{");
+    if (start < 0) return null;
+    const body = text.slice(start);
+    const stack = [];
+    const marks = [];
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < body.length; i += 1) {
+      const ch = body[i];
+      if (inString) {
+        if (escape) escape = false;
+        else if (ch === "\\") escape = true;
+        else if (ch === '"') {
+          inString = false;
+          marks.push(i);
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === "{" || ch === "[") {
+        stack.push(ch === "{" ? "}" : "]");
+        continue;
+      }
+      if (ch === "}" || ch === "]") {
+        stack.pop();
+        marks.push(i);
+        continue;
+      }
+      if (ch === ",") {
+        marks.push(i);
+        continue;
+      }
+      if (/[0-9]/.test(ch) && !/[0-9]/.test(body[i + 1] || "")) marks.push(i);
+    }
+    // 只修复"确实没写完"的输入（括号未闭合或字符串未闭合）；
+    // 完整但非法的 JSON 交给原有的 fromText 兜底，不在这里硬修。
+    if (stack.length === 0 && !inString) return null;
+    // 从最近的完成点往前试，最多回退 8 个候选点，避免 O(n²)
+    for (let t = marks.length - 1, tried = 0; t >= 0 && tried < 8; t -= 1, tried += 1) {
+      const cut = body.slice(0, marks[t] + 1).replace(/,\s*$/, "");
+      if (!cut.trim()) continue;
+      const candidate = `${cut}${stack.slice().reverse().join("")}`;
+      try {
+        if (asRecord(JSON.parse(candidate))) return candidate;
+      } catch { /* 换上一个候选点继续试 */ }
+    }
+    return null;
+  }
+  function fromRepairedJson(raw, maxScore, subQuestions = []) {
+    const repaired = repairTruncatedJson(raw);
+    if (!repaired) return null;
+    return fromJson(repaired, maxScore, subQuestions);
+  }
   function parseGrade(raw, maxScore, subQuestions = []) {
-    return fromJson(raw, maxScore, subQuestions) ?? fromText(raw, maxScore, subQuestions);
+    return fromJson(raw, maxScore, subQuestions) ?? fromRepairedJson(raw, maxScore, subQuestions) ?? fromText(raw, maxScore, subQuestions);
   }
 

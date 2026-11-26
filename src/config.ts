@@ -25,7 +25,7 @@
       autoBySubject: true
     },
     historyLimit: 500,
-    // 连续批阅份数上限：无人看管时也不至于一路跑到底。
+    // 连续批阅份数上限：大型考试常有几千份，保留一个硬上限防止无人看管时无限跑。
     continuousLimit: 20,
     cacheTtlDays: 30,
     cacheMaxEntries: 2000

@@ -220,8 +220,13 @@ test('版本号只有 version.json 一个来源', () => {
   const banner = built.match(/\/\/ @version\s+(\S+)/);
   assert.ok(banner, 'banner 里必须有 @version');
   assert.equal(banner[1], VERSION);
+  assert.match(built, new RegExp(`var ZYGR_VERSION = ${JSON.stringify(VERSION)};`));
+  assert.match(built, /id="zygr-version"/);
+  const panel = readSource('src/ui/panel.ts');
+  assert.match(panel, /typeof ZYGR_VERSION === "string"/);
   const readme = readSource('README.md');
   assert.match(readme, new RegExp(`- 版本：\`${VERSION.replace(/\./g, '\\.')}\``));
+  assert.match(readme, new RegExp(`面板标题右侧.*v${VERSION.replace(/\./g, '\\.')}`));
 });
 
 function loadZhixue({ visibility = 'visible', imageSrc = 'https://img.example/a.png', imageReady = true } = {}) {
@@ -671,19 +676,78 @@ test('限流不死等：单次超预算直接拒绝，等待超时有上限', as
   await assert.rejects(() => busy.acquire(10, 60), /等待限流配额超时/);
 });
 
-test('finish_reason=length 整次作废，不把空正文当零分', async () => {
+test('finish_reason=length 有正文时交给上层捞分，空正文才作废', async () => {
   const { api } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '{"s":"l","sc":2' } }] })
+  }]);
+  let truncated = false;
+  const text = await api.chatCompletion(
+    { platform: 'custom', endpoint: 'https://example.com/v1/chat/completions', model: 'm', apiKey: 'k' },
+    [{ role: 'user', content: 'hi' }],
+    { onTruncated: () => { truncated = true; } }
+  );
+  assert.equal(truncated, true);
+  assert.match(text, /"sc":2/);
+
+  const empty = loadModules([{
     status: 200,
     responseText: JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '' } }] })
   }]);
   await assert.rejects(
-    () => api.chatCompletion(
+    () => empty.api.chatCompletion(
       { platform: 'custom', endpoint: 'https://example.com/v1/chat/completions', model: 'm', apiKey: 'k' },
       [{ role: 'user', content: 'hi' }],
       {}
     ),
     /finish_reason=length/
   );
+});
+
+test('截断的 JSON 能修复出分数，无确定分数时才作废', async () => {
+  const { core } = loadCore();
+  // 修复：截断在评语字符串中间
+  const salvage = core.parseGrade('{"s":"l","sc":2,"c":0.9,"r":"第一空答对', 2, []);
+  assert.equal(salvage.score, 2);
+  assert.equal(salvage.status, 'legible');
+  assert.equal(salvage.scoreUncertain, false);
+  // 修复：截断在小题数组中间，保留完整条目、丢弃半条
+  const subs = [{ label: '第1问', maxScore: 2 }, { label: '第2问', maxScore: 3 }];
+  const partial = core.parseGrade('{"s":"l","sc":4,"c":0.8,"r":"","sub":[{"i":0,"sc":2,"r":"对"},{"i":1,"sc":', 5, subs);
+  assert.equal(partial.score, 4);
+  assert.equal(partial.subScores.length, 1);
+  // 作废：截断太早，连 sc 都没写出来
+  const unusable = core.parseGrade('{"s":"l","sc":', 2, []);
+  assert.equal(unusable.scoreUncertain, true);
+});
+
+test('runGrade 截断时给出分数并标记复核；无确定分数时报错', async () => {
+  const service = { platform: 'custom', endpoint: 'https://example.com/v1/chat/completions', model: 'm', apiKey: 'k', thinkingMode: 'off' };
+  const config = { pipeline: { outputMode: 'standard', timeoutMs: 30000 } };
+  const question = { topicNumStr: '43,1', questionId: '43,1', subQuestions: [], identity: {}, images: [] };
+  const salvaged = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '{"s":"l","sc":2,"c":0.9,"r":"第一空答对' } }] })
+  }]);
+  const grade = await salvaged.api.runGrade(service, question, 2, 'prompt', [], config, null, { detail: 'high' }, false);
+  assert.equal(grade.score, 2);
+  assert.equal(grade.truncated, true);
+  assert.equal(grade.thinkingForced, false);
+
+  const unusable = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '{"s":"l","sc":' } }] })
+  }]);
+  await assert.rejects(
+    () => unusable.api.runGrade(service, question, 2, 'prompt', [], config, null, { detail: 'high' }, false),
+    /没能从已产出内容中解析出确定分数|\\u6CA1\\u80FD/
+  );
+});
+
+test('思考未关闭时输出预算放宽到 3 倍', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /Math\.round\(baseTokens \* 3\)/);
+  assert.doesNotMatch(built, /baseTokens \* 1\.8/);
 });
 
 test('回评接口与钩子回调已接线，题号靠 scanRecordId 判重', () => {
@@ -716,8 +780,68 @@ test('连续批阅有份数上限，避免无人看管跑到没配额', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
   assert.match(built, /Number\(config\.continuousLimit\) \|\| 20/);
   assert.match(built, /count >= limit/);
-  // 高级页字段：markup 里是 field(...) 调用，运行时才生成 data-field
-  assert.match(built, /field\([^)]*"continuousLimit"/);
+  // 份数上限已移到主面板，和连续批阅按钮放在一起；设置页不再保留重复入口。
+  assert.match(built, /data-opt='continuous-limit'/);
+  assert.match(built, /zygr-continuous-cell/);
+  assert.match(built, /onContinuousLimitChange/);
+  assert.match(built, /\\u4E0D\\u662F\\u5FC5\\u987B\\u6279\\u6EE1\\u7684\\u4EFD\\u6570/);
+  assert.match(built, /var CONTINUOUS_LIMIT_MAX = 5000;/);
+  assert.match(built, /Math\.min\(CONTINUOUS_LIMIT_MAX, Number\(config\.continuousLimit\)/);
+  assert.match(built, /max="\$\{CONTINUOUS_LIMIT_MAX\}"/);
+  assert.doesNotMatch(built, /field\([^)]*"continuousLimit"/);
+});
+
+test('输出档位移到主面板，设置页不再保留重复入口', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /data-opt='output-mode'/);
+  assert.match(built, /onOutputModeChange/);
+  assert.match(built, /setOutputMode\(config\.pipeline\.outputMode\)/);
+  assert.match(built, /var OUTPUT_MODE_SHORT = /);
+  // 面板用的是短标签，完整说明放 title 提示里
+  assert.match(built, /OUTPUT_MODE_SHORT\[key\] \|\| key/);
+  assert.doesNotMatch(built, /select\([^)]*"pipeline\.outputMode"/);
+});
+
+test('请求不再附带 prompt_cache_key；自定义平台填火山地址时按火山规则发送思考字段', async () => {
+  const { api, calls } = loadModules([{ status: 200, responseText: JSON.stringify({ choices: [{ message: { content: 'ok' } }] }) }]);
+  const service = { platform: 'volcengine-chat', endpoint: '', model: 'deepseek-v4-1-flash-261017', apiKey: 'k', thinkingMode: 'off' };
+  // 真机实测：火山隐式缓存在图片不同时不会复用前缀，路由亲和键对真实阅卷没有帮助，已移除。
+  await api.chatCompletion(service, [{ role: 'user', content: 'hi' }], { promptCacheKey: 'zygr|should-not-be-sent' });
+  assert.equal(JSON.parse(calls[0].data).prompt_cache_key, undefined);
+
+  // 用户手填火山地址但平台选了「自定义」时，仍要按火山规则关闭思考，避免输出被截断。
+  const customVolc = api.resolveProfile({
+    platform: 'custom',
+    endpoint: 'https://ark.cn-beijing.volces.com/api/v3/chat/completions',
+    model: 'm',
+    apiKey: 'k'
+  });
+  assert.equal(customVolc.disableThinkingKey, 'thinking');
+  assert.equal(customVolc.thinkingFields.off.thinking.type, 'disabled');
+  await api.chatCompletion(
+    { platform: 'custom', endpoint: 'https://ark.cn-beijing.volces.com/api/v3/chat/completions', model: 'm', apiKey: 'k', thinkingMode: 'off' },
+    [{ role: 'user', content: 'hi' }]
+  );
+  const customVolcPayload = JSON.parse(calls[1].data);
+  assert.equal(customVolcPayload.prompt_cache_key, undefined);
+  assert.deepEqual(customVolcPayload.thinking, { type: 'disabled' });
+});
+
+test('缓存命中数为 0 时也明确显示，避免用户误以为没读到字段', () => {
+  const panel = readSource('src/ui/panel.ts');
+  const history = readSource('src/ui/history.ts');
+  assert.match(panel, /Number\(usage\.cached\) \|\| 0/);
+  assert.match(panel, /\\u524D\\u7F00\\u547D\\u4E2D \$\{Number\(usage\.cached\) \|\| 0\}/);
+  assert.match(history, /\\u8F93\\u5165 \$\{usage\.prompt\}\\uFF08\\u524D\\u7F00\\u547D\\u4E2D \$\{usage\.cached\}\\uFF09/);
+});
+
+test('作答图过期提示指向浏览器刷新，不再要求点页面刷新按钮', () => {
+  const pipeline = readSource('src/core/pipeline.ts');
+  assert.match(pipeline, /\\u6309\\u6D4F\\u89C8\\u5668 F5 \\u5237\\u65B0\\u5F53\\u524D\\u9605\\u5377\\u9875/);
+  assert.doesNotMatch(pipeline, /\\u70B9\\u9605\\u5377\\u9875\\u300C\\u5237\\u65B0\\u300D/);
+  const jump = readSource('src/adapters/zhixue-jump.ts');
+  assert.match(jump, /请按浏览器 F5 刷新当前页面后重试/);
+  assert.doesNotMatch(jump, /请刷新阅卷页后重试/);
 });
 
 test('HTTP 200 但响应体是 error 时显式报错', async () => {

@@ -55,6 +55,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   font-weight: 700; font-size: 17px; letter-spacing: 1px;
 }
 .zygr-brand strong { display: block; font-size: 16px; letter-spacing: .5px; }
+.zygr-title-row { display: flex; align-items: center; gap: 6px; }
+.zygr-version {
+  flex: none; padding: 2px 6px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.34); background: rgba(255,255,255,.16);
+  font-size: 9px; line-height: 1.2; letter-spacing: .2px; opacity: .92;
+}
 .zygr-brand small { display: block; opacity: .86; font-size: 11px; margin-top: 2px; }
 .zygr-head-actions { display: flex; gap: 6px; position: relative; z-index: 1; }
 .zygr-icon {
@@ -120,12 +126,45 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 }
 .zygr-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 3px 9px rgba(79,70,229,.14); }
 .zygr-btn:focus-visible { outline: 2px solid var(--zygr-sky); outline-offset: 2px; }
+.zygr-continuous-cell {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 6px 2px 2px; border: 1px solid var(--zygr-line); border-radius: 9px;
+  background: rgba(255,255,255,.58);
+}
+.zygr-continuous-cell .zygr-btn { border-color: transparent; background: transparent; }
+.zygr-limit {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 10px; line-height: 1; color: var(--zygr-muted); white-space: nowrap;
+  cursor: help; user-select: none;
+}
+.zygr-limit input {
+  width: 34px; height: 22px; padding: 0 2px; text-align: center;
+  border: 1px solid rgba(79,70,229,.22); border-radius: 6px;
+  background: rgba(255,255,255,.9); color: #3730a3; font-size: 11px; font-weight: 600;
+  -moz-appearance: textfield;
+}
+.zygr-limit input::-webkit-inner-spin-button,
+.zygr-limit input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.zygr-limit input:focus-visible { outline: 2px solid var(--zygr-sky); outline-offset: 1px; }
+.zygr-limit input:disabled { cursor: not-allowed; }
 .zygr-btn.zygr-primary { color: #fff; border-color: transparent; background: linear-gradient(135deg, var(--zygr-primary), var(--zygr-sky)); }
 .zygr-btn.zygr-running { color: #fff; border-color: transparent; background: linear-gradient(135deg, #dc2626, #f59e0b); }
 .zygr-btn.zygr-ghost { color: var(--zygr-muted); border-color: var(--zygr-line); background: transparent; }
 .zygr-submit-cell { display: flex; flex-direction: row; align-items: center; gap: 6px; }
 .zygr-mini-check { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; line-height: 1; white-space: nowrap; color: var(--zygr-muted); cursor: pointer; user-select: none; }
 .zygr-mini-check input { accent-color: var(--zygr-primary); width: 12px; height: 12px; flex: none; }
+.zygr-output {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; line-height: 1; color: var(--zygr-muted); white-space: nowrap;
+  cursor: help; user-select: none;
+}
+.zygr-output select {
+  height: 22px; padding: 0 2px; cursor: pointer;
+  border: 1px solid rgba(79,70,229,.22); border-radius: 6px;
+  background: rgba(255,255,255,.9); color: #3730a3; font-size: 11px; font-weight: 600;
+}
+.zygr-output select:focus-visible { outline: 2px solid var(--zygr-sky); outline-offset: 1px; }
+.zygr-output select:disabled { cursor: not-allowed; opacity: .6; }
 .zygr-toast {
   position: absolute; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 2;
   padding: 8px 14px; border-radius: 999px; background: rgba(15,23,42,.9); color: #fff; font-size: 12px;

@@ -43,12 +43,25 @@
       onContinuous: () => {
         void toggleContinuous();
       },
+      onContinuousLimitChange: (value) => {
+        config = { ...config, continuousLimit: value };
+        saveConfig(config);
+        panel.toast(`\u8FDE\u7EED\u6279\u9605\u4E0A\u9650\u5DF2\u8BBE\u4E3A ${value} \u4EFD`);
+      },
+      onOutputModeChange: (value) => {
+        config = { ...config, pipeline: { ...config.pipeline, outputMode: value } };
+        saveConfig(config);
+        // 档位进缓存键：换档位不会误命中旧结果。
+        panel.toast(`\u8F93\u51FA\u6863\u4F4D\u5DF2\u8BBE\u4E3A ${OUTPUT_MODE_SHORT[value] || value}`);
+      },
       onSubmit: (skipConfirm) => {
         void submitResult({ skipConfirm });
       },
       onHistory: () => historyPanel.show(loadHistory()),
       onSettings: () => settingsPanel.show(config)
     });
+    panel.setContinuousLimit(config.continuousLimit);
+    panel.setOutputMode(config.pipeline.outputMode);
     cache = createCache();
     const settingsPanel = new SettingsPanel({
       onSave: (draft) => {
@@ -61,6 +74,8 @@
         syncThinkingModesFromConfig(config);
         cache = createCache();
         limiter = buildLimiter(config);
+        panel.setContinuousLimit(config.continuousLimit);
+        panel.setOutputMode(config.pipeline.outputMode);
         panel.setCache(pipelineLabel(config));
         // 保存配置时顺手把这套标准存进「本题」槽位，下次切回来直接可用。
         const slot = rubricSlotKey(currentQuestion);
@@ -121,6 +136,8 @@
         syncThinkingModesFromConfig(config);
         cache = createCache();
         limiter = buildLimiter(config);
+        panel.setContinuousLimit(config.continuousLimit);
+        panel.setOutputMode(config.pipeline.outputMode);
         panel.setCache(pipelineLabel(config));
         panel.setSubtitle("\u914D\u7F6E\u5DF2\u5BFC\u5165");
       },
@@ -129,6 +146,8 @@
         config = loadConfig();
         cache = createCache();
         limiter = buildLimiter(config);
+        panel.setContinuousLimit(config.continuousLimit);
+        panel.setOutputMode(config.pipeline.outputMode);
         settingsPanel.show(config);
       },
       onClear: () => {
@@ -136,6 +155,8 @@
         cache.clear();
         config = loadConfig();
         limiter = buildLimiter(config);
+        panel.setContinuousLimit(config.continuousLimit);
+        panel.setOutputMode(config.pipeline.outputMode);
         panel.setCache("\u672A\u914D\u7F6E", "warn");
         panel.setSubtitle("\u6570\u636E\u5DF2\u6E05\u7A7A");
         historyPanel.refresh([]);
@@ -628,7 +649,7 @@
       panel.clearError();
       let count = 0;
       // 份数上限：无人看管时也不会一路跑到没配额。
-      const limit = Math.max(1, Math.min(200, Number(config.continuousLimit) || 20));
+      const limit = Math.max(1, Math.min(CONTINUOUS_LIMIT_MAX, Number(config.continuousLimit) || 20));
       while (autoMode && !autoStopRequested) {
         if (count >= limit) {
           panel.setSubtitle(`\u5DF2\u8FBE\u8FDE\u7EED\u6279\u9605\u4E0A\u9650 ${limit} \u4EFD\uFF0C\u5DF2\u505C\u6B62`);

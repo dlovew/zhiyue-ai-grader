@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.2.0
+// @version      1.3.3
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -18,6 +18,7 @@
 // ==/UserScript==
 "use strict";
 (() => {
+var ZYGR_VERSION = "1.3.3";
   // src/adapters/zhixue.ts
   var SELECTORS = {
     answerImage: 'div[name="topicImg"] img',
@@ -831,7 +832,7 @@ async function jumpFindRecord(win, origin, markingPaperId, topicNumStr, userCode
 // 调页面自己的回评方法，再等作答图真的换成另一份。
 async function jumpApplyRecord(doc, record) {
   const found = jumpFindVue(doc);
-  if (!found) return { ok: false, error: "未找到阅卷页面的回评入口，请刷新阅卷页后重试" };
+  if (!found) return { ok: false, error: "未找到阅卷页面的回评入口，请按浏览器 F5 刷新当前页面后重试" };
   const before = answerSnapshot(doc).identity;
   const item = { id: record.id, userCode: record.userCode, totalScore: record.totalScore, score: record.score };
   try {
@@ -859,7 +860,7 @@ async function jumpToMarkedRecord(entry, options = {}) {
   // 身份里的题号是接口口径，优先用它；历史字段可能是 DOM 口径，统一转成 "43,1" 再查。
   const topicNumStr = jumpApiTopicNum(identity.topicNumStr || question.topicNumStr || "");
   if (!userCode) return { ok: false, error: "该记录没有学号，无法定位（旧版记录不支持定位）" };
-  if (!origin) return { ok: false, error: "尚未抓到阅卷接口地址，请刷新阅卷页后重试" };
+  if (!origin) return { ok: false, error: "尚未抓到阅卷接口地址，请按浏览器 F5 刷新当前页面后重试" };
   if (!markingPaperId) return { ok: false, error: "该记录缺少试卷 ID，无法定位" };
   // 批量阅卷开着时，回评会把整批一起拉进来，直接拒绝比悄悄改错卷安全。
   if (typeof hookCurrentBatchSize === "function" && hookCurrentBatchSize() > 0) {
@@ -982,7 +983,7 @@ async function resolveMarkedRecordId(doc, identity, expectedScore) {
       autoBySubject: true
     },
     historyLimit: 500,
-    // 连续批阅份数上限：无人看管时也不至于一路跑到底。
+    // 连续批阅份数上限：大型考试常有几千份，保留一个硬上限防止无人看管时无限跑。
     continuousLimit: 20,
     cacheTtlDays: 30,
     cacheMaxEntries: 2000
@@ -1957,25 +1958,29 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
     const compat = isRecord(src.compat) ? src.compat : {};
     const legacyAuth = LEGACY_PLATFORM_AUTH[String(src.platform || "")];
     const authHeader = ["bearer", "api-key", "none"].includes(compat.authHeader) ? compat.authHeader : (legacyAuth || preset.authHeader || "bearer");
+    const endpoint = normalizeEndpoint(String(src.endpoint || preset.endpoint || ""));
+    // 用户也可能用「自定义」手填火山地址；按域名兜底，按火山预设处理思考字段。
+    const volcEndpoint = /\/\/ark\.[^/]*\.volces\.com\//i.test(endpoint);
+    const behaviorPreset = volcEndpoint ? (getPlatformPreset("volcengine-chat") || preset) : preset;
     return {
       id: preset.id || "custom",
       label: preset.label || "自定义",
-      endpoint: normalizeEndpoint(String(src.endpoint || preset.endpoint || "")),
+      endpoint,
       model: String(src.model || ""),
-      models: Array.isArray(preset.models) ? preset.models : [],
+      models: Array.isArray(behaviorPreset.models) ? behaviorPreset.models : [],
       // 个别平台的模型列表接口与推理接口不同域，预设可单独指定。
-      modelsUrl: String(preset.modelsEndpoint || "").trim(),
-      thinkingLevels: getPlatformThinkingLevels(preset.id),
+      modelsUrl: String(behaviorPreset.modelsEndpoint || "").trim(),
+      thinkingLevels: getPlatformThinkingLevels(behaviorPreset.id),
       apiKey: String(src.apiKey || ""),
       authHeader,
       authHeaderName: authHeader === "api-key" ? "api-key" : "Authorization",
-      disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (preset.disableThinkingKey ?? null),
-      thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(preset.thinkingValues),
-      thinkingFields: Object.prototype.hasOwnProperty.call(compat, "thinkingFields") ? normalizeThinkingValues(compat.thinkingFields) : normalizeThinkingValues(preset.thinkingFields),
+      disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (behaviorPreset.disableThinkingKey ?? null),
+      thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(behaviorPreset.thinkingValues),
+      thinkingFields: Object.prototype.hasOwnProperty.call(compat, "thinkingFields") ? normalizeThinkingValues(compat.thinkingFields) : normalizeThinkingValues(behaviorPreset.thinkingFields),
       jsonModeKey: Object.prototype.hasOwnProperty.call(compat, "jsonModeKey")
         ? compat.jsonModeKey
-        : (Object.prototype.hasOwnProperty.call(preset, "jsonModeKey") ? preset.jsonModeKey : "response_format"),
-      stream: typeof compat.stream === "boolean" ? compat.stream : Boolean(preset.stream)
+        : (Object.prototype.hasOwnProperty.call(behaviorPreset, "jsonModeKey") ? behaviorPreset.jsonModeKey : "response_format"),
+      stream: typeof compat.stream === "boolean" ? compat.stream : Boolean(behaviorPreset.stream)
     };
   }
   // src/infra/api.ts
@@ -2158,7 +2163,6 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
     if (!prompt && !completion && !cached) return null;
     return { prompt, completion, cached, reasoning };
   }
-
   async function chatCompletion(service, messages, options = {}) {
     // 所有请求统一为 Chat Completions：平台档案只影响鉴权头、思考字段与 JSON 模式字段。
     const profile = resolveProfile(service);
@@ -2203,12 +2207,6 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
           error.providerMessage = String(detail);
           throw error;
         }
-        // 思考占满输出预算时正文会被截断：这种结果不能用，整次作废，别把空正文当零分。
-        if (body?.choices?.[0]?.finish_reason === "length") {
-          const truncated = new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u8C03\u9AD8\u8F93\u51FA\u6863\u4F4D\u3001\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");
-          truncated.code = "truncated";
-          throw truncated;
-        }
         const content = extractContent(body);
         // usage 是响应自带字段，读取它不会产生任何额外 token。
         if (typeof options.onUsage === "function") {
@@ -2216,7 +2214,19 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
             options.onUsage(extractUsage(body));
           } catch { /* 回调异常不影响批改 */ }
         }
-        if (typeof content === "string" && content) return content;
+        // 思考占满输出预算时正文会被截断：有正文就交给上层「按已产出内容捞分 + 强制人工复核」，
+        // 只有连正文都没有（思考独占了全部预算）才在这里作废，绝不把空正文当零分。
+        if (body?.choices?.[0]?.finish_reason === "length" && !(typeof content === "string" && content.trim())) {
+          const truncated = new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\u4E14\u6CA1\u6709\u53EF\u89E3\u6790\u7684\u6B63\u6587\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");
+          truncated.code = "truncated";
+          throw truncated;
+        }
+        if (typeof content === "string" && content) {
+          if (body?.choices?.[0]?.finish_reason === "length" && typeof options.onTruncated === "function") {
+            try { options.onTruncated(); } catch { /* 回调异常不影响批改 */ }
+          }
+          return content;
+        }
         throw new Error("\u63A5\u53E3\u54CD\u5E94\u7F3A\u5C11\u6587\u672C\u5185\u5BB9");
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
@@ -2815,10 +2825,13 @@ ${subQuestionLines(question)}`,
       const base = index >= 0 && index < subQuestions.length ? subQuestions[index] : null;
       const label = String(record.label ?? base?.label ?? "").trim();
       if (!label) return [];
+      // 没写 sc 的条目（截断修复可能补全出残缺条目）直接丢弃：当成 0 分会拉低小题合计。
+      const rawScore = record.sc ?? record.score;
+      if (rawScore === void 0 || rawScore === null || rawScore === "") return [];
       const itemMax = clamp(Number(record.maxScore ?? base?.maxScore ?? 0), maxScore);
       return [{
         label,
-        score: clamp(Number(record.sc ?? record.score ?? 0), itemMax > 0 ? itemMax : maxScore),
+        score: clamp(Number(rawScore), itemMax > 0 ? itemMax : maxScore),
         maxScore: itemMax,
         reason: String(record.r ?? record.reason ?? "").slice(0, 200)
       }];
@@ -2890,8 +2903,69 @@ ${subQuestionLines(question)}`,
       raw
     };
   }
+  // 截断修复：思考 token 挤占输出预算时 JSON 可能只写了一半。
+  // 思路：从最后一个「完整元素」处截断、去掉悬挂逗号、按栈补齐括号，从后往前试有限的候选点，
+  // 能解析出对象就交给 fromJson 走正常口径（含小题合计校验）；修复不出来返回 null，由上层作废。
+  function repairTruncatedJson(raw) {
+    const text = String(raw || "");
+    const start = text.indexOf("{");
+    if (start < 0) return null;
+    const body = text.slice(start);
+    const stack = [];
+    const marks = [];
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < body.length; i += 1) {
+      const ch = body[i];
+      if (inString) {
+        if (escape) escape = false;
+        else if (ch === "\\") escape = true;
+        else if (ch === '"') {
+          inString = false;
+          marks.push(i);
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === "{" || ch === "[") {
+        stack.push(ch === "{" ? "}" : "]");
+        continue;
+      }
+      if (ch === "}" || ch === "]") {
+        stack.pop();
+        marks.push(i);
+        continue;
+      }
+      if (ch === ",") {
+        marks.push(i);
+        continue;
+      }
+      if (/[0-9]/.test(ch) && !/[0-9]/.test(body[i + 1] || "")) marks.push(i);
+    }
+    // 只修复"确实没写完"的输入（括号未闭合或字符串未闭合）；
+    // 完整但非法的 JSON 交给原有的 fromText 兜底，不在这里硬修。
+    if (stack.length === 0 && !inString) return null;
+    // 从最近的完成点往前试，最多回退 8 个候选点，避免 O(n²)
+    for (let t = marks.length - 1, tried = 0; t >= 0 && tried < 8; t -= 1, tried += 1) {
+      const cut = body.slice(0, marks[t] + 1).replace(/,\s*$/, "");
+      if (!cut.trim()) continue;
+      const candidate = `${cut}${stack.slice().reverse().join("")}`;
+      try {
+        if (asRecord(JSON.parse(candidate))) return candidate;
+      } catch { /* 换上一个候选点继续试 */ }
+    }
+    return null;
+  }
+  function fromRepairedJson(raw, maxScore, subQuestions = []) {
+    const repaired = repairTruncatedJson(raw);
+    if (!repaired) return null;
+    return fromJson(repaired, maxScore, subQuestions);
+  }
   function parseGrade(raw, maxScore, subQuestions = []) {
-    return fromJson(raw, maxScore, subQuestions) ?? fromText(raw, maxScore, subQuestions);
+    return fromJson(raw, maxScore, subQuestions) ?? fromRepairedJson(raw, maxScore, subQuestions) ?? fromText(raw, maxScore, subQuestions);
   }
 
 // src/core/pipeline.ts
@@ -2908,13 +2982,15 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
     { role: "system", content: "\u4F60\u662F\u4E25\u683C\u4F46\u516C\u6B63\u7684\u9605\u5377\u52A9\u624B\uFF0C\u53EA\u8F93\u51FA JSON\u3002" },
     { role: "user", content }
   ];
-  // 输出档位决定基础预算；思考模式会额外消耗输出预算，开启时放宽，避免 JSON 被截断。
+  // 输出档位决定基础预算；思考与正文共享输出预算，强制思考的模型按 3 倍放宽。
+  // 上限只是天花板：模型不用就不计费，所以放宽本身不产生额外费用。
   const mode = normalizeOutputMode(config.pipeline?.outputMode);
   const thinking = normalizeThinkingMode(service.thinkingMode);
   const baseTokens = OUTPUT_MODES[mode]?.maxTokens || 800;
-  const maxTokens = thinking === "off" ? baseTokens : Math.round(baseTokens * 1.8);
+  const maxTokens = thinking === "off" ? baseTokens : Math.round(baseTokens * 3);
   let usage = null;
   let forcedDetected = false;
+  let truncated = false;
   const raw = await chatCompletion(service, messages, {
     rateLimiter,
     timeoutMs: config.pipeline.timeoutMs,
@@ -2928,10 +3004,18 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
     onThinkingForced: () => {
       forcedDetected = true;
       markForcedThinking(service.platform, service.model);
+    },
+    // 正文被截断：先尝试按已产出内容捞分，捞不出确定分数才作废。
+    onTruncated: () => {
+      truncated = true;
     }
   });
   if (!raw.trim()) throw new Error("\u6A21\u578B\u8FD4\u56DE\u4E3A\u7A7A");
   const grade = parseGrade(raw, maxScore, question.subQuestions);
+  if (truncated && grade.scoreUncertain) {
+    throw new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\uFF0C\u4E14\u6CA1\u80FD\u4ECE\u5DF2\u4EA7\u51FA\u5185\u5BB9\u4E2D\u89E3\u6790\u51FA\u786E\u5B9A\u5206\u6570\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");
+  }
+  if (truncated) grade.truncated = true;
   grade.usage = usage;
   grade.outputMode = mode;
   grade.thinkingForced = forcedDetected || Boolean(forcedByModel);
@@ -2983,7 +3067,7 @@ async function gradeQuestion(options) {
   if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
   if (imageOptions.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
   if (usable.length === 0) {
-    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF1A\u56FE\u7247\u94FE\u63A5\u53EF\u80FD\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u70B9\u9605\u5377\u9875\u300C\u5237\u65B0\u300D\u540E\u91CD\u8BD5");
+    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF1A\u56FE\u7247\u94FE\u63A5\u53EF\u80FD\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u6309\u6D4F\u89C8\u5668 F5 \u5237\u65B0\u5F53\u524D\u9605\u5377\u9875\uFF0C\u6216\u9000\u51FA\u540E\u91CD\u65B0\u8FDB\u5165\u9605\u5377\u4EFB\u52A1\u518D\u8BD5");
   }
   const payloadImages = usable;
   const prompt = buildGradingPrompt(question, config.context, {
@@ -3000,6 +3084,8 @@ async function gradeQuestion(options) {
     reviewReasons.push("\u8BC6\u522B\u4E3A\u65E0\u6CD5\u8FA8\u8BA4\u5374\u7ED9\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u5B9E");
   }
   if (grade.scoreUncertain) reviewReasons.push("\u672A\u80FD\u4ECE\u6A21\u578B\u8F93\u51FA\u4E2D\u786E\u5B9A\u5206\u6570\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u5B9A");
+  // 截断捞回的结果：总分可用但明细/评语可能不全，必须人工复核，不允许直接提交。
+  if (grade.truncated) reviewReasons.push("\u6A21\u578B\u8F93\u51FA\u88AB\u622A\u65AD\uFF0C\u5DF2\u6309\u5DF2\u4EA7\u51FA\u5185\u5BB9\u89E3\u6790\uFF0C\u8BF7\u4EBA\u5DE5\u590D\u6838");
   if (grade.scoreAdjusted) reviewReasons.push("\u603B\u5206\u4E0E\u5C0F\u9898\u5408\u8BA1\u4E0D\u4E00\u81F4\uFF0C\u5DF2\u6309\u5C0F\u9898\u91CD\u7B97");
   const missingSubs = question.subQuestions.length - grade.subScores.length;
   if (question.subQuestions.length > 0 && missingSubs > 0) {
@@ -3143,6 +3229,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   font-weight: 700; font-size: 17px; letter-spacing: 1px;
 }
 .zygr-brand strong { display: block; font-size: 16px; letter-spacing: .5px; }
+.zygr-title-row { display: flex; align-items: center; gap: 6px; }
+.zygr-version {
+  flex: none; padding: 2px 6px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.34); background: rgba(255,255,255,.16);
+  font-size: 9px; line-height: 1.2; letter-spacing: .2px; opacity: .92;
+}
 .zygr-brand small { display: block; opacity: .86; font-size: 11px; margin-top: 2px; }
 .zygr-head-actions { display: flex; gap: 6px; position: relative; z-index: 1; }
 .zygr-icon {
@@ -3208,12 +3300,45 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 }
 .zygr-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 3px 9px rgba(79,70,229,.14); }
 .zygr-btn:focus-visible { outline: 2px solid var(--zygr-sky); outline-offset: 2px; }
+.zygr-continuous-cell {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 6px 2px 2px; border: 1px solid var(--zygr-line); border-radius: 9px;
+  background: rgba(255,255,255,.58);
+}
+.zygr-continuous-cell .zygr-btn { border-color: transparent; background: transparent; }
+.zygr-limit {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 10px; line-height: 1; color: var(--zygr-muted); white-space: nowrap;
+  cursor: help; user-select: none;
+}
+.zygr-limit input {
+  width: 34px; height: 22px; padding: 0 2px; text-align: center;
+  border: 1px solid rgba(79,70,229,.22); border-radius: 6px;
+  background: rgba(255,255,255,.9); color: #3730a3; font-size: 11px; font-weight: 600;
+  -moz-appearance: textfield;
+}
+.zygr-limit input::-webkit-inner-spin-button,
+.zygr-limit input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.zygr-limit input:focus-visible { outline: 2px solid var(--zygr-sky); outline-offset: 1px; }
+.zygr-limit input:disabled { cursor: not-allowed; }
 .zygr-btn.zygr-primary { color: #fff; border-color: transparent; background: linear-gradient(135deg, var(--zygr-primary), var(--zygr-sky)); }
 .zygr-btn.zygr-running { color: #fff; border-color: transparent; background: linear-gradient(135deg, #dc2626, #f59e0b); }
 .zygr-btn.zygr-ghost { color: var(--zygr-muted); border-color: var(--zygr-line); background: transparent; }
 .zygr-submit-cell { display: flex; flex-direction: row; align-items: center; gap: 6px; }
 .zygr-mini-check { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; line-height: 1; white-space: nowrap; color: var(--zygr-muted); cursor: pointer; user-select: none; }
 .zygr-mini-check input { accent-color: var(--zygr-primary); width: 12px; height: 12px; flex: none; }
+.zygr-output {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; line-height: 1; color: var(--zygr-muted); white-space: nowrap;
+  cursor: help; user-select: none;
+}
+.zygr-output select {
+  height: 22px; padding: 0 2px; cursor: pointer;
+  border: 1px solid rgba(79,70,229,.22); border-radius: 6px;
+  background: rgba(255,255,255,.9); color: #3730a3; font-size: 11px; font-weight: 600;
+}
+.zygr-output select:focus-visible { outline: 2px solid var(--zygr-sky); outline-offset: 1px; }
+.zygr-output select:disabled { cursor: not-allowed; opacity: .6; }
 .zygr-toast {
   position: absolute; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 2;
   padding: 8px 14px; border-radius: 999px; background: rgba(15,23,42,.9); color: #fff; font-size: 12px;
@@ -3290,6 +3415,15 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     blank: "\u672A\u4F5C\u7B54"
   };
   var SKIP_CONFIRM_KEY = "zygr.submit.skipConfirm.v1";
+  var CONTINUOUS_LIMIT_MAX = 5000;
+  var CONTINUOUS_LIMIT_HINT = `\u8FDE\u7EED\u6279\u9605\u6700\u591A\u81EA\u52A8\u6279\u6539\u5E76\u63D0\u4EA4\u7684\u4EFD\u6570\uFF0C\u8FBE\u5230\u540E\u4F1A\u81EA\u52A8\u505C\u6B62\uFF1B\u4E0D\u662F\u5FC5\u987B\u6279\u6EE1\u7684\u4EFD\u6570\u30021\uFF5E${CONTINUOUS_LIMIT_MAX} \u4EFD\uFF0C\u9ED8\u8BA4 20 \u4EFD`;
+  var OUTPUT_MODE_HINT = "\u8F93\u51FA\u6863\u4F4D\u51B3\u5B9A\u6A21\u578B\u5199\u591A\u5C11\u5B57\uFF1A\u7B80\u7565\u6700\u7701 token\uFF0C\u6807\u51C6\u9002\u4E2D\uFF0C\u8BE6\u7EC6\u6700\u8D39\u3002\u6539\u52A8\u540E\u7ACB\u5373\u4FDD\u5B58\uFF0C\u4ECE\u4E0B\u4E00\u4EFD\u5F00\u59CB\u751F\u6548\u3002";
+  var OUTPUT_MODE_SHORT = { brief: "\u7B80\u7565", standard: "\u6807\u51C6", detailed: "\u8BE6\u7EC6" };
+  function normalizeContinuousLimit(value) {
+    const number = Math.round(Number(value));
+    if (!Number.isFinite(number)) return 20;
+    return Math.max(1, Math.min(CONTINUOUS_LIMIT_MAX, number));
+  }
   // 所有面板输入框都拦下 Enter：页面本身可能把回车当提交，会把半截分数写进平台。
   // 只阻止冒泡；文本域仍保留换行（不 preventDefault）。
   function guardEnter(root) {
@@ -3311,8 +3445,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
       guardEnter(this.shadow);
       this.panel = this.q(".zygr-panel");
+      const version = this.shadow.querySelector("#zygr-version");
+      if (version) version.textContent = `v${typeof ZYGR_VERSION === "string" ? ZYGR_VERSION : "dev"}`;
       const skipConfirm = this.shadow.querySelector("[data-opt='skip-submit-confirm']");
       if (skipConfirm) skipConfirm.checked = readJson(SKIP_CONFIRM_KEY, false) === true;
+      this.setContinuousLimit(20);
+      this.setOutputMode("standard");
       this.bind();
     }
     markup() {
@@ -3320,7 +3458,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       <header class="zygr-head">
         <div class="zygr-brand">
           <span class="zygr-logo">\u667A</span>
-          <div><strong>\u667A\u9605\u6279\u6539\u52A9\u624B</strong><small id="zygr-subtitle">\u7B49\u5F85\u8BFB\u53D6\u9898\u76EE</small></div>
+          <div>
+            <div class="zygr-title-row">
+              <strong>\u667A\u9605\u6279\u6539\u52A9\u624B</strong>
+              <span class="zygr-version" id="zygr-version" title="\u5F53\u524D\u811A\u672C\u7248\u672C">v--</span>
+            </div>
+            <small id="zygr-subtitle">\u7B49\u5F85\u8BFB\u53D6\u9898\u76EE</small>
+          </div>
         </div>
         <div class="zygr-head-actions">
           <button class="zygr-icon" data-act="collapse" title="\u6298\u53E0" aria-label="\u6298\u53E0">\u2014</button>
@@ -3336,11 +3480,24 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       </div>
       <footer class="zygr-actions">
         <button class="zygr-btn zygr-primary" data-act="grade">\u5F00\u59CB\u6279\u6539</button>
-        <button class="zygr-btn" data-act="continuous">\u8FDE\u7EED\u6279\u9605</button>
+        <div class="zygr-continuous-cell">
+          <button class="zygr-btn" data-act="continuous">\u8FDE\u7EED\u6279\u9605</button>
+          <label class="zygr-limit" title="${CONTINUOUS_LIMIT_HINT}">
+            <span>\u6700\u591A</span>
+            <input type="number" data-opt="continuous-limit" min="1" max="${CONTINUOUS_LIMIT_MAX}" step="1" value="20" aria-label="\u8FDE\u7EED\u6279\u9605\u6700\u591A\u6279\u6539\u4EFD\u6570" title="${CONTINUOUS_LIMIT_HINT}">
+            <span>\u4EFD</span>
+          </label>
+        </div>
         <div class="zygr-submit-cell">
           <button class="zygr-btn" data-act="submit">\u63D0\u4EA4\u7ED3\u679C</button>
           <label class="zygr-mini-check"><input type="checkbox" data-opt="skip-submit-confirm"> \u4E00\u6B21\u63D0\u4EA4\uFF08\u514D\u786E\u8BA4\uFF09</label>
         </div>
+        <label class="zygr-output" title="${OUTPUT_MODE_HINT}">
+          <span>\u8F93\u51FA</span>
+          <select data-opt="output-mode" aria-label="\u8F93\u51FA\u6863\u4F4D" title="${OUTPUT_MODE_HINT}">
+            ${Object.keys(OUTPUT_MODES).map((key) => `<option value="${key}" title="${OUTPUT_MODES[key].label}">${OUTPUT_MODE_SHORT[key] || key}</option>`).join("")}
+          </select>
+        </label>
         <button class="zygr-btn zygr-ghost" data-act="history">\u5386\u53F2</button>
         <button class="zygr-btn zygr-ghost" data-act="settings">\u8BBE\u7F6E</button>
       </footer>
@@ -3360,6 +3517,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         const target = event.target;
         if (target?.matches?.("[data-opt='skip-submit-confirm']")) {
           writeJson(SKIP_CONFIRM_KEY, Boolean(target.checked));
+        } else if (target?.matches?.("[data-opt='continuous-limit']")) {
+          this.setContinuousLimit(target.value);
+          this.callbacks.onContinuousLimitChange?.(normalizeContinuousLimit(target.value));
+        } else if (target?.matches?.("[data-opt='output-mode']")) {
+          this.setOutputMode(target.value);
+          this.callbacks.onOutputModeChange?.(normalizeOutputMode(target.value));
         }
       });
       this.shadow.addEventListener("click", (event) => {
@@ -3438,12 +3601,26 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.shadow.querySelectorAll('.zygr-actions .zygr-btn:not([data-act="continuous"])').forEach((button) => {
         button.disabled = busy;
       });
+      // 批改中锁定档位：运行中的这一份已经按旧档位发出去了，避免误以为改动能影响它。
+      const outputMode = this.shadow.querySelector("[data-opt='output-mode']");
+      if (outputMode) outputMode.disabled = busy;
       if (busy) this.setStage(label);
     }
     setAutoMode(active) {
       const button = this.q('[data-act="continuous"]');
       button.textContent = active ? "\u505C\u6B62\u8FDE\u7EED\u6279\u9605" : "\u8FDE\u7EED\u6279\u9605";
       button.classList.toggle("zygr-running", active);
+      // 运行中改上限会让人误以为当前这一轮会跟着变；锁定后提示下一次启动才生效。
+      const limit = this.shadow.querySelector("[data-opt='continuous-limit']");
+      if (limit) limit.disabled = active;
+    }
+    setContinuousLimit(value) {
+      const limit = this.shadow.querySelector("[data-opt='continuous-limit']");
+      if (limit) limit.value = String(normalizeContinuousLimit(value));
+    }
+    setOutputMode(value) {
+      const select = this.shadow.querySelector("[data-opt='output-mode']");
+      if (select) select.value = normalizeOutputMode(value);
     }
     showError(message) {
       const box = this.q("#zygr-error");
@@ -3522,8 +3699,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       meta.className = "zygr-reason";
       // 用量直接取自响应里的 usage，读取它不消耗 token。
       const usage = result.usage;
+      // 命中 0 也要显示，否则用户无法区分「接口没返回」和「这次没命中」。
       const usageText = usage && (usage.prompt || usage.completion)
-        ? ` \xB7 \u8F93\u5165 ${usage.prompt}${usage.cached ? `\uFF08\u524D\u7F00\u547D\u4E2D ${usage.cached}\uFF09` : ""} \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`
+        ? ` \xB7 \u8F93\u5165 ${usage.prompt}\uFF08\u524D\u7F00\u547D\u4E2D ${Number(usage.cached) || 0}\uFF09 \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`
         : "";
       meta.textContent = `\u94FE\u8DEF ${result.pipeline} \xB7 \u6A21\u578B ${result.model} \xB7 \u8017\u65F6 ${(result.elapsedMs / 1e3).toFixed(1)}s${usageText}`;
       container.appendChild(meta);
@@ -3727,7 +3905,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         `\u9898\u53F7\uFF1A${entry.question.questionId}`,
         `\u94FE\u8DEF / \u6A21\u578B\uFF1A${entry.result.pipeline} / ${entry.result.model}`,
         `\u7ED3\u679C\uFF1A${entry.result.score} / ${entry.result.maxScore}\uFF08${entry.result.status}\uFF09`,
-        `\u7528\u91CF\uFF1A\u8F93\u5165 ${usage.prompt}${usage.cached ? `\uFF08\u524D\u7F00\u547D\u4E2D ${usage.cached}\uFF09` : ""} \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`,
+        `\u7528\u91CF\uFF1A\u8F93\u5165 ${usage.prompt}\uFF08\u524D\u7F00\u547D\u4E2D ${usage.cached}\uFF09 \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`,
         `\u7F13\u5B58 / \u8017\u65F6\uFF1A${entryHitText(entry)} / ${entryElapsed(entry)}s`,
         `\u4F9D\u636E\uFF1A${entry.result.reason || "\u65E0"}`,
         `\u590D\u6838\uFF1A${entry.result.reviewReasons.join("\uFF1B") || "\u65E0"}`,
@@ -3920,16 +4098,14 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           <h3>\u56FE\u7247\u4E0E\u63D0\u793A\u8BCD</h3>
           <div class="zygr-grid">
             ${select("\u56FE\u7247\u7CBE\u5EA6", "image.detail", [["high", "\u9AD8\u7CBE\u5EA6\uFF08\u63A8\u8350\uFF0C\u624B\u5199\u5FC5\u9009\uFF09"], ["auto", "\u81EA\u52A8\uFF08\u7531\u5E73\u53F0\u51B3\u5B9A\uFF09"], ["low", "\u4F4E\u7CBE\u5EA6\uFF08\u4EC5\u9009\u62E9/\u586B\u7A7A\u5224\u5BF9\u9519\uFF09"]])}
-            ${select("\u8F93\u51FA\u6863\u4F4D", "pipeline.outputMode", [["brief", OUTPUT_MODES.brief.label], ["standard", OUTPUT_MODES.standard.label], ["detailed", OUTPUT_MODES.detailed.label]])}
             ${field("\u56FE\u7247\u957F\u8FB9\u4E0A\u9650\uFF08px\uFF09", "image.maxEdge", "number")}
             ${field("JPEG \u8D28\u91CF\uFF080.5-1\uFF09", "image.quality", "number")}
             ${field("\u5386\u53F2\u4FDD\u7559\u6761\u6570", "historyLimit", "number")}
-            ${field("\u8FDE\u7EED\u6279\u9605\u4EFD\u6570\u4E0A\u9650", "continuousLimit", "number")}
             ${field("\u7F13\u5B58\u6709\u6548\u671F\uFF08\u5929\uFF09", "cacheTtlDays", "number")}
             ${field("\u7F13\u5B58\u6761\u6570\u4E0A\u9650", "cacheMaxEntries", "number")}
           </div>
           <label class="zygr-row"><input type="checkbox" data-field="image.autoBySubject"> \u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF08\u5DF2\u9009\u5B66\u79D1\u65F6\u751F\u6548\uFF09</label>
-          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u8F93\u51FA\u6863\u4F4D\u76F4\u63A5\u5F71\u54CD\u8F93\u51FA token\uFF1A\u7B80\u7565\u6700\u7701\u3001\u6807\u51C6\u9002\u4E2D\u3001\u8BE6\u7EC6\u6700\u8D35\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\u3002\u56FE\u7247\u53EA\u6309\u957F\u8FB9\u7B49\u6BD4\u7F29\u5C0F\uFF0C\u7EDD\u4E0D\u653E\u5927\uFF1A\u539F\u56FE\u672C\u6765\u5C31\u5C0F\u4E8E\u8BE5\u957F\u8FB9\u65F6\u4FDD\u6301\u539F\u59CB\u50CF\u7D20\uFF0C\u4EA4\u7ED9\u670D\u52A1\u5546\u5F52\u4E00\u5316\u4E5F\u4E0D\u4F1A\u4E22\u4FE1\u606F\u3002</p>
+          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u8F93\u51FA\u6863\u4F4D\u5DF2\u79FB\u5230\u4E3B\u9762\u677F\u5E95\u90E8\uFF0C\u76F4\u63A5\u5F71\u54CD\u8F93\u51FA token\uFF1A\u7B80\u7565\u6700\u7701\u3001\u6807\u51C6\u9002\u4E2D\u3001\u8BE6\u7EC6\u6700\u8D35\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\u3002\u56FE\u7247\u53EA\u6309\u957F\u8FB9\u7B49\u6BD4\u7F29\u5C0F\uFF0C\u7EDD\u4E0D\u653E\u5927\uFF1A\u539F\u56FE\u672C\u6765\u5C31\u5C0F\u4E8E\u8BE5\u957F\u8FB9\u65F6\u4FDD\u6301\u539F\u59CB\u50CF\u7D20\uFF0C\u4EA4\u7ED9\u670D\u52A1\u5546\u5F52\u4E00\u5316\u4E5F\u4E0D\u4F1A\u4E22\u4FE1\u606F\u3002</p>
           <p class="zygr-hint" data-stats>\u7D2F\u8BA1\u7528\u91CF\uFF1A\u6682\u65E0</p>
           <h3>\u9650\u901F\u4E0E\u8D85\u65F6</h3>
           <div class="zygr-grid">
@@ -4443,12 +4619,25 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       onContinuous: () => {
         void toggleContinuous();
       },
+      onContinuousLimitChange: (value) => {
+        config = { ...config, continuousLimit: value };
+        saveConfig(config);
+        panel.toast(`\u8FDE\u7EED\u6279\u9605\u4E0A\u9650\u5DF2\u8BBE\u4E3A ${value} \u4EFD`);
+      },
+      onOutputModeChange: (value) => {
+        config = { ...config, pipeline: { ...config.pipeline, outputMode: value } };
+        saveConfig(config);
+        // 档位进缓存键：换档位不会误命中旧结果。
+        panel.toast(`\u8F93\u51FA\u6863\u4F4D\u5DF2\u8BBE\u4E3A ${OUTPUT_MODE_SHORT[value] || value}`);
+      },
       onSubmit: (skipConfirm) => {
         void submitResult({ skipConfirm });
       },
       onHistory: () => historyPanel.show(loadHistory()),
       onSettings: () => settingsPanel.show(config)
     });
+    panel.setContinuousLimit(config.continuousLimit);
+    panel.setOutputMode(config.pipeline.outputMode);
     cache = createCache();
     const settingsPanel = new SettingsPanel({
       onSave: (draft) => {
@@ -4461,6 +4650,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         syncThinkingModesFromConfig(config);
         cache = createCache();
         limiter = buildLimiter(config);
+        panel.setContinuousLimit(config.continuousLimit);
+        panel.setOutputMode(config.pipeline.outputMode);
         panel.setCache(pipelineLabel(config));
         // 保存配置时顺手把这套标准存进「本题」槽位，下次切回来直接可用。
         const slot = rubricSlotKey(currentQuestion);
@@ -4521,6 +4712,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         syncThinkingModesFromConfig(config);
         cache = createCache();
         limiter = buildLimiter(config);
+        panel.setContinuousLimit(config.continuousLimit);
+        panel.setOutputMode(config.pipeline.outputMode);
         panel.setCache(pipelineLabel(config));
         panel.setSubtitle("\u914D\u7F6E\u5DF2\u5BFC\u5165");
       },
@@ -4529,6 +4722,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         config = loadConfig();
         cache = createCache();
         limiter = buildLimiter(config);
+        panel.setContinuousLimit(config.continuousLimit);
+        panel.setOutputMode(config.pipeline.outputMode);
         settingsPanel.show(config);
       },
       onClear: () => {
@@ -4536,6 +4731,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         cache.clear();
         config = loadConfig();
         limiter = buildLimiter(config);
+        panel.setContinuousLimit(config.continuousLimit);
+        panel.setOutputMode(config.pipeline.outputMode);
         panel.setCache("\u672A\u914D\u7F6E", "warn");
         panel.setSubtitle("\u6570\u636E\u5DF2\u6E05\u7A7A");
         historyPanel.refresh([]);
@@ -5028,7 +5225,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       panel.clearError();
       let count = 0;
       // 份数上限：无人看管时也不会一路跑到没配额。
-      const limit = Math.max(1, Math.min(200, Number(config.continuousLimit) || 20));
+      const limit = Math.max(1, Math.min(CONTINUOUS_LIMIT_MAX, Number(config.continuousLimit) || 20));
       while (autoMode && !autoStopRequested) {
         if (count >= limit) {
           panel.setSubtitle(`\u5DF2\u8FBE\u8FDE\u7EED\u6279\u9605\u4E0A\u9650 ${limit} \u4EFD\uFF0C\u5DF2\u505C\u6B62`);

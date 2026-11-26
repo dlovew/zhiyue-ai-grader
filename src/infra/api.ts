@@ -178,7 +178,6 @@
     if (!prompt && !completion && !cached) return null;
     return { prompt, completion, cached, reasoning };
   }
-
   async function chatCompletion(service, messages, options = {}) {
     // 所有请求统一为 Chat Completions：平台档案只影响鉴权头、思考字段与 JSON 模式字段。
     const profile = resolveProfile(service);
@@ -223,12 +222,6 @@
           error.providerMessage = String(detail);
           throw error;
         }
-        // 思考占满输出预算时正文会被截断：这种结果不能用，整次作废，别把空正文当零分。
-        if (body?.choices?.[0]?.finish_reason === "length") {
-          const truncated = new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u8C03\u9AD8\u8F93\u51FA\u6863\u4F4D\u3001\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");
-          truncated.code = "truncated";
-          throw truncated;
-        }
         const content = extractContent(body);
         // usage 是响应自带字段，读取它不会产生任何额外 token。
         if (typeof options.onUsage === "function") {
@@ -236,7 +229,19 @@
             options.onUsage(extractUsage(body));
           } catch { /* 回调异常不影响批改 */ }
         }
-        if (typeof content === "string" && content) return content;
+        // 思考占满输出预算时正文会被截断：有正文就交给上层「按已产出内容捞分 + 强制人工复核」，
+        // 只有连正文都没有（思考独占了全部预算）才在这里作废，绝不把空正文当零分。
+        if (body?.choices?.[0]?.finish_reason === "length" && !(typeof content === "string" && content.trim())) {
+          const truncated = new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\u4E14\u6CA1\u6709\u53EF\u89E3\u6790\u7684\u6B63\u6587\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");
+          truncated.code = "truncated";
+          throw truncated;
+        }
+        if (typeof content === "string" && content) {
+          if (body?.choices?.[0]?.finish_reason === "length" && typeof options.onTruncated === "function") {
+            try { options.onTruncated(); } catch { /* 回调异常不影响批改 */ }
+          }
+          return content;
+        }
         throw new Error("\u63A5\u53E3\u54CD\u5E94\u7F3A\u5C11\u6587\u672C\u5185\u5BB9");
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
