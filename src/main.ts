@@ -22,6 +22,10 @@
     let lastResult = null;
     let lastHistoryId = "";
     let busy = false;
+    // 提交互斥与冷却：连续批阅与手动点击可能同时触发提交，必须串行化。
+    let submitting = false;
+    let lastSubmitAt = 0;
+    const SUBMIT_COOLDOWN = 1500;
     const forcedNotified = new Set();
     let autoMode = false;
     let autoStopRequested = false;
@@ -144,9 +148,18 @@
       panel.clearError();
       try {
         panel.setStage("\u7B49\u5F85\u4F5C\u7B54\u56FE\u7247\u7A33\u5B9A");
-        const images = await gatherAnswerImages();
+        let images = await gatherAnswerImages();
+        if (images.length === 0) {
+          // DOM 一直不稳或链接已过期时，用接口观察到的新鲜地址兜底。
+          images = freshAnswerImages();
+        }
         if (images.length === 0) throw new Error("\u4F5C\u7B54\u56FE\u7247\u5C1A\u672A\u7A33\u5B9A\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
-        currentQuestion = { ...currentQuestion, images };
+        // 身份只取台账号与题号：跨账号一致，且不含会过期的签名。
+        const observedIdentity = currentHookIdentity();
+        const identity = observedIdentity && observedIdentity.scanRecordId
+          ? { scanRecordId: observedIdentity.scanRecordId, topicNumStr: observedIdentity.topicNumStr || "" }
+          : null;
+        currentQuestion = { ...currentQuestion, images, identity };
         panel.setQuestion(currentQuestion);
         const result = await gradeQuestion({
           config,
@@ -161,7 +174,7 @@
         appendHistory({
           id: lastHistoryId,
           createdAt: Date.now(),
-          question: currentQuestion,
+          question: historyQuestion(currentQuestion),
           result,
           submitted: false
         }, config.historyLimit);
@@ -180,6 +193,17 @@
         busy = false;
         panel.setBusy(false);
       }
+    }
+    // 历史只留定位字段与归一化后的图片键：签名 URL / data URI 会过期并迅速撑爆存储。
+    function historyQuestion(question) {
+      return {
+        questionId: question.questionId,
+        questionText: question.questionText,
+        maxScore: question.maxScore,
+        subQuestions: question.subQuestions,
+        identity: question.identity || null,
+        imageKeys: (question.images || []).map(stableImageKey)
+      };
     }
     function applyScoreEdits() {
       const edits = typeof panel.getScoreEdits === "function" ? panel.getScoreEdits() : null;
@@ -219,39 +243,64 @@
         panel.showError("\u8BF7\u5148\u5B8C\u6210\u6279\u6539\u5E76\u8FDB\u5165\u9605\u5377\u9875\u9762");
         return { ok: false, oldIdentity: null };
       }
-      applyScoreEdits();
-      const inputs = getScoreInputs(markingDoc);
-      const scores = inputs.length > 1 && lastResult.subScores.length === inputs.length ? lastResult.subScores.map((item) => item.score) : [Math.round(lastResult.score * 10) / 10];
-      const label = scores.length > 1 ? `\u5404\u5C0F\u9898\u5206\u6570 ${scores.join("\u3001")}` : `${scores[0]} \u5206`;
-      if (!options.silent && !options.skipConfirm && !window.confirm(`\u786E\u8BA4\u5199\u5165${label}\u5E76\u63D0\u4EA4\uFF1F`)) {
+      // 互斥 + 冷却：连点会把同一份卷提交两次，也会让提交回执错位到下一次点击上。
+      if (submitting) return { ok: false, oldIdentity: null };
+      if (Date.now() - lastSubmitAt < SUBMIT_COOLDOWN) {
+        panel.toast("\u521A\u63D0\u4EA4\u8FC7\uFF0C\u8BF7\u7A0D\u5019\u518D\u8BD5");
         return { ok: false, oldIdentity: null };
       }
-      const oldIdentity = getPaperIdentity();
-      if (!fillScores(scores, markingDoc)) {
-        panel.showError("\u5206\u6570\u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u6253\u5206\u7248\u8F93\u5165\u9879");
-        return { ok: false, oldIdentity };
+      submitting = true;
+      try {
+        applyScoreEdits();
+        const inputs = getScoreInputs(markingDoc);
+        const scores = inputs.length > 1 && lastResult.subScores.length === inputs.length ? lastResult.subScores.map((item) => item.score) : [Math.round(lastResult.score * 10) / 10];
+        const label = scores.length > 1 ? `\u5404\u5C0F\u9898\u5206\u6570 ${scores.join("\u3001")}` : `${scores[0]} \u5206`;
+        if (!options.silent && !options.skipConfirm && !window.confirm(`\u786E\u8BA4\u5199\u5165${label}\u5E76\u63D0\u4EA4\uFF1F`)) {
+          return { ok: false, oldIdentity: null };
+        }
+        const oldIdentity = getPaperIdentity();
+        // 填分必须回读一致才算写入成功，否则宁可不提交。
+        const filled = fillScores(scores, markingDoc);
+        if (!filled.ok) {
+          panel.showError(`\u5206\u6570\u672A\u5199\u5165\uFF0C\u5DF2\u4E2D\u6B62\u63D0\u4EA4\uFF1A${filled.error}`);
+          return { ok: false, oldIdentity };
+        }
+        // iframe 可能刚被路由替换，提交前再确认一次观察器存活。
+        ensureZhixueHook(markingDoc);
+        resetCommitSignal();
+        if (!submitGrade(markingDoc)) {
+          panel.showError("\u5206\u6570\u5DF2\u586B\u5165\uFF0C\u4F46\u672A\u627E\u5230\u63D0\u4EA4\u6309\u94AE\uFF0C\u8BF7\u624B\u52A8\u63D0\u4EA4");
+          return { ok: false, oldIdentity };
+        }
+        lastSubmitAt = Date.now();
+        // 有接口观察器就以平台回执为准（最多等 2.5 秒）；没有观察器时保持旧行为。
+        const observed = hookActive();
+        const signal = observed ? await waitCommitSignal(2500) : null;
+        const verdict = judgeSubmit(observed, signal);
+        if (!verdict.ok) {
+          panel.showError(verdict.reason);
+          return { ok: false, oldIdentity };
+        }
+        const history = loadHistory().map((entry) => entry.id === lastHistoryId ? { ...entry, result: lastResult, submitted: true, submitConfirmed: verdict.confirmed } : entry);
+        writeJson(STORAGE_KEYS.history, history);
+        historyPanel.refresh(history);
+        // 把人工改过的分数回写缓存：双评换第二个账号时命中缓存拿到的是最终分，而不是模型原始分。
+        if (cache && lastResult.cacheKey) cache.set(lastResult.cacheKey, lastResult);
+        lastResult = null;
+        panel.setSubtitle(options.silent ? "\u8FDE\u7EED\u6279\u9605\u4E2D" : "\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u4E0B\u4E00\u4EFD");
+        if (options.silent) {
+          panel.setStage("\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377");
+        } else {
+          panel.toast(verdict.confirmed ? "\u5DF2\u63D0\u4EA4\uFF08\u5E73\u53F0\u5DF2\u786E\u8BA4\uFF09" : "\u5DF2\u63D0\u4EA4");
+          void waitForNextPaper(oldIdentity).then((changed) => {
+            if (changed) void detect();
+            else panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u6362\u5377\uFF0C\u53EF\u7EE7\u7EED\u4EBA\u5DE5\u64CD\u4F5C");
+          });
+        }
+        return { ok: true, oldIdentity };
+      } finally {
+        submitting = false;
       }
-      if (!submitGrade(markingDoc)) {
-        panel.showError("\u5206\u6570\u5DF2\u586B\u5165\uFF0C\u4F46\u672A\u627E\u5230\u63D0\u4EA4\u6309\u94AE\uFF0C\u8BF7\u624B\u52A8\u63D0\u4EA4");
-        return { ok: false, oldIdentity };
-      }
-      const history = loadHistory().map((entry) => entry.id === lastHistoryId ? { ...entry, result: lastResult, submitted: true } : entry);
-      writeJson(STORAGE_KEYS.history, history);
-      historyPanel.refresh(history);
-      // 把人工改过的分数回写缓存：双评换第二个账号时命中缓存拿到的是最终分，而不是模型原始分。
-      if (cache && lastResult.cacheKey) cache.set(lastResult.cacheKey, lastResult);
-      lastResult = null;
-      panel.setSubtitle(options.silent ? "\u8FDE\u7EED\u6279\u9605\u4E2D" : "\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u4E0B\u4E00\u4EFD");
-      if (options.silent) {
-        panel.setStage("\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377");
-      } else {
-        panel.toast("\u5DF2\u63D0\u4EA4");
-        void waitForNextPaper(oldIdentity).then((changed) => {
-          if (changed) void detect();
-          else panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u6362\u5377\uFF0C\u53EF\u7EE7\u7EED\u4EBA\u5DE5\u64CD\u4F5C");
-        });
-      }
-      return { ok: true, oldIdentity };
     }
     async function toggleContinuous() {
       if (autoMode) {
@@ -301,6 +350,8 @@
         return;
       }
       markingDoc = doc;
+      // 每次拿到阅卷文档都校验一次：平台路由切换会换掉 iframe，旧 hook 随之失效。
+      ensureZhixueHook(doc);
       applyQuestion(readQuestion(doc));
       watchDocument(doc);
     }

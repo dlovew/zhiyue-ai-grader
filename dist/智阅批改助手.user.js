@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.0.3
+// @version      1.0.4
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -228,31 +228,70 @@
     }
     return "";
   }
+  // 提交回执：接口观察器装上后写入，未装上时保持未激活，提交沿用「点过即提交」的旧行为。
+  var commitFeed = { active: false, last: null, resetAt: 0 };
+  // 这些按钮会把卷子直接判成满分/零分/问题卷，点错一次就是错卷，永远不碰。
+  var FORBIDDEN_BUTTON = /\u6EE1\u5206|\u96F6\u5206|\u95EE\u9898\u5377|\u4F11\u5377|\u4F5C\u5E9F/;
+  function hookActive() {
+    return commitFeed.active;
+  }
+  function markHookActive() {
+    commitFeed.active = true;
+  }
+  function pushCommitSignal(result) {
+    commitFeed.active = true;
+    commitFeed.last = { ok: String(result || "").toLowerCase() === "success", result: String(result || ""), at: Date.now() };
+  }
+  function resetCommitSignal() {
+    commitFeed.last = null;
+    // 回执可能比 waitCommitSignal 更早到达（本地很快），以重置时刻为基线判断新旧。
+    commitFeed.resetAt = Date.now();
+  }
+  async function waitCommitSignal(timeout = 2500) {
+    const startedAt = Date.now();
+    const since = commitFeed.resetAt;
+    while (Date.now() - startedAt < timeout) {
+      if (commitFeed.last && commitFeed.last.at >= since) return commitFeed.last;
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+    return null;
+  }
+  // 填分 + 回读：页面上的输入框可能被框架改回原值，写不进去就不能假装提交成功。
   function fillScores(scores, doc) {
     const inputs = getScoreInputs(doc);
-    if (inputs.length === 0 || scores.length > inputs.length) return false;
+    if (inputs.length === 0 || scores.length > inputs.length) return { ok: false, error: "\u672A\u627E\u5230\u6253\u5206\u8F93\u5165\u6846" };
     for (let i = 0; i < inputs.length; i += 1) {
       const score = scores[i];
-      if (score === void 0 || score === null || !Number.isFinite(Number(score))) return false;
+      if (score === void 0 || score === null || !Number.isFinite(Number(score))) {
+        return { ok: false, error: `\u7B2C ${i + 1} \u4E2A\u5206\u6570\u4E0D\u662F\u6709\u6548\u6570\u5B57` };
+      }
     }
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    if (!setter) return false;
+    if (!setter) return { ok: false, error: "\u6253\u5206\u6846\u4E0D\u53EF\u5199" };
     for (let i = 0; i < inputs.length; i += 1) {
       const input = inputs[i].element;
-      setter.call(input, String(Math.round(Number(scores[i]) * 10) / 10));
+      const target = Math.round(Number(scores[i]) * 10) / 10;
+      setter.call(input, String(target));
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
       input.dispatchEvent(new Event("blur", { bubbles: true }));
+      // 回读校验：值不一致说明页面拒收或被其它脚本覆盖，必须中止。
+      if (String(input.value).trim() === "" || Number(input.value) !== target) {
+        return { ok: false, error: `\u7B2C ${i + 1} \u4E2A\u6253\u5206\u6846\u56DE\u8BFB\u4E0D\u4E00\u81F4\uFF08\u671F\u671B ${target}\uFF0C\u5B9E\u9645 ${input.value}\uFF09` };
+      }
     }
-    return true;
+    return { ok: true, error: "" };
   }
   function submitGrade(doc) {
     const iframe = getIframeDoc();
     const candidates = [iframe, doc, mainDoc()].filter((item, index, all) => Boolean(item) && all.indexOf(item) === index);
     for (const root of candidates) {
-      const byText = Array.from(root.querySelectorAll("button")).find((button2) => button2.textContent?.includes(SELECTORS.submitText));
-      const button = byText ?? root.querySelector(SELECTORS.submitButton);
-      if (button) {
+      const byText = Array.from(root.querySelectorAll("button")).find((button2) => {
+        const text = button2.textContent || "";
+        return !FORBIDDEN_BUTTON.test(text) && text.includes(SELECTORS.submitText);
+      });
+      const button = root.querySelector(SELECTORS.submitButton) ?? byText;
+      if (button && !FORBIDDEN_BUTTON.test(button.textContent || "")) {
         button.click();
         return true;
       }
@@ -289,6 +328,170 @@
     return false;
   }
 
+// src/adapters/zhixue-hook.ts
+// 只读接口观察器：包装 iframe 里的 XMLHttpRequest，只解析三个接口的响应体。
+// 不改写请求、不重发、不影响原有回调；任何异常都静默降级到 DOM 判定。
+var ZHIXUE_HOOK_FLAG = "__zygrHooked";
+var HOOK_COMMIT = /commitTopic/i;
+var HOOK_NEXT = /preLoadScanrecorddetail/i;
+var HOOK_CURRENT = /scanrecorddetail/i;
+var hookState = { installed: false, doc: null, current: null, next: null, updatedAt: 0 };
+
+// 平台响应层级不固定，按字段名深搜第一个非空值即可，别假设固定路径。
+function hookField(node, key, depth = 0) {
+  if (!node || depth > 4) return null;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const hit = hookField(item, key, depth + 1);
+      if (hit !== null) return hit;
+    }
+    return null;
+  }
+  if (typeof node !== "object") return null;
+  const own = node[key];
+  if (own !== void 0 && own !== null && own !== "") return own;
+  for (const value of Object.values(node)) {
+    const hit = hookField(value, key, depth + 1);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+function hookIdentity(body) {
+  return {
+    scanRecordId: hookField(body, "scanRecordId"),
+    topicNumStr: hookField(body, "topicNumStr"),
+    userCode: hookField(body, "userCode"),
+    subTopicScore: hookField(body, "subTopicScore"),
+    topicImageIds: hookField(body, "topicImageIds"),
+    paperImgIds: hookField(body, "paperImgIds"),
+    hasPrev: hookField(body, "hasPrev"),
+    hasNext: hookField(body, "hasNext")
+  };
+}
+// 从接口字段里捞出 http(s) 图片地址（签名 URL 只有几分钟有效期，需要时才算）。
+function hookUrlsFrom(value, out) {
+  if (!value || out.length >= 12) return out;
+  if (typeof value === "string") {
+    if (/^https?:\/\/\S+$/i.test(value)) out.push(value);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) hookUrlsFrom(item, out);
+    return out;
+  }
+  if (typeof value === "object") {
+    for (const item of Object.values(value)) hookUrlsFrom(item, out);
+  }
+  return out;
+}
+function handleHookResponse(url, text) {
+  if (!url || typeof text !== "string") return false;
+  const trimmed = text.trim();
+  if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return false;
+  let data;
+  try {
+    data = JSON.parse(trimmed);
+  } catch {
+    return false;
+  }
+  const body = data && typeof data === "object" && data.data !== void 0 ? data.data : data;
+  // 提交回执：优先看 result，兼容只有 success 的写法。
+  if (HOOK_COMMIT.test(url)) {
+    const result = hookField(body, "result");
+    const success = hookField(body, "success");
+    pushCommitSignal(typeof result === "string" ? result : success === true ? "success" : "");
+    return true;
+  }
+  // preLoad 的地址里也含 scanrecorddetail，必须先判 next。
+  if (HOOK_NEXT.test(url)) {
+    hookState.next = hookIdentity(body);
+    hookState.updatedAt = Date.now();
+    return true;
+  }
+  if (HOOK_CURRENT.test(url)) {
+    hookState.current = hookIdentity(body);
+    hookState.updatedAt = Date.now();
+    return true;
+  }
+  return false;
+}
+function installZhixueHook(doc) {
+  let win = null;
+  try {
+    win = doc?.defaultView || null;
+  } catch {
+    return false;
+  }
+  if (!win || !win.XMLHttpRequest) return false;
+  const proto = win.XMLHttpRequest.prototype;
+  try {
+    if (proto[ZHIXUE_HOOK_FLAG]) {
+      hookState.installed = true;
+      hookState.doc = doc;
+      markHookActive();
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  const originalOpen = proto.open;
+  const originalSend = proto.send;
+  proto.open = function (method, url, ...rest) {
+    try {
+      this.__zygrUrl = typeof url === "string" ? url : String(url || "");
+    } catch { /* 记录 URL 失败不影响原请求 */ }
+    return originalOpen.call(this, method, url, ...rest);
+  };
+  proto.send = function (...args) {
+    try {
+      this.addEventListener("loadend", () => {
+        try {
+          const text = typeof this.responseText === "string"
+            ? this.responseText
+            : typeof this.response === "string" ? this.response : "";
+          handleHookResponse(this.__zygrUrl, text);
+        } catch { /* 解析失败按未捕获处理 */ }
+      });
+    } catch { /* 挂不上 loadend 就降级 */ }
+    return originalSend.apply(this, args);
+  };
+  try {
+    proto[ZHIXUE_HOOK_FLAG] = true;
+  } catch {
+    return false;
+  }
+  hookState.installed = true;
+  hookState.doc = doc;
+  markHookActive();
+  return true;
+}
+// iframe 被替换后 hook 随旧 window 一起消失，每次拿到阅卷文档都要校验一次。
+function ensureZhixueHook(doc) {
+  if (!doc) return false;
+  try {
+    if (hookState.installed && hookState.doc === doc && doc.defaultView?.XMLHttpRequest?.prototype?.[ZHIXUE_HOOK_FLAG]) return true;
+  } catch { /* 跨域访问失败则重新装 */ }
+  return installZhixueHook(doc);
+}
+function currentHookIdentity() {
+  return hookState.current;
+}
+function nextHookIdentity() {
+  return hookState.next;
+}
+// 缓存/换卷用的稳定身份：台账号 + 题号，跨账号一致，不含签名。
+function hookIdentityKey() {
+  const current = hookState.current;
+  if (!current || !current.scanRecordId) return "";
+  return `${current.scanRecordId}|${current.topicNumStr || ""}`;
+}
+function freshAnswerImages() {
+  const urls = [];
+  hookUrlsFrom(hookState.current?.topicImageIds, urls);
+  if (urls.length === 0) hookUrlsFrom(hookState.current?.paperImgIds, urls);
+  if (urls.length === 0) hookUrlsFrom(hookState.next?.topicImageIds, urls);
+  return [...new Set(urls)];
+}
   // src/infra/storage.ts
   var STORAGE_KEYS = {
     config: "zygr.config.v1",
@@ -443,14 +646,41 @@ function hashString(input) {
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
+// 图片地址归一化：OSS 签名参数每次都变，剥掉签名只留资源路径与裁剪参数，键才跨会话稳定。
+function stableImageKey(src) {
+  if (!src) return "";
+  if (/^data:/i.test(src)) return `data:${src.length}:${hashString(src)}`;
+  try {
+    const url = new URL(src, "https://www.zhixue.com/");
+    if (!/^https?:$/.test(url.protocol)) return String(src);
+    const crop = (url.searchParams.get("x-oss-process") || "").split("/").filter((op) => /^crop(?:,|$)/.test(op));
+    if (crop.length) url.searchParams.set("x-oss-process", `image/${crop.join("/")}`);
+    else url.searchParams.delete("x-oss-process");
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(?:Expires|OSSAccessKeyId|Signature|Policy|Key-Pair-Id|x-amz-.*)$/i.test(key)) url.searchParams.delete(key);
+    }
+    url.hash = "";
+    url.searchParams.sort();
+    return url.href;
+  } catch {
+    return String(src);
+  }
+}
 function makeGradeCacheKey(input) {
+  // 有接口身份时优先用它：同一份卷在不同账号、不同签名下都是同一个键，双评才能共享缓存。
+  const identity = input.identity && input.identity.scanRecordId
+    ? `scan:${input.identity.scanRecordId}|${input.identity.topicNumStr || ""}`
+    : "";
+  const images = identity
+    ? [identity]
+    : (Array.isArray(input.question.images) ? input.question.images.map(stableImageKey) : []);
   const payload = JSON.stringify({
     question: input.context.question || input.question.questionText,
     answer: input.context.answer,
     rubric: input.context.rubric,
     maxScore: input.context.maxScore,
     subs: input.question.subQuestions,
-    images: input.question.images,
+    images,
     model: input.model,
     image: input.image,
     thinkingMode: input.thinkingMode,
@@ -458,7 +688,8 @@ function makeGradeCacheKey(input) {
     outputMode: input.outputMode || "standard",
     pipeline: "vlm"
   });
-  return `grade:${hashString(payload)}:${input.promptVersion}`;
+  // v2：键结构变了（图片地址归一化 + 接口身份），旧缓存一次性失效。
+  return `grade:v2:${hashString(payload)}:${input.promptVersion}`;
 }
 // 入库前去冗余：模型原文（raw）与 cacheKey 只在当前会话需要，存进缓存会白占配额。
 var CACHE_RESULT_FIELDS = ["status", "score", "subScores", "reason", "confidence", "maxScore", "pipeline", "needsReview", "reviewReasons", "model", "createdAt"];
@@ -590,6 +821,26 @@ var CacheStore = class {
     return Object.keys(this.data).length;
   }
 };
+// src/core/submit.ts
+// 提交结果判定：接口观察器可用时以平台回执为准；没有观察能力时退回「点过即提交」的旧行为，
+// 保证观察器没装上、接口改版或 iframe 跨域时不会把整条提交链路卡死。
+function judgeSubmit(hookActive2, signal) {
+  if (!hookActive2) return { ok: true, confirmed: false, reason: "" };
+  // 观察器活着但没等到 commitTopic 回执：分数很可能没写进平台，宁可让老师看一眼。
+  if (!signal) {
+    return {
+      ok: false,
+      confirmed: false,
+      reason: "\u672A\u6536\u5230\u5E73\u53F0\u63D0\u4EA4\u56DE\u6267\uFF0C\u5206\u6570\u53EF\u80FD\u672A\u5199\u5165\uFF0C\u8BF7\u68C0\u67E5\u6253\u5206\u6846\u540E\u91CD\u8BD5"
+    };
+  }
+  if (signal.ok === true) return { ok: true, confirmed: true, reason: "" };
+  return {
+    ok: false,
+    confirmed: false,
+    reason: `\u5E73\u53F0\u62D2\u7EDD\u63D0\u4EA4\uFF1A${signal.result || "\u672A\u77E5\u539F\u56E0"}`
+  };
+}
   // src/core/export.ts
   function loadHistory() {
     const value = readJson(STORAGE_KEYS.history, []);
@@ -2109,6 +2360,8 @@ async function gradeQuestion(options) {
     image: imageOptions,
     thinkingMode: gradeService.thinkingMode,
     outputMode,
+    // 接口身份（scanRecordId + 题号）优先，跨账号一致；没有时缓存键退回图片地址归一化。
+    identity: question.identity || null,
     promptVersion: PROMPT_VERSION
   });
   const cached = cache.get(cacheKey);
@@ -2129,7 +2382,7 @@ async function gradeQuestion(options) {
   if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
   if (imageOptions.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
   if (usable.length === 0) {
-    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF0C\u8BF7\u7B49\u5F85\u9605\u5377\u9875\u56FE\u7247\u52A0\u8F7D\u5B8C\u6210\u540E\u91CD\u8BD5");
+    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF1A\u56FE\u7247\u94FE\u63A5\u53EF\u80FD\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u70B9\u9605\u5377\u9875\u300C\u5237\u65B0\u300D\u540E\u91CD\u8BD5");
   }
   const payloadImages = usable;
   const prompt = buildGradingPrompt(question, config.context, {
@@ -2413,6 +2666,17 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     blank: "\u672A\u4F5C\u7B54"
   };
   var SKIP_CONFIRM_KEY = "zygr.submit.skipConfirm.v1";
+  // 所有面板输入框都拦下 Enter：页面本身可能把回车当提交，会把半截分数写进平台。
+  // 只阻止冒泡；文本域仍保留换行（不 preventDefault）。
+  function guardEnter(root) {
+    root.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      const target = event.target;
+      if (!target || !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || "")) return;
+      event.stopPropagation();
+      if (target.tagName !== "TEXTAREA") event.preventDefault();
+    });
+  }
   var GraderPanel = class {
     constructor(callbacks) {
       this.callbacks = callbacks;
@@ -2421,6 +2685,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.host.className = "zygr-host";
       this.shadow = this.host.attachShadow({ mode: "open" });
       this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
+      guardEnter(this.shadow);
       this.panel = this.q(".zygr-panel");
       const skipConfirm = this.shadow.querySelector("[data-opt='skip-submit-confirm']");
       if (skipConfirm) skipConfirm.checked = readJson(SKIP_CONFIRM_KEY, false) === true;
@@ -2666,6 +2931,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.host.className = "zygr-host";
       this.shadow = this.host.attachShadow({ mode: "open" });
       this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
+      guardEnter(this.shadow);
       this.bind();
     }
     markup() {
@@ -2818,6 +3084,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.host = document.createElement("div");
       this.shadow = this.host.attachShadow({ mode: "open" });
       this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
+      guardEnter(this.shadow);
       this.bind();
     }
     markup() {
@@ -3360,6 +3627,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     let lastResult = null;
     let lastHistoryId = "";
     let busy = false;
+    // 提交互斥与冷却：连续批阅与手动点击可能同时触发提交，必须串行化。
+    let submitting = false;
+    let lastSubmitAt = 0;
+    const SUBMIT_COOLDOWN = 1500;
     const forcedNotified = new Set();
     let autoMode = false;
     let autoStopRequested = false;
@@ -3482,9 +3753,18 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       panel.clearError();
       try {
         panel.setStage("\u7B49\u5F85\u4F5C\u7B54\u56FE\u7247\u7A33\u5B9A");
-        const images = await gatherAnswerImages();
+        let images = await gatherAnswerImages();
+        if (images.length === 0) {
+          // DOM 一直不稳或链接已过期时，用接口观察到的新鲜地址兜底。
+          images = freshAnswerImages();
+        }
         if (images.length === 0) throw new Error("\u4F5C\u7B54\u56FE\u7247\u5C1A\u672A\u7A33\u5B9A\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
-        currentQuestion = { ...currentQuestion, images };
+        // 身份只取台账号与题号：跨账号一致，且不含会过期的签名。
+        const observedIdentity = currentHookIdentity();
+        const identity = observedIdentity && observedIdentity.scanRecordId
+          ? { scanRecordId: observedIdentity.scanRecordId, topicNumStr: observedIdentity.topicNumStr || "" }
+          : null;
+        currentQuestion = { ...currentQuestion, images, identity };
         panel.setQuestion(currentQuestion);
         const result = await gradeQuestion({
           config,
@@ -3499,7 +3779,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         appendHistory({
           id: lastHistoryId,
           createdAt: Date.now(),
-          question: currentQuestion,
+          question: historyQuestion(currentQuestion),
           result,
           submitted: false
         }, config.historyLimit);
@@ -3518,6 +3798,17 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         busy = false;
         panel.setBusy(false);
       }
+    }
+    // 历史只留定位字段与归一化后的图片键：签名 URL / data URI 会过期并迅速撑爆存储。
+    function historyQuestion(question) {
+      return {
+        questionId: question.questionId,
+        questionText: question.questionText,
+        maxScore: question.maxScore,
+        subQuestions: question.subQuestions,
+        identity: question.identity || null,
+        imageKeys: (question.images || []).map(stableImageKey)
+      };
     }
     function applyScoreEdits() {
       const edits = typeof panel.getScoreEdits === "function" ? panel.getScoreEdits() : null;
@@ -3557,39 +3848,64 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         panel.showError("\u8BF7\u5148\u5B8C\u6210\u6279\u6539\u5E76\u8FDB\u5165\u9605\u5377\u9875\u9762");
         return { ok: false, oldIdentity: null };
       }
-      applyScoreEdits();
-      const inputs = getScoreInputs(markingDoc);
-      const scores = inputs.length > 1 && lastResult.subScores.length === inputs.length ? lastResult.subScores.map((item) => item.score) : [Math.round(lastResult.score * 10) / 10];
-      const label = scores.length > 1 ? `\u5404\u5C0F\u9898\u5206\u6570 ${scores.join("\u3001")}` : `${scores[0]} \u5206`;
-      if (!options.silent && !options.skipConfirm && !window.confirm(`\u786E\u8BA4\u5199\u5165${label}\u5E76\u63D0\u4EA4\uFF1F`)) {
+      // 互斥 + 冷却：连点会把同一份卷提交两次，也会让提交回执错位到下一次点击上。
+      if (submitting) return { ok: false, oldIdentity: null };
+      if (Date.now() - lastSubmitAt < SUBMIT_COOLDOWN) {
+        panel.toast("\u521A\u63D0\u4EA4\u8FC7\uFF0C\u8BF7\u7A0D\u5019\u518D\u8BD5");
         return { ok: false, oldIdentity: null };
       }
-      const oldIdentity = getPaperIdentity();
-      if (!fillScores(scores, markingDoc)) {
-        panel.showError("\u5206\u6570\u5199\u5165\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u6253\u5206\u7248\u8F93\u5165\u9879");
-        return { ok: false, oldIdentity };
+      submitting = true;
+      try {
+        applyScoreEdits();
+        const inputs = getScoreInputs(markingDoc);
+        const scores = inputs.length > 1 && lastResult.subScores.length === inputs.length ? lastResult.subScores.map((item) => item.score) : [Math.round(lastResult.score * 10) / 10];
+        const label = scores.length > 1 ? `\u5404\u5C0F\u9898\u5206\u6570 ${scores.join("\u3001")}` : `${scores[0]} \u5206`;
+        if (!options.silent && !options.skipConfirm && !window.confirm(`\u786E\u8BA4\u5199\u5165${label}\u5E76\u63D0\u4EA4\uFF1F`)) {
+          return { ok: false, oldIdentity: null };
+        }
+        const oldIdentity = getPaperIdentity();
+        // 填分必须回读一致才算写入成功，否则宁可不提交。
+        const filled = fillScores(scores, markingDoc);
+        if (!filled.ok) {
+          panel.showError(`\u5206\u6570\u672A\u5199\u5165\uFF0C\u5DF2\u4E2D\u6B62\u63D0\u4EA4\uFF1A${filled.error}`);
+          return { ok: false, oldIdentity };
+        }
+        // iframe 可能刚被路由替换，提交前再确认一次观察器存活。
+        ensureZhixueHook(markingDoc);
+        resetCommitSignal();
+        if (!submitGrade(markingDoc)) {
+          panel.showError("\u5206\u6570\u5DF2\u586B\u5165\uFF0C\u4F46\u672A\u627E\u5230\u63D0\u4EA4\u6309\u94AE\uFF0C\u8BF7\u624B\u52A8\u63D0\u4EA4");
+          return { ok: false, oldIdentity };
+        }
+        lastSubmitAt = Date.now();
+        // 有接口观察器就以平台回执为准（最多等 2.5 秒）；没有观察器时保持旧行为。
+        const observed = hookActive();
+        const signal = observed ? await waitCommitSignal(2500) : null;
+        const verdict = judgeSubmit(observed, signal);
+        if (!verdict.ok) {
+          panel.showError(verdict.reason);
+          return { ok: false, oldIdentity };
+        }
+        const history = loadHistory().map((entry) => entry.id === lastHistoryId ? { ...entry, result: lastResult, submitted: true, submitConfirmed: verdict.confirmed } : entry);
+        writeJson(STORAGE_KEYS.history, history);
+        historyPanel.refresh(history);
+        // 把人工改过的分数回写缓存：双评换第二个账号时命中缓存拿到的是最终分，而不是模型原始分。
+        if (cache && lastResult.cacheKey) cache.set(lastResult.cacheKey, lastResult);
+        lastResult = null;
+        panel.setSubtitle(options.silent ? "\u8FDE\u7EED\u6279\u9605\u4E2D" : "\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u4E0B\u4E00\u4EFD");
+        if (options.silent) {
+          panel.setStage("\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377");
+        } else {
+          panel.toast(verdict.confirmed ? "\u5DF2\u63D0\u4EA4\uFF08\u5E73\u53F0\u5DF2\u786E\u8BA4\uFF09" : "\u5DF2\u63D0\u4EA4");
+          void waitForNextPaper(oldIdentity).then((changed) => {
+            if (changed) void detect();
+            else panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u6362\u5377\uFF0C\u53EF\u7EE7\u7EED\u4EBA\u5DE5\u64CD\u4F5C");
+          });
+        }
+        return { ok: true, oldIdentity };
+      } finally {
+        submitting = false;
       }
-      if (!submitGrade(markingDoc)) {
-        panel.showError("\u5206\u6570\u5DF2\u586B\u5165\uFF0C\u4F46\u672A\u627E\u5230\u63D0\u4EA4\u6309\u94AE\uFF0C\u8BF7\u624B\u52A8\u63D0\u4EA4");
-        return { ok: false, oldIdentity };
-      }
-      const history = loadHistory().map((entry) => entry.id === lastHistoryId ? { ...entry, result: lastResult, submitted: true } : entry);
-      writeJson(STORAGE_KEYS.history, history);
-      historyPanel.refresh(history);
-      // 把人工改过的分数回写缓存：双评换第二个账号时命中缓存拿到的是最终分，而不是模型原始分。
-      if (cache && lastResult.cacheKey) cache.set(lastResult.cacheKey, lastResult);
-      lastResult = null;
-      panel.setSubtitle(options.silent ? "\u8FDE\u7EED\u6279\u9605\u4E2D" : "\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u4E0B\u4E00\u4EFD");
-      if (options.silent) {
-        panel.setStage("\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377");
-      } else {
-        panel.toast("\u5DF2\u63D0\u4EA4");
-        void waitForNextPaper(oldIdentity).then((changed) => {
-          if (changed) void detect();
-          else panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u6362\u5377\uFF0C\u53EF\u7EE7\u7EED\u4EBA\u5DE5\u64CD\u4F5C");
-        });
-      }
-      return { ok: true, oldIdentity };
     }
     async function toggleContinuous() {
       if (autoMode) {
@@ -3639,6 +3955,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         return;
       }
       markingDoc = doc;
+      // 每次拿到阅卷文档都校验一次：平台路由切换会换掉 iframe，旧 hook 随之失效。
+      ensureZhixueHook(doc);
       applyQuestion(readQuestion(doc));
       watchDocument(doc);
     }

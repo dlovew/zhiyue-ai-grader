@@ -208,31 +208,70 @@
     }
     return "";
   }
+  // 提交回执：接口观察器装上后写入，未装上时保持未激活，提交沿用「点过即提交」的旧行为。
+  var commitFeed = { active: false, last: null, resetAt: 0 };
+  // 这些按钮会把卷子直接判成满分/零分/问题卷，点错一次就是错卷，永远不碰。
+  var FORBIDDEN_BUTTON = /\u6EE1\u5206|\u96F6\u5206|\u95EE\u9898\u5377|\u4F11\u5377|\u4F5C\u5E9F/;
+  function hookActive() {
+    return commitFeed.active;
+  }
+  function markHookActive() {
+    commitFeed.active = true;
+  }
+  function pushCommitSignal(result) {
+    commitFeed.active = true;
+    commitFeed.last = { ok: String(result || "").toLowerCase() === "success", result: String(result || ""), at: Date.now() };
+  }
+  function resetCommitSignal() {
+    commitFeed.last = null;
+    // 回执可能比 waitCommitSignal 更早到达（本地很快），以重置时刻为基线判断新旧。
+    commitFeed.resetAt = Date.now();
+  }
+  async function waitCommitSignal(timeout = 2500) {
+    const startedAt = Date.now();
+    const since = commitFeed.resetAt;
+    while (Date.now() - startedAt < timeout) {
+      if (commitFeed.last && commitFeed.last.at >= since) return commitFeed.last;
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+    return null;
+  }
+  // 填分 + 回读：页面上的输入框可能被框架改回原值，写不进去就不能假装提交成功。
   function fillScores(scores, doc) {
     const inputs = getScoreInputs(doc);
-    if (inputs.length === 0 || scores.length > inputs.length) return false;
+    if (inputs.length === 0 || scores.length > inputs.length) return { ok: false, error: "\u672A\u627E\u5230\u6253\u5206\u8F93\u5165\u6846" };
     for (let i = 0; i < inputs.length; i += 1) {
       const score = scores[i];
-      if (score === void 0 || score === null || !Number.isFinite(Number(score))) return false;
+      if (score === void 0 || score === null || !Number.isFinite(Number(score))) {
+        return { ok: false, error: `\u7B2C ${i + 1} \u4E2A\u5206\u6570\u4E0D\u662F\u6709\u6548\u6570\u5B57` };
+      }
     }
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    if (!setter) return false;
+    if (!setter) return { ok: false, error: "\u6253\u5206\u6846\u4E0D\u53EF\u5199" };
     for (let i = 0; i < inputs.length; i += 1) {
       const input = inputs[i].element;
-      setter.call(input, String(Math.round(Number(scores[i]) * 10) / 10));
+      const target = Math.round(Number(scores[i]) * 10) / 10;
+      setter.call(input, String(target));
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
       input.dispatchEvent(new Event("blur", { bubbles: true }));
+      // 回读校验：值不一致说明页面拒收或被其它脚本覆盖，必须中止。
+      if (String(input.value).trim() === "" || Number(input.value) !== target) {
+        return { ok: false, error: `\u7B2C ${i + 1} \u4E2A\u6253\u5206\u6846\u56DE\u8BFB\u4E0D\u4E00\u81F4\uFF08\u671F\u671B ${target}\uFF0C\u5B9E\u9645 ${input.value}\uFF09` };
+      }
     }
-    return true;
+    return { ok: true, error: "" };
   }
   function submitGrade(doc) {
     const iframe = getIframeDoc();
     const candidates = [iframe, doc, mainDoc()].filter((item, index, all) => Boolean(item) && all.indexOf(item) === index);
     for (const root of candidates) {
-      const byText = Array.from(root.querySelectorAll("button")).find((button2) => button2.textContent?.includes(SELECTORS.submitText));
-      const button = byText ?? root.querySelector(SELECTORS.submitButton);
-      if (button) {
+      const byText = Array.from(root.querySelectorAll("button")).find((button2) => {
+        const text = button2.textContent || "";
+        return !FORBIDDEN_BUTTON.test(text) && text.includes(SELECTORS.submitText);
+      });
+      const button = root.querySelector(SELECTORS.submitButton) ?? byText;
+      if (button && !FORBIDDEN_BUTTON.test(button.textContent || "")) {
         button.click();
         return true;
       }

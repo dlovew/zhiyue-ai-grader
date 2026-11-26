@@ -65,6 +65,8 @@ async function gradeQuestion(options) {
     image: imageOptions,
     thinkingMode: gradeService.thinkingMode,
     outputMode,
+    // 接口身份（scanRecordId + 题号）优先，跨账号一致；没有时缓存键退回图片地址归一化。
+    identity: question.identity || null,
     promptVersion: PROMPT_VERSION
   });
   const cached = cache.get(cacheKey);
@@ -85,7 +87,7 @@ async function gradeQuestion(options) {
   if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
   if (imageOptions.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
   if (usable.length === 0) {
-    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF0C\u8BF7\u7B49\u5F85\u9605\u5377\u9875\u56FE\u7247\u52A0\u8F7D\u5B8C\u6210\u540E\u91CD\u8BD5");
+    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF1A\u56FE\u7247\u94FE\u63A5\u53EF\u80FD\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u70B9\u9605\u5377\u9875\u300C\u5237\u65B0\u300D\u540E\u91CD\u8BD5");
   }
   const payloadImages = usable;
   const prompt = buildGradingPrompt(question, config.context, {

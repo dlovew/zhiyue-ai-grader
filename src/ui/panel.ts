@@ -6,6 +6,17 @@
     blank: "\u672A\u4F5C\u7B54"
   };
   var SKIP_CONFIRM_KEY = "zygr.submit.skipConfirm.v1";
+  // 所有面板输入框都拦下 Enter：页面本身可能把回车当提交，会把半截分数写进平台。
+  // 只阻止冒泡；文本域仍保留换行（不 preventDefault）。
+  function guardEnter(root) {
+    root.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      const target = event.target;
+      if (!target || !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || "")) return;
+      event.stopPropagation();
+      if (target.tagName !== "TEXTAREA") event.preventDefault();
+    });
+  }
   var GraderPanel = class {
     constructor(callbacks) {
       this.callbacks = callbacks;
@@ -14,6 +25,7 @@
       this.host.className = "zygr-host";
       this.shadow = this.host.attachShadow({ mode: "open" });
       this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
+      guardEnter(this.shadow);
       this.panel = this.q(".zygr-panel");
       const skipConfirm = this.shadow.querySelector("[data-opt='skip-submit-confirm']");
       if (skipConfirm) skipConfirm.checked = readJson(SKIP_CONFIRM_KEY, false) === true;

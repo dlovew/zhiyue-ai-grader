@@ -26,6 +26,7 @@
       this.host = document.createElement("div");
       this.shadow = this.host.attachShadow({ mode: "open" });
       this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
+      guardEnter(this.shadow);
       this.bind();
     }
     markup() {

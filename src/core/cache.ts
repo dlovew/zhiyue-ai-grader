@@ -7,14 +7,41 @@ function hashString(input) {
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
+// 图片地址归一化：OSS 签名参数每次都变，剥掉签名只留资源路径与裁剪参数，键才跨会话稳定。
+function stableImageKey(src) {
+  if (!src) return "";
+  if (/^data:/i.test(src)) return `data:${src.length}:${hashString(src)}`;
+  try {
+    const url = new URL(src, "https://www.zhixue.com/");
+    if (!/^https?:$/.test(url.protocol)) return String(src);
+    const crop = (url.searchParams.get("x-oss-process") || "").split("/").filter((op) => /^crop(?:,|$)/.test(op));
+    if (crop.length) url.searchParams.set("x-oss-process", `image/${crop.join("/")}`);
+    else url.searchParams.delete("x-oss-process");
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(?:Expires|OSSAccessKeyId|Signature|Policy|Key-Pair-Id|x-amz-.*)$/i.test(key)) url.searchParams.delete(key);
+    }
+    url.hash = "";
+    url.searchParams.sort();
+    return url.href;
+  } catch {
+    return String(src);
+  }
+}
 function makeGradeCacheKey(input) {
+  // 有接口身份时优先用它：同一份卷在不同账号、不同签名下都是同一个键，双评才能共享缓存。
+  const identity = input.identity && input.identity.scanRecordId
+    ? `scan:${input.identity.scanRecordId}|${input.identity.topicNumStr || ""}`
+    : "";
+  const images = identity
+    ? [identity]
+    : (Array.isArray(input.question.images) ? input.question.images.map(stableImageKey) : []);
   const payload = JSON.stringify({
     question: input.context.question || input.question.questionText,
     answer: input.context.answer,
     rubric: input.context.rubric,
     maxScore: input.context.maxScore,
     subs: input.question.subQuestions,
-    images: input.question.images,
+    images,
     model: input.model,
     image: input.image,
     thinkingMode: input.thinkingMode,
@@ -22,7 +49,8 @@ function makeGradeCacheKey(input) {
     outputMode: input.outputMode || "standard",
     pipeline: "vlm"
   });
-  return `grade:${hashString(payload)}:${input.promptVersion}`;
+  // v2：键结构变了（图片地址归一化 + 接口身份），旧缓存一次性失效。
+  return `grade:v2:${hashString(payload)}:${input.promptVersion}`;
 }
 // 入库前去冗余：模型原文（raw）与 cacheKey 只在当前会话需要，存进缓存会白占配额。
 var CACHE_RESULT_FIELDS = ["status", "score", "subScores", "reason", "confidence", "maxScore", "pipeline", "needsReview", "reviewReasons", "model", "createdAt"];

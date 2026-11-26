@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -44,7 +44,8 @@ function loadCore() {
       clearTimeout: (id) => clearTimeout(id)
     },
     GM_getValue: (key) => (store.has(key) ? store.get(key) : undefined),
-    GM_setValue: (key, value) => store.set(key, value)
+    GM_setValue: (key, value) => store.set(key, value),
+    URL
   };
   context.globalThis = context;
   const files = [
@@ -52,13 +53,14 @@ function loadCore() {
     'src/config.ts',
     'src/infra/image.ts',
     'src/core/cache.ts',
+    'src/core/submit.ts',
     'src/core/export.ts',
     'src/core/prompt.ts',
     'src/core/parse.ts'
   ];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, parseGrade, buildGradingPrompt, PROMPT_VERSION, OUTPUT_MODES, normalizeOutputMode, resolveImageOptions, SUBJECT_IMAGE_PROFILES, loadConfig, loadUsageStats, recordUsage, DEFAULT_CONFIG, STORAGE_KEYS, toCsv, toHtml, summarizeEntries, summaryText, entryUsage, entryElapsed, entryHitText };`, context);
+  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, stableImageKey, parseGrade, buildGradingPrompt, PROMPT_VERSION, OUTPUT_MODES, normalizeOutputMode, resolveImageOptions, SUBJECT_IMAGE_PROFILES, loadConfig, loadUsageStats, recordUsage, DEFAULT_CONFIG, STORAGE_KEYS, toCsv, toHtml, summarizeEntries, summaryText, entryUsage, entryElapsed, entryHitText, judgeSubmit };`, context);
   return { core: context.__core, store };
 }
 
@@ -192,10 +194,12 @@ test('地理综合题按点给分，提示词禁止倒扣并纳入满分', () =>
 test('构建产物包含全部模块边界且顺序正确', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
   const markers = [...built.matchAll(/^\s*\/\/ (src\/[^\r\n]+\.ts)$/gm)].map((m) => m[1]);
-  assert.equal(markers.length, 18);
+  assert.equal(markers.length, 20);
   assert.equal(markers[0], 'src/adapters/zhixue.ts');
-  assert.equal(markers[5], 'src/infra/platforms.ts');
-  assert.equal(markers[6], 'src/infra/api.ts');
+  assert.equal(markers[1], 'src/adapters/zhixue-hook.ts');
+  assert.equal(markers[5], 'src/core/submit.ts');
+  assert.equal(markers[7], 'src/infra/platforms.ts');
+  assert.equal(markers[8], 'src/infra/api.ts');
   assert.ok(markers.includes('src/core/rubric-generator.ts'));
   assert.equal(markers[markers.length - 1], 'src/main.ts');
 });
@@ -228,6 +232,22 @@ function loadZhixue({ visibility = 'visible', imageSrc = 'https://img.example/a.
   vm.createContext(context);
   vm.runInContext(`${code}\n;globalThis.__api = { visible, snapshotFrom, answerSnapshot };`, context);
   return { api: context.__api, image, docRoot, mainDocument };
+}
+
+// 接口观察器单独装载：适配器 + hook，只测解析与身份，不碰真实 XHR。
+function loadHook() {
+  const context = {
+    console: { log() {}, warn() {}, error() {} },
+    window: { setTimeout: (fn) => setTimeout(fn, 0) },
+    URL
+  };
+  context.globalThis = context;
+  const code = ['src/adapters/zhixue.ts', 'src/adapters/zhixue-hook.ts']
+    .map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n'))
+    .join('\n');
+  vm.createContext(context);
+  vm.runInContext(`${code}\n;globalThis.__hook = { handleHookResponse, hookField, hookIdentity, hookUrlsFrom, hookIdentityKey, freshAnswerImages, currentHookIdentity, nextHookIdentity, hookState, hookActive, commitFeed, pushCommitSignal, resetCommitSignal, waitCommitSignal };`, context);
+  return context.__hook;
 }
 
 test('后台标签页（visibility=hidden）图片虽无 getClientRects 仍判定可见', () => {
@@ -775,6 +795,139 @@ test('构建产物包含缓存扩容、输出上限与纯缩放图片策略', ()
   assert.doesNotMatch(built, /mergeImages/);
   assert.doesNotMatch(built, /mergePreparedImages/);
   assert.doesNotMatch(built, /restructured/);
+});
+
+test('提交结果判定：有回执看回执，没观察器退回旧行为', () => {
+  const { core } = loadCore();
+  // 没有观察器：维持「点过即提交」，不阻断流程
+  const legacy = core.judgeSubmit(false, null);
+  assert.equal(legacy.ok, true);
+  assert.equal(legacy.confirmed, false);
+  // 有观察器但没等到 commitTopic 回执：不写已提交
+  const missing = core.judgeSubmit(true, null);
+  assert.equal(missing.ok, false);
+  assert.match(missing.reason, /未收到平台提交回执/);
+  // 平台明确返回成功
+  const ok = core.judgeSubmit(true, { ok: true, result: 'success' });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.confirmed, true);
+  // 平台明确拒绝：把原因带出来，不写已提交
+  const rejected = core.judgeSubmit(true, { ok: false, result: 'topicLocked' });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.reason, /topicLocked/);
+});
+
+test('提交链路有互斥、冷却与填分回读', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /let submitting = false/);
+  assert.match(built, /const SUBMIT_COOLDOWN = 1500/);
+  assert.match(built, /if \(submitting\) return \{ ok: false, oldIdentity: null \}/);
+  // 填分后回读，不一致就中止
+  assert.match(built, /Number\(input\.value\) !== target/);
+  // 回读不一致时带出输入框序号与期望值（dist 里是 \uXXXX 转义原文）
+  assert.match(built, /\\u56DE\\u8BFB\\u4E0D\\u4E00\\u81F4/);
+  assert.match(built, /\$\{filled\.error\}/);
+  // 提交回执：重置 → 等待 → 判定
+  assert.match(built, /resetCommitSignal\(\)/);
+  assert.match(built, /await waitCommitSignal\(2500\)/);
+  assert.match(built, /judgeSubmit\(observed, signal\)/);
+  // 永不点击判满分/零分/问题卷/休卷
+  assert.match(built, /FORBIDDEN_BUTTON/);
+});
+
+test('面板输入框统一拦截 Enter，且填分不用键盘事件', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /function guardEnter\(root\)/);
+  assert.match(built, /event\.stopPropagation\(\)/);
+  // 三个面板都要挂上
+  assert.equal((built.match(/guardEnter\(this\.shadow\)/g) || []).length, 3);
+  assert.doesNotMatch(built, /new KeyboardEvent/);
+});
+
+test('构建产物与 buildOutput() 逐字一致', async () => {
+  const { buildOutput } = await import(pathToFileURL(join(root, 'build.mjs')).href);
+  assert.equal(buildOutput(), readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8'));
+});
+
+test('接口观察器只读解析三接口，current 与 next 不互相覆盖', () => {
+  const hook = loadHook();
+  assert.equal(hook.hookActive(), false);
+  hook.handleHookResponse('https://www.zhixue.com/api/commitTopic/commit', '{"result":"success"}');
+  assert.equal(hook.hookActive(), true);
+  assert.equal(hook.commitFeed.last.ok, true);
+  hook.handleHookResponse('https://www.zhixue.com/api/scanrecorddetail/get', JSON.stringify({
+    data: { scanRecordId: 'S1', topicNumStr: '43,1', topicImageIds: ['https://oss.example/a.jpg?Signature=x'] }
+  }));
+  assert.equal(hook.hookIdentityKey(), 'S1|43,1');
+  // 跨 vm 域数组无法用 deepEqual 比引用，直接比拼接结果
+  assert.equal(hook.freshAnswerImages().join(','), 'https://oss.example/a.jpg?Signature=x');
+  // preLoad 只写 next，不能把 current 顶掉（否则换卷判定会错）
+  hook.handleHookResponse('https://www.zhixue.com/api/preLoadScanrecorddetail/get', '{"data":{"scanRecordId":"S2","topicNumStr":"43,2"}}');
+  assert.equal(hook.currentHookIdentity().scanRecordId, 'S1');
+  assert.equal(hook.nextHookIdentity().scanRecordId, 'S2');
+});
+
+test('提交回执非 success 时判为拒绝，早到的回执也能取到', async () => {
+  const hook = loadHook();
+  hook.handleHookResponse('/api/commitTopic/commit', '{"result":"fail"}');
+  assert.equal(hook.commitFeed.last.ok, false);
+  assert.equal(hook.commitFeed.last.result, 'fail');
+  // 回执先于等待到达：以 reset 时刻为基线，不能漏
+  hook.resetCommitSignal();
+  hook.pushCommitSignal('success');
+  const signal = await hook.waitCommitSignal(300);
+  assert.ok(signal);
+  assert.equal(signal.ok, true);
+});
+
+test('缓存键：签名不同的同一张图归一为同一个键', () => {
+  const { core } = loadCore();
+  const a = 'https://oss.example/answer/1.jpg?Expires=100&OSSAccessKeyId=K&Signature=AAA&x-oss-process=image/crop,0,0,100,100/resize,w_800';
+  const b = 'https://oss.example/answer/1.jpg?Expires=999&OSSAccessKeyId=K&Signature=BBB&x-oss-process=image/crop,0,0,100,100/resize,w_800';
+  assert.equal(core.stableImageKey(a), core.stableImageKey(b));
+  // URL 序列化会把 crop 参数转义，只校验裁剪信息仍在、签名与过期时间已被剥掉
+  assert.match(core.stableImageKey(a), /crop/);
+  assert.doesNotMatch(core.stableImageKey(a), /Signature|Expires|resize/);
+  // data URI 按内容哈希，内容不同则键不同
+  const dataA = `data:image/png;base64,${'A'.repeat(20)}`;
+  assert.equal(core.stableImageKey(dataA), core.stableImageKey(dataA));
+  assert.notEqual(core.stableImageKey(dataA), core.stableImageKey(`data:image/png;base64,${'B'.repeat(20)}`));
+});
+
+test('有接口身份时缓存键只认 scanRecordId，与图片签名无关', () => {
+  const { core } = loadCore();
+  const base = {
+    question: { questionText: '题干', images: ['https://oss.example/1.jpg?Signature=A&Expires=1'], subQuestions: [] },
+    context: { question: '', answer: '答案', rubric: '标准', maxScore: 5 },
+    model: 'qwen-vl-max',
+    image: { maxEdge: 1600 },
+    thinkingMode: 'off',
+    outputMode: 'standard',
+    identity: { scanRecordId: 'S1', topicNumStr: '43,1' },
+    promptVersion: core.PROMPT_VERSION
+  };
+  const other = { ...base, question: { ...base.question, images: ['https://oss.example/1.jpg?Signature=B&Expires=9'] } };
+  assert.equal(core.makeGradeCacheKey(base), core.makeGradeCacheKey(other));
+  assert.match(core.makeGradeCacheKey(base), /^grade:v2:/);
+  assert.notEqual(core.makeGradeCacheKey(base), core.makeGradeCacheKey({ ...base, identity: { scanRecordId: 'S2', topicNumStr: '43,1' } }));
+});
+
+test('观察器与取图/缓存/历史兜底已接线', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  // 只读包装：原 open/send 原样调用，不改请求
+  assert.match(built, /__zygrHooked/);
+  assert.match(built, /originalOpen\.call\(this, method, url, \.\.\.rest\)/);
+  assert.match(built, /originalSend\.apply\(this, args\)/);
+  // iframe 替换后校验、提交前再校验
+  assert.match(built, /ensureZhixueHook\(doc\)/);
+  assert.match(built, /ensureZhixueHook\(markingDoc\)/);
+  // DOM 取不到时用接口新鲜地址兜底
+  assert.match(built, /images = freshAnswerImages\(\)/);
+  // 缓存键升级 + 历史瘦身
+  assert.match(built, /grade:v2:/);
+  assert.match(built, /historyQuestion\(currentQuestion\)/);
+  // 历史写入用瘦身后的 question，不再把带签名的 images 原样存盘
+  assert.match(built, /imageKeys: \(question\.images \|\| \[\]\)\.map\(stableImageKey\)/);
 });
 
 test('输出档位与思考模式都进缓存键，切档不会误命中', () => {
