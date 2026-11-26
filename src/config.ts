@@ -18,16 +18,10 @@
       subject: ""
     },
     image: {
-      // 图片策略版本：2 起裁切/切块重排/多图合并默认全关，旧配置在加载时一次性归位。
-      policyVersion: 2,
+      // 图片只做等比缩小：裁切、切条重排、多图合并都会改变版面或牺牲单页分辨率。
       maxEdge: 1600,
       quality: 0.82,
       detail: "high",
-      // 裁切与切块重排都属于"可能改变版面"的操作，默认关闭，由用户按题型开启。
-      cropToAnswer: false,
-      splitWideStrip: false,
-      // 合并会牺牲单页有效分辨率，默认关闭，由用户在「高级」里按需开启。
-      mergeImages: false,
       autoBySubject: true
     },
     promptVersion: "zygr-prompt-v2",
@@ -70,16 +64,8 @@
   function loadConfig() {
     const raw = readJson(STORAGE_KEYS.config, {});
     if (!isRecord(raw) || raw.version !== 1) return clone(DEFAULT_CONFIG);
+    // merge 只接受默认配置里存在的键，旧版本遗留的裁切/切条/合并开关会被自动丢弃。
     const config = merge(DEFAULT_CONFIG, raw);
-    // 旧版本曾把"裁切/切块重排"默认打开，导致并排小空被打散、宽条被误报分辨率低。
-    // 策略版本不是 2 的配置一次性把这三项归位到安全默认值。
-    const rawImage = isRecord(raw.image) ? raw.image : {};
-    if (rawImage.policyVersion !== 2 && isRecord(config.image)) {
-      config.image.policyVersion = 2;
-      config.image.cropToAnswer = false;
-      config.image.splitWideStrip = false;
-      config.image.mergeImages = false;
-    }
     const oldPipeline = isRecord(raw.pipeline) ? raw.pipeline : {};
     if (Object.prototype.hasOwnProperty.call(oldPipeline, "disableThinking") && !Object.prototype.hasOwnProperty.call(oldPipeline, "thinkingMode")) {
       config.pipeline.thinkingMode = normalizeThinkingMode(oldPipeline.disableThinking);

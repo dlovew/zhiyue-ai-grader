@@ -163,6 +163,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 }
 .zygr-field input:focus, .zygr-field select:focus { border-color: var(--zygr-primary); box-shadow: 0 0 0 3px var(--zygr-glow); }
 .zygr-hint { font-size: 11px; color: var(--zygr-muted); line-height: 1.6; }
+.zygr-summary { margin: -6px 0 0; font-size: 11px; color: var(--zygr-muted); line-height: 1.6; }
 .zygr-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 [data-model-options] { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 [data-model-options] select { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid var(--zygr-line); border-radius: 8px; background: #fff; color: var(--zygr-text); font-size: 13px; }

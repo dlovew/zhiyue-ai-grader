@@ -238,6 +238,8 @@
       const history = loadHistory().map((entry) => entry.id === lastHistoryId ? { ...entry, result: lastResult, submitted: true } : entry);
       writeJson(STORAGE_KEYS.history, history);
       historyPanel.refresh(history);
+      // 把人工改过的分数回写缓存：双评换第二个账号时命中缓存拿到的是最终分，而不是模型原始分。
+      if (cache && lastResult.cacheKey) cache.set(lastResult.cacheKey, lastResult);
       lastResult = null;
       panel.setSubtitle(options.silent ? "\u8FDE\u7EED\u6279\u9605\u4E2D" : "\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u4E0B\u4E00\u4EFD");
       if (options.silent) {

@@ -103,7 +103,7 @@
     const prepared = [];
     for (const src of rawImages) {
       try {
-        const image = await prepareImage(src, { ...(imageConfig || {}), cropToAnswer: false });
+        const image = await prepareImage(src, imageConfig || {});
         if (image?.dataUrl) prepared.push(image);
       } catch { /* \u56FE\u7247\u5904\u7406\u5931\u8D25\u5219\u8DF3\u8FC7 */ }
     }

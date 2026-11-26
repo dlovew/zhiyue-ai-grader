@@ -18,6 +18,8 @@ function makeGradeCacheKey(input) {
     model: input.model,
     image: input.image,
     thinkingMode: input.thinkingMode,
+    // 输出档位决定提示词与 max_tokens，必须进键，否则切档会命中旧档的结果。
+    outputMode: input.outputMode || "standard",
     pipeline: "vlm"
   });
   return `grade:${hashString(payload)}:${input.promptVersion}`;
@@ -50,7 +52,8 @@ function loadUsageStats() {
     requests: Number(stats.requests || 0),
     promptTokens: Number(stats.promptTokens || 0),
     cachedTokens: Number(stats.cachedTokens || 0),
-    completionTokens: Number(stats.completionTokens || 0)
+    completionTokens: Number(stats.completionTokens || 0),
+    reasoningTokens: Number(stats.reasoningTokens || 0)
   };
 }
 function recordUsage(entry) {
@@ -61,7 +64,8 @@ function recordUsage(entry) {
     requests: stats.requests + (entry?.request ? 1 : 0),
     promptTokens: stats.promptTokens + Number(entry?.prompt || 0),
     cachedTokens: stats.cachedTokens + Number(entry?.cached || 0),
-    completionTokens: stats.completionTokens + Number(entry?.completion || 0)
+    completionTokens: stats.completionTokens + Number(entry?.completion || 0),
+    reasoningTokens: stats.reasoningTokens + Number(entry?.reasoning || 0)
   };
   writeJson(STORAGE_KEYS.stats, next);
   return next;

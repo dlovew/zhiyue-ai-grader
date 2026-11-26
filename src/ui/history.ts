@@ -18,6 +18,7 @@
           <select data-filter="review" aria-label="\u590D\u6838\u7B5B\u9009"><option value="">\u5168\u90E8\u72B6\u6001</option><option value="review">\u9700\u590D\u6838</option><option value="normal">\u6B63\u5E38</option></select>
           <input data-filter="keyword" type="search" placeholder="\u641C\u7D22\u9898\u53F7\u6216\u4F9D\u636E" aria-label="\u641C\u7D22">
         </div>
+        <div class="zygr-summary" data-summary></div>
         <div class="zygr-history-grid">
           <div class="zygr-history-list"><div class="zygr-list" data-list></div></div>
           <div class="zygr-card zygr-history-detail" data-detail><div class="zygr-empty">\u9009\u62E9\u4E00\u6761\u8BB0\u5F55\u67E5\u770B\u8BE6\u60C5</div></div>
@@ -68,6 +69,8 @@
       const list = this.q("[data-list]");
       list.replaceChildren();
       const entries = this.filtered();
+      // 汇总只统计当前筛选结果，方便核对某个范围内的输入/输出与命中情况。
+      this.q("[data-summary]").textContent = summaryText(entries);
       if (entries.length === 0) {
         const empty = document.createElement("div");
         empty.className = "zygr-empty";
@@ -97,10 +100,13 @@
       }
       const detail = document.createElement("div");
       detail.className = "zygr-detail";
+      const usage = entryUsage(entry);
       const lines = [
         `\u9898\u53F7\uFF1A${entry.question.questionId}`,
         `\u94FE\u8DEF / \u6A21\u578B\uFF1A${entry.result.pipeline} / ${entry.result.model}`,
         `\u7ED3\u679C\uFF1A${entry.result.score} / ${entry.result.maxScore}\uFF08${entry.result.status}\uFF09`,
+        `\u7528\u91CF\uFF1A\u8F93\u5165 ${usage.prompt}${usage.cached ? `\uFF08\u524D\u7F00\u547D\u4E2D ${usage.cached}\uFF09` : ""} \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`,
+        `\u7F13\u5B58 / \u8017\u65F6\uFF1A${entryHitText(entry)} / ${entryElapsed(entry)}s`,
         `\u4F9D\u636E\uFF1A${entry.result.reason || "\u65E0"}`,
         `\u590D\u6838\uFF1A${entry.result.reviewReasons.join("\uFF1B") || "\u65E0"}`,
         `\u5C0F\u9898\uFF1A${entry.result.subScores.map((item) => `${item.label} ${item.score}/${item.maxScore}`).join("\uFF1B") || "\u65E0"}`

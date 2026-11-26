@@ -52,13 +52,65 @@ function loadCore() {
     'src/config.ts',
     'src/infra/image.ts',
     'src/core/cache.ts',
+    'src/core/export.ts',
     'src/core/prompt.ts',
     'src/core/parse.ts'
   ];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, parseGrade, buildGradingPrompt, PROMPT_VERSION, OUTPUT_MODES, normalizeOutputMode, resolveImageOptions, SUBJECT_IMAGE_PROFILES, loadConfig, loadUsageStats, recordUsage, DEFAULT_CONFIG, STORAGE_KEYS };`, context);
+  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, parseGrade, buildGradingPrompt, PROMPT_VERSION, OUTPUT_MODES, normalizeOutputMode, resolveImageOptions, SUBJECT_IMAGE_PROFILES, loadConfig, loadUsageStats, recordUsage, DEFAULT_CONFIG, STORAGE_KEYS, toCsv, toHtml, summarizeEntries, summaryText, entryUsage, entryElapsed, entryHitText };`, context);
   return { core: context.__core, store };
+}
+
+// 导出用的最小历史样本：一条命中缓存、一条带思考 token 的真实请求。
+function exportSample() {
+  return [
+    {
+      id: 'h1',
+      createdAt: Date.UTC(2026, 0, 2, 3, 4, 5),
+      submitted: true,
+      question: { questionId: 'Q1', subQuestions: [{ label: '第1问', maxScore: 2 }] },
+      result: {
+        pipeline: 'vlm',
+        model: 'glm-4v-flash',
+        status: 'legible',
+        score: 4,
+        maxScore: 5,
+        subScores: [{ label: '第1问', score: 2, maxScore: 2, reason: '' }],
+        reason: '依据基本正确',
+        needsReview: false,
+        reviewReasons: [],
+        cacheHit: true,
+        elapsedMs: 12,
+        usage: null
+      }
+    },
+    {
+      id: 'h2',
+      createdAt: Date.UTC(2026, 0, 2, 3, 5, 6),
+      submitted: false,
+      question: { questionId: 'Q2,含逗号"引号', subQuestions: [{ label: '第1问', maxScore: 2 }] },
+      result: {
+        pipeline: 'vlm',
+        model: 'qwen-vl-max',
+        status: 'legible',
+        score: 3,
+        maxScore: 5,
+        subScores: [{ label: '第1问', score: 1, maxScore: 2, reason: '依据不符' }],
+        reason: '部分扣分',
+        needsReview: true,
+        reviewReasons: ['模型置信度较低，建议人工复核'],
+        cacheHit: false,
+        elapsedMs: 2400,
+        usage: { prompt: 1000, cached: 800, completion: 180, reasoning: 60 }
+      }
+    }
+  ];
+}
+
+// 按 CSV 引号规则切分单行，避免逗号/引号出现在字段里导致列数误判。
+function splitCsvLine(line) {
+  return line.match(/"(?:[^"]|"")*"/g) || [];
 }
 
 test('批改结果分数可编辑且提交前应用手动改分', () => {
@@ -67,6 +119,22 @@ test('批改结果分数可编辑且提交前应用手动改分', () => {
   assert.match(built, /getScoreEdits\(\)/);
   assert.match(built, /applyScoreEdits\(\)/);
   assert.match(built, /result: lastResult, submitted: true/);
+});
+
+test('双评第二遍先查缓存再取图，命中后不再下载图片', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  const start = built.indexOf('async function gradeQuestion(');
+  assert.ok(start > 0);
+  const body = built.slice(start, start + 5000);
+  const cacheIndex = body.indexOf('cache.get(cacheKey)');
+  assert.ok(cacheIndex > 0, '批改流程里应有缓存查询');
+  assert.ok(cacheIndex < body.indexOf('prepareImage(src, imageOptions)'), '缓存查询应在图片下载之前');
+  assert.ok(cacheIndex < body.indexOf('buildGradingPrompt(question'), '缓存查询应在构建提示词之前');
+});
+
+test('提交后把人工改过的分数回写缓存，供双评第二账号命中', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /if \(cache && lastResult\.cacheKey\) cache\.set\(lastResult\.cacheKey, lastResult\)/);
 });
 
 test('面板按钮为紧凑自适应布局', () => {
@@ -518,13 +586,14 @@ test('学科图片策略优先于手动尺寸，未选学科时保持手动值',
   const manual = core.resolveImageOptions({ image: { maxEdge: 1600, detail: 'high' }, context: { subject: '' } });
   assert.equal(manual.maxEdge, 1600);
   assert.equal(manual.subject, undefined);
-  // 裁切、切块重排、多图合并都会改变版面或分辨率，默认关闭
-  assert.equal(manual.cropToAnswer, false);
-  assert.equal(manual.splitWideStrip, false);
-  assert.equal(manual.mergeImages, false);
-  assert.equal(core.resolveImageOptions({ image: { cropToAnswer: true, splitWideStrip: true } }).cropToAnswer, true);
-  assert.equal(core.resolveImageOptions({ image: { cropToAnswer: true, splitWideStrip: true } }).splitWideStrip, true);
-  assert.equal(core.resolveImageOptions({ image: { mergeImages: true } }).mergeImages, true);
+  // 裁切、切块重排、多图合并已下线，只保留等比缩小
+  assert.equal('cropToAnswer' in manual, false);
+  assert.equal('splitWideStrip' in manual, false);
+  assert.equal('mergeImages' in manual, false);
+  const legacy = core.resolveImageOptions({ image: { cropToAnswer: true, splitWideStrip: true, mergeImages: true } });
+  assert.equal('cropToAnswer' in legacy, false);
+  assert.equal('splitWideStrip' in legacy, false);
+  assert.equal('mergeImages' in legacy, false);
 
   const math = core.resolveImageOptions({ image: { maxEdge: 1024, detail: 'low' }, context: { subject: '数学' } });
   assert.equal(math.maxEdge, 1600);
@@ -541,18 +610,18 @@ test('学科图片策略优先于手动尺寸，未选学科时保持手动值',
   assert.equal(Object.keys(core.SUBJECT_IMAGE_PROFILES).length, 9);
 });
 
-test('旧配置里被打开的裁切/重排开关在加载时归位', () => {
+test('旧配置里遗留的裁切/重排开关在加载时被丢弃', () => {
   const { core, store } = loadCore();
   store.set('zygr.config.v1', JSON.stringify({
     version: 1,
-    image: { cropToAnswer: true, splitWideStrip: true, mergeImages: true }
+    image: { cropToAnswer: true, splitWideStrip: true, mergeImages: true, policyVersion: 1 }
   }));
   const config = core.loadConfig();
-  assert.equal(config.image.policyVersion, 2);
-  assert.equal(config.image.cropToAnswer, false);
-  assert.equal(config.image.splitWideStrip, false);
-  assert.equal(config.image.mergeImages, false);
-  // 其他字段保持默认，不受迁移影响
+  assert.equal('cropToAnswer' in config.image, false);
+  assert.equal('splitWideStrip' in config.image, false);
+  assert.equal('mergeImages' in config.image, false);
+  assert.equal('policyVersion' in config.image, false);
+  // 其他字段保持默认，不受旧配置影响
   assert.equal(config.image.maxEdge, 1600);
   assert.equal(config.pipeline.thinkingMode, 'off');
 });
@@ -689,18 +758,91 @@ test('界面已移除管理自定义预设入口', () => {
   assert.doesNotMatch(built, /collectPresetForm\(\)/);
 });
 
-test('构建产物包含缓存扩容、输出上限与宽条重排能力', () => {
+test('构建产物包含缓存扩容、输出上限与纯缩放图片策略', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
   assert.match(built, /cacheMaxEntries/);
   assert.match(built, /max_tokens/);
-  assert.match(built, /stripLayout/);
-  assert.match(built, /splitWideStrip/);
   assert.match(built, /"image\.detail"/);
   assert.match(built, /resolveImageOptions/);
-  assert.match(built, /mergePreparedImages/);
   assert.match(built, /"context\.subject"/);
-  assert.match(built, /data-field="image\.mergeImages"/);
   assert.match(built, /data-field="image\.autoBySubject"/);
+  // 只缩不放：缩放系数被 1 夹住
+  assert.match(built, /Math\.min\(1, config\.maxEdge/);
+  // 裁切、切条重排、多图合并的整条链路已下线
+  assert.doesNotMatch(built, /cropToAnswer/);
+  assert.doesNotMatch(built, /splitWideStrip/);
+  assert.doesNotMatch(built, /stripLayout/);
+  assert.doesNotMatch(built, /mergeImages/);
+  assert.doesNotMatch(built, /mergePreparedImages/);
+  assert.doesNotMatch(built, /restructured/);
+});
+
+test('输出档位与思考模式都进缓存键，切档不会误命中', () => {
+  const { core } = loadCore();
+  const base = {
+    question: { questionText: '题干', images: ['https://img/1.jpg'], subQuestions: [] },
+    context: { question: '', answer: '答案', rubric: '标准', maxScore: 5 },
+    model: 'qwen-vl-max',
+    image: { maxEdge: 1600, quality: 0.82 },
+    thinkingMode: 'off',
+    outputMode: 'standard',
+    promptVersion: core.PROMPT_VERSION
+  };
+  const key = core.makeGradeCacheKey(base);
+  assert.equal(key, core.makeGradeCacheKey({ ...base }));
+  assert.notEqual(key, core.makeGradeCacheKey({ ...base, outputMode: 'detailed' }));
+  assert.notEqual(key, core.makeGradeCacheKey({ ...base, thinkingMode: 'auto' }));
+  assert.notEqual(key, core.makeGradeCacheKey({ ...base, image: { maxEdge: 1440, quality: 0.82 } }));
+});
+
+test('CSV 导出每行列数与表头一致，汇总行只填合计列', () => {
+  const { core } = loadCore();
+  const lines = core.toCsv(exportSample()).replace(/^\uFEFF/, '').split('\r\n');
+  const header = splitCsvLine(lines[0]);
+  assert.equal(header.length, 18);
+  assert.equal(header[12], '"输入 Token"');
+  // 表头、每条数据、汇总行都必须同宽，否则 Excel 里会错列
+  for (const line of lines) assert.equal(splitCsvLine(line).length, header.length, line);
+  const summary = splitCsvLine(lines[lines.length - 1]);
+  assert.equal(summary[0], '"汇总"');
+  assert.equal(summary[1], '"共 2 条"');
+  assert.equal(summary[12], '"1000"');
+  assert.equal(summary[13], '"800"');
+  assert.equal(summary[14], '"180"');
+  assert.equal(summary[15], '"60"');
+  assert.match(summary[16], /本地命中 1 次（50%）/);
+});
+
+test('HTML 导出列数与表头一致，并带用量汇总条', () => {
+  const { core } = loadCore();
+  const html = core.toHtml(exportSample());
+  assert.equal((html.match(/<th>/g) || []).length, 15);
+  const body = html.split('<tbody>')[1].split('</tbody>')[0];
+  const rows = body.split('</tr>').filter((row) => row.includes('<td>'));
+  assert.equal(rows.length, 2);
+  for (const row of rows) assert.equal((row.match(/<td>/g) || []).length, 15);
+  assert.match(html, /class="zygr-summary"/);
+  assert.match(html, /思考 Token/);
+  assert.match(html, /耗时（秒）/);
+  assert.match(body, /本地命中/);
+  assert.match(body, /前缀命中/);
+});
+
+test('命中状态区分本地命中/前缀命中/未命中', () => {
+  const { core } = loadCore();
+  const [hit, prefix] = exportSample();
+  assert.equal(core.entryHitText(hit), '本地命中');
+  assert.equal(core.entryHitText(prefix), '前缀命中');
+  assert.equal(core.entryHitText({ result: {} }), '未命中');
+  assert.equal(core.entryElapsed(prefix), '2.4');
+});
+
+test('历史详情与累计统计都用同一套命中与用量口径', () => {
+  const { core } = loadCore();
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /entryHitText\(entry\)\} \/ \$\{entryElapsed\(entry\)\}s/);
+  core.recordUsage({ graded: true, request: true, prompt: 1000, cached: 800, completion: 180, reasoning: 60 });
+  assert.equal(core.loadUsageStats().reasoningTokens, 60);
 });
 
 test('思考模式归一化兼容旧布尔并支持 low/high/max', () => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.0.2
+// @version      1.0.3
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -344,16 +344,10 @@
       subject: ""
     },
     image: {
-      // 图片策略版本：2 起裁切/切块重排/多图合并默认全关，旧配置在加载时一次性归位。
-      policyVersion: 2,
+      // 图片只做等比缩小：裁切、切条重排、多图合并都会改变版面或牺牲单页分辨率。
       maxEdge: 1600,
       quality: 0.82,
       detail: "high",
-      // 裁切与切块重排都属于"可能改变版面"的操作，默认关闭，由用户按题型开启。
-      cropToAnswer: false,
-      splitWideStrip: false,
-      // 合并会牺牲单页有效分辨率，默认关闭，由用户在「高级」里按需开启。
-      mergeImages: false,
       autoBySubject: true
     },
     promptVersion: "zygr-prompt-v2",
@@ -396,16 +390,8 @@
   function loadConfig() {
     const raw = readJson(STORAGE_KEYS.config, {});
     if (!isRecord(raw) || raw.version !== 1) return clone(DEFAULT_CONFIG);
+    // merge 只接受默认配置里存在的键，旧版本遗留的裁切/切条/合并开关会被自动丢弃。
     const config = merge(DEFAULT_CONFIG, raw);
-    // 旧版本曾把"裁切/切块重排"默认打开，导致并排小空被打散、宽条被误报分辨率低。
-    // 策略版本不是 2 的配置一次性把这三项归位到安全默认值。
-    const rawImage = isRecord(raw.image) ? raw.image : {};
-    if (rawImage.policyVersion !== 2 && isRecord(config.image)) {
-      config.image.policyVersion = 2;
-      config.image.cropToAnswer = false;
-      config.image.splitWideStrip = false;
-      config.image.mergeImages = false;
-    }
     const oldPipeline = isRecord(raw.pipeline) ? raw.pipeline : {};
     if (Object.prototype.hasOwnProperty.call(oldPipeline, "disableThinking") && !Object.prototype.hasOwnProperty.call(oldPipeline, "thinkingMode")) {
       config.pipeline.thinkingMode = normalizeThinkingMode(oldPipeline.disableThinking);
@@ -468,6 +454,8 @@ function makeGradeCacheKey(input) {
     model: input.model,
     image: input.image,
     thinkingMode: input.thinkingMode,
+    // 输出档位决定提示词与 max_tokens，必须进键，否则切档会命中旧档的结果。
+    outputMode: input.outputMode || "standard",
     pipeline: "vlm"
   });
   return `grade:${hashString(payload)}:${input.promptVersion}`;
@@ -500,7 +488,8 @@ function loadUsageStats() {
     requests: Number(stats.requests || 0),
     promptTokens: Number(stats.promptTokens || 0),
     cachedTokens: Number(stats.cachedTokens || 0),
-    completionTokens: Number(stats.completionTokens || 0)
+    completionTokens: Number(stats.completionTokens || 0),
+    reasoningTokens: Number(stats.reasoningTokens || 0)
   };
 }
 function recordUsage(entry) {
@@ -511,7 +500,8 @@ function recordUsage(entry) {
     requests: stats.requests + (entry?.request ? 1 : 0),
     promptTokens: stats.promptTokens + Number(entry?.prompt || 0),
     cachedTokens: stats.cachedTokens + Number(entry?.cached || 0),
-    completionTokens: stats.completionTokens + Number(entry?.completion || 0)
+    completionTokens: stats.completionTokens + Number(entry?.completion || 0),
+    reasoningTokens: stats.reasoningTokens + Number(entry?.reasoning || 0)
   };
   writeJson(STORAGE_KEYS.stats, next);
   return next;
@@ -619,6 +609,54 @@ var CacheStore = class {
   function subScoreText(entry) {
     return entry.result.subScores.map((item) => `${item.label}:${item.score}/${item.maxScore}`).join("\uFF1B");
   }
+  // 用量与命中：旧记录可能没有 usage / cacheHit，这里统一兜底为 0 与 false。
+  function entryUsage(entry) {
+    const usage = entry?.result?.usage || {};
+    return {
+      prompt: Number(usage.prompt || 0),
+      cached: Number(usage.cached || 0),
+      completion: Number(usage.completion || 0),
+      reasoning: Number(usage.reasoning || 0)
+    };
+  }
+  function entryElapsed(entry) {
+    return (Number(entry?.result?.elapsedMs || 0) / 1e3).toFixed(1);
+  }
+  function entryHitText(entry) {
+    if (entry?.result?.cacheHit) return "\u672C\u5730\u547D\u4E2D";
+    return entryUsage(entry).cached > 0 ? "\u524D\u7F00\u547D\u4E2D" : "\u672A\u547D\u4E2D";
+  }
+  function percentText(value, total) {
+    return total > 0 ? `${Math.round((value / total) * 100)}%` : "0%";
+  }
+  // 汇总只在本地相加历史记录里的用量，不产生任何请求。
+  function summarizeEntries(entries) {
+    const total = entries.length;
+    const hits = entries.filter((entry) => Boolean(entry?.result?.cacheHit)).length;
+    const totals = { prompt: 0, cached: 0, completion: 0, reasoning: 0 };
+    for (const entry of entries) {
+      const usage = entryUsage(entry);
+      totals.prompt += usage.prompt;
+      totals.cached += usage.cached;
+      totals.completion += usage.completion;
+      totals.reasoning += usage.reasoning;
+    }
+    return {
+      total,
+      hits,
+      hitRate: percentText(hits, total),
+      prompt: totals.prompt,
+      cached: totals.cached,
+      cacheRate: percentText(totals.cached, totals.prompt),
+      completion: totals.completion,
+      reasoning: totals.reasoning
+    };
+  }
+  function summaryText(entries) {
+    const summary = summarizeEntries(entries);
+    const reasoning = summary.reasoning ? `\uFF08\u542B\u601D\u8003 ${summary.reasoning}\uFF09` : "";
+    return `\u5171 ${summary.total} \u6761 \xB7 \u672C\u5730\u547D\u4E2D ${summary.hits} \u6B21\uFF08${summary.hitRate}\uFF09 \xB7 \u8F93\u5165 ${summary.prompt} token\uFF08\u524D\u7F00\u547D\u4E2D ${summary.cached}\uFF0C${summary.cacheRate}\uFF09 \xB7 \u8F93\u51FA ${summary.completion} token${reasoning}`;
+  }
   function toCsv(entries) {
     const header = [
       "\u65F6\u95F4",
@@ -632,49 +670,90 @@ var CacheStore = class {
       "\u8BC4\u5206\u4F9D\u636E",
       "\u9700\u590D\u6838",
       "\u590D\u6838\u539F\u56E0",
-      "\u5DF2\u63D0\u4EA4"
+      "\u5DF2\u63D0\u4EA4",
+      "\u8F93\u5165 Token",
+      "\u524D\u7F00\u547D\u4E2D Token",
+      "\u8F93\u51FA Token",
+      "\u601D\u8003 Token",
+      "\u547D\u4E2D",
+      "\u8017\u65F6\uFF08\u79D2\uFF09"
     ];
-    const rows = entries.map((entry) => [
-      new Date(entry.createdAt).toLocaleString("zh-CN"),
-      entry.question.questionId,
-      entry.result.pipeline,
-      entry.result.model,
-      entry.result.status,
-      entry.result.score,
-      entry.result.maxScore,
-      subScoreText(entry),
-      entry.result.reason,
-      entry.result.needsReview ? "\u662F" : "\u5426",
-      entry.result.reviewReasons.join("\uFF1B"),
-      entry.submitted ? "\u662F" : "\u5426"
-    ]);
-    return `\uFEFF${[header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+    const rows = entries.map((entry) => {
+      const usage = entryUsage(entry);
+      return [
+        new Date(entry.createdAt).toLocaleString("zh-CN"),
+        entry.question.questionId,
+        entry.result.pipeline,
+        entry.result.model,
+        entry.result.status,
+        entry.result.score,
+        entry.result.maxScore,
+        subScoreText(entry),
+        entry.result.reason,
+        entry.result.needsReview ? "\u662F" : "\u5426",
+        entry.result.reviewReasons.join("\uFF1B"),
+        entry.submitted ? "\u662F" : "\u5426",
+        usage.prompt,
+        usage.cached,
+        usage.completion,
+        usage.reasoning,
+        entryHitText(entry),
+        entryElapsed(entry)
+      ];
+    });
+    const summary = summarizeEntries(entries);
+    // 末尾追加一行汇总：第 3～12 列是逐条字段，留空避免与逐条数据混读；只填合计列。
+    const summaryRow = [
+      "\u6C47\u603B",
+      `\u5171 ${summary.total} \u6761`,
+      // 时间到已提交共 10 列留空（第 3～12 列）
+      "", "", "", "", "", "", "", "", "", "",
+      summary.prompt,
+      summary.cached,
+      summary.completion,
+      summary.reasoning,
+      `\u672C\u5730\u547D\u4E2D ${summary.hits} \u6B21\uFF08${summary.hitRate}\uFF09`,
+      ""
+    ];
+    return `\uFEFF${[header, ...rows, summaryRow].map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
   }
   function escapeHtml(value) {
     return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
   function toHtml(entries) {
-    const rows = entries.map((entry) => `
-    <tr>
-      <td>${escapeHtml(new Date(entry.createdAt).toLocaleString("zh-CN"))}</td>
-      <td>${escapeHtml(entry.question.questionId)}</td>
-      <td>${escapeHtml(entry.result.pipeline)}</td>
-      <td>${escapeHtml(entry.result.status)}</td>
-      <td>${escapeHtml(entry.result.score)} / ${escapeHtml(entry.result.maxScore)}</td>
-      <td>${escapeHtml(subScoreText(entry))}</td>
-      <td>${escapeHtml(entry.result.reason)}</td>
-      <td>${entry.result.needsReview ? "\u9700\u590D\u6838" : "\u6B63\u5E38"}</td>
-    </tr>`).join("");
+    const rows = entries.map((entry) => {
+      const usage = entryUsage(entry);
+      return `
+     <tr>
+       <td>${escapeHtml(new Date(entry.createdAt).toLocaleString("zh-CN"))}</td>
+       <td>${escapeHtml(entry.question.questionId)}</td>
+       <td>${escapeHtml(entry.result.pipeline)}</td>
+       <td>${escapeHtml(entry.result.model)}</td>
+       <td>${escapeHtml(entry.result.status)}</td>
+       <td>${escapeHtml(entry.result.score)} / ${escapeHtml(entry.result.maxScore)}</td>
+       <td>${escapeHtml(subScoreText(entry))}</td>
+       <td>${escapeHtml(entry.result.reason)}</td>
+       <td>${escapeHtml(usage.prompt)}</td>
+       <td>${escapeHtml(usage.cached)}</td>
+       <td>${escapeHtml(usage.completion)}</td>
+       <td>${escapeHtml(usage.reasoning)}</td>
+       <td>${escapeHtml(entryHitText(entry))}</td>
+       <td>${escapeHtml(entryElapsed(entry))}</td>
+       <td>${entry.result.needsReview ? "\u9700\u590D\u6838" : "\u6B63\u5E38"}</td>
+     </tr>`;
+    }).join("");
     return `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u5386\u53F2\u5BFC\u51FA</title>
-<style>
-body{font:14px/1.6 "PingFang SC",sans-serif;color:#0f172a;background:#f8fafc;margin:24px}
-h1{font-size:20px;margin:0 0 16px}table{width:100%;border-collapse:collapse;background:#fff}
-th,td{border:1px solid #e2e8f0;padding:8px;vertical-align:top;text-align:left}
-th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
-</style></head><body><h1>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u5386\u53F2\u5BFC\u51FA</h1>
-<table><thead><tr><th>\u65F6\u95F4</th><th>\u9898\u53F7</th><th>\u94FE\u8DEF</th><th>\u72B6\u6001</th><th>\u5F97\u5206</th><th>\u5C0F\u9898\u5206</th><th>\u4F9D\u636E</th><th>\u6807\u8BB0</th></tr></thead><tbody>${rows}</tbody></table>
-</body></html>`;
+  <html lang="zh-CN"><head><meta charset="utf-8"><title>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u5386\u53F2\u5BFC\u51FA</title>
+  <style>
+  body{font:14px/1.6 "PingFang SC",sans-serif;color:#0f172a;background:#f8fafc;margin:24px}
+  h1{font-size:20px;margin:0 0 16px}table{width:100%;border-collapse:collapse;background:#fff}
+  th,td{border:1px solid #e2e8f0;padding:8px;vertical-align:top;text-align:left}
+  th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
+  .zygr-summary{margin:0 0 14px;padding:10px 12px;border-radius:10px;background:#eef2ff;color:#3730a3;font-size:13px}
+  </style></head><body><h1>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u5386\u53F2\u5BFC\u51FA</h1>
+  <p class="zygr-summary">${escapeHtml(summaryText(entries))}</p>
+  <table><thead><tr><th>\u65F6\u95F4</th><th>\u9898\u53F7</th><th>\u94FE\u8DEF</th><th>\u6A21\u578B</th><th>\u72B6\u6001</th><th>\u5F97\u5206</th><th>\u5C0F\u9898\u5206</th><th>\u4F9D\u636E</th><th>\u8F93\u5165 Token</th><th>\u524D\u7F00\u547D\u4E2D</th><th>\u8F93\u51FA Token</th><th>\u601D\u8003 Token</th><th>\u547D\u4E2D</th><th>\u8017\u65F6\uFF08\u79D2\uFF09</th><th>\u6807\u8BB0</th></tr></thead><tbody>${rows}</tbody></table>
+  </body></html>`;
   }
   function downloadText(filename, content, mime) {
     const blob = new Blob([content], { type: mime });
@@ -1557,41 +1636,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       });
     });
   }
-  function contentBox(ctx, width, height) {
-    try {
-      const data = ctx.getImageData(0, 0, width, height).data;
-      let minX = width;
-      let minY = height;
-      let maxX = 0;
-      let maxY = 0;
-      let found = false;
-      for (let y2 = 0; y2 < height; y2 += 2) {
-        for (let x2 = 0; x2 < width; x2 += 2) {
-          const index = (y2 * width + x2) * 4;
-          const alpha = data[index + 3];
-          const brightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
-          if (alpha > 32 && brightness < 245) {
-            found = true;
-            if (x2 < minX) minX = x2;
-            if (y2 < minY) minY = y2;
-            if (x2 > maxX) maxX = x2;
-            if (y2 > maxY) maxY = y2;
-          }
-        }
-      }
-      if (!found) return null;
-      // 留够边距，避免裁掉贴在边缘的作答与跨栏标注。
-      const pad = Math.max(6, Math.floor(Math.min(width, height) * 0.06));
-      const x = Math.max(0, minX - pad);
-      const y = Math.max(0, minY - pad);
-      const w = Math.min(width, maxX + pad + 1) - x;
-      const h = Math.min(height, maxY + pad + 1) - y;
-      if (w < 32 || h < 32 || w * h > width * height * 0.72) return null;
-      return { x, y, w, h };
-    } catch {
-      return null;
-    }
-  }
   function blankRatio(ctx, width, height) {
     try {
       const data = ctx.getImageData(0, 0, width, height).data;
@@ -1605,18 +1649,6 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     } catch {
       return 0;
     }
-  }
-  // 宽扁的作答条在视觉模型里会被"短边拉到 768"规则放大宽度，tile 数暴涨。
-  // 切成等宽小块后按网格重排成接近方形的版面，tile 数可降到 1/3 左右。
-  function stripLayout(width, height) {
-    const ratio = height > 0 ? width / height : 0;
-    // 阈值取 3.2：常见的"两个空并排"宽条约 2.5～3，绝不能切，否则会打乱空的对应关系。
-    if (ratio <= 3.2 || height < 200) return null;
-    const rows = Math.max(1, Math.round(Math.sqrt(ratio)));
-    const cols = Math.max(1, Math.ceil(ratio / rows));
-    const pieces = rows * cols;
-    if (pieces < 2 || pieces > 16) return null;
-    return { rows, cols, pieces };
   }
   // 学科策略：公式/符号密集的学科保分辨率；文字为主的科目适度收敛以省 token。
   // 只在用户明确选了学科时生效，detail 一律高精度，避免手写小字被糊掉。
@@ -1641,10 +1673,7 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     const resolved = {
       maxEdge: Math.min(2400, Math.max(600, positive(image.maxEdge, 1600))),
       quality: Math.min(1, Math.max(0.5, positive(image.quality, 0.82))),
-      detail: ["high", "auto", "low"].includes(image.detail) ? image.detail : "high",
-      cropToAnswer: image.cropToAnswer === true,
-      splitWideStrip: image.splitWideStrip === true,
-      mergeImages: image.mergeImages === true
+      detail: ["high", "auto", "low"].includes(image.detail) ? image.detail : "high"
     };
     const subject = String(config?.context?.subject || "").trim();
     const preset = image.autoBySubject === false ? null : SUBJECT_IMAGE_PROFILES[subject];
@@ -1667,45 +1696,14 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
     if (!workCtx) throw new Error("\u65E0\u6CD5\u521B\u5EFA\u753B\u5E03\u4E0A\u4E0B\u6587");
     workCtx.drawImage(image, 0, 0);
     const ratio = blankRatio(workCtx, sourceWidth, sourceHeight);
-    let sx = 0;
-    let sy = 0;
-    let sw = sourceWidth;
-    let sh = sourceHeight;
-    if (config.cropToAnswer) {
-      const box = contentBox(workCtx, sourceWidth, sourceHeight);
-      if (box) {
-        sx = box.x;
-        sy = box.y;
-        sw = box.w;
-        sh = box.h;
-      }
-    }
-    const layout = config.splitWideStrip === false ? null : stripLayout(sw, sh);
-    const gap = 16;
-    const piecesW = layout ? sw / layout.pieces : sw;
-    const boardW = layout ? layout.cols * piecesW : sw;
-    const boardH = layout ? layout.rows * sh + (layout.rows - 1) * gap : sh;
-    const scale = Math.min(1, config.maxEdge / Math.max(boardW, boardH));
+    // 只做等比缩小，绝不放大：放大不会带来新信息，只会被服务商的短边归一化规则再插值一次。
+    const scale = Math.min(1, config.maxEdge / Math.max(sourceWidth, sourceHeight));
     const output = document.createElement("canvas");
-    output.width = Math.max(1, Math.round(boardW * scale));
-    output.height = Math.max(1, Math.round(boardH * scale));
+    output.width = Math.max(1, Math.round(sourceWidth * scale));
+    output.height = Math.max(1, Math.round(sourceHeight * scale));
     const outputCtx = output.getContext("2d");
     if (!outputCtx) throw new Error("\u65E0\u6CD5\u521B\u5EFA\u753B\u5E03\u4E0A\u4E0B\u6587");
-    if (layout) {
-      // 左上到右下按原顺序重排，阅读顺序不乱；块间留白避免笔画粘连。
-      for (let index = 0; index < layout.pieces; index += 1) {
-        const col = index % layout.cols;
-        const row = Math.floor(index / layout.cols);
-        outputCtx.drawImage(
-          work,
-          sx + index * piecesW, sy, piecesW, sh,
-          Math.round(col * piecesW * scale), Math.round(row * (sh + gap) * scale),
-          Math.ceil(piecesW * scale), Math.ceil(sh * scale)
-        );
-      }
-    } else {
-      outputCtx.drawImage(work, sx, sy, sw, sh, 0, 0, output.width, output.height);
-    }
+    outputCtx.drawImage(work, 0, 0, output.width, output.height);
     const encoded = output.toDataURL("image/jpeg", Math.min(1, Math.max(0.5, config.quality)));
     return {
       dataUrl: encoded,
@@ -1713,61 +1711,9 @@ th{background:#eef2ff;color:#3730a3}tr:nth-child(even){background:#f8fafc}
       width: output.width,
       height: output.height,
       blankRatio: ratio,
-      // 只有"原图本来够清晰、被我们缩到看不清"才算问题；
-      // 宽扁作答条本身短边就小，属正常，不再误报。
-      lowRes: Math.min(output.width, output.height) < 320 && Math.min(sourceWidth, sourceHeight) >= 320,
-      restructured: Boolean(layout)
+      // 只有"原图本来够清晰、被我们缩到看不清"才算问题；题块裁切图本身短边就小，属正常。
+      lowRes: Math.min(output.width, output.height) < 320 && Math.min(sourceWidth, sourceHeight) >= 320
     };
-  }
-  // 同题多图按顺序两两纵向拼成一张：省掉每张图的固定开销与 tile 取整浪费。
-  // 拼后过高则放弃合并，避免整页被缩到短边 768 后手写发糊。
-  async function mergePreparedImages(images, options) {
-    if (!options?.mergeImages || !Array.isArray(images) || images.length < 2) return images;
-    const merged = [];
-    for (let index = 0; index < images.length; index += 2) {
-      const first = images[index];
-      const second = images[index + 1];
-      if (!second) {
-        merged.push(first);
-        continue;
-      }
-      // 只有两张图都足够清晰时才合并，否则单页有效分辨率会掉到看不清手写。
-      if (Math.min(first.width, first.height, second.width, second.height) < 1100) {
-        merged.push(first, second);
-        continue;
-      }
-      const width = Math.max(first.width, second.width);
-      const gap = Math.max(16, Math.round(Math.min(first.width, second.width) * 0.03));
-      const height = first.height + second.height + gap;
-      if (height > width * 2.4) {
-        merged.push(first, second);
-        continue;
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const context = canvas.getContext("2d");
-      if (!context) {
-        merged.push(first, second);
-        continue;
-      }
-      context.fillStyle = "#ffffff";
-      context.fillRect(0, 0, width, height);
-      context.drawImage(await loadImage(first.dataUrl), 0, 0, first.width, first.height);
-      context.drawImage(await loadImage(second.dataUrl), 0, first.height + gap, second.width, second.height);
-      const dataUrl = canvas.toDataURL("image/jpeg", Math.min(1, Math.max(0.5, options.quality)));
-      merged.push({
-        dataUrl,
-        hash: await sha256(dataUrl),
-        width,
-        height,
-        blankRatio: Math.min(first.blankRatio, second.blankRatio),
-        lowRes: Boolean(first.lowRes || second.lowRes),
-        restructured: true,
-        mergedCount: 2
-      });
-    }
-    return merged;
   }
   function dedupePrepared(images) {
     const seen = /* @__PURE__ */ new Set();
@@ -1955,7 +1901,7 @@ ${subQuestionLines(question)}`,
     const prepared = [];
     for (const src of rawImages) {
       try {
-        const image = await prepareImage(src, { ...(imageConfig || {}), cropToAnswer: false });
+        const image = await prepareImage(src, imageConfig || {});
         if (image?.dataUrl) prepared.push(image);
       } catch { /* \u56FE\u7247\u5904\u7406\u5931\u8D25\u5219\u8DF3\u8FC7 */ }
     }
@@ -2151,28 +2097,11 @@ async function gradeQuestion(options) {
   const maxScore = config.context.maxScore > 0 ? config.context.maxScore : question.maxScore;
   const gradeService = config.pipeline.vlm;
   if (!configured(gradeService)) throw new Error("\u6279\u6539\u670D\u52A1\u672A\u914D\u7F6E\u5B8C\u6574\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u591A\u6A21\u6001\u670D\u52A1\u7684\u63A5\u53E3\u5730\u5740\u4E0E\u6A21\u578B");
-  stage("\u51C6\u5907\u4F5C\u7B54\u56FE\u7247");
   // 学科策略优先于手动尺寸；未选学科时完全按手动参数。
   const imageOptions = resolveImageOptions(config);
-  const preparedList = (await Promise.all(
-    question.images.map((src) => prepareImage(src, imageOptions).catch(() => null))
-  )).filter((item) => item !== null);
-  const prepared = dedupePrepared(preparedList);
-  const removed = prepared.filter((image) => isBlankImage(image) || isWasteImage(image));
-  const usable = prepared.filter((image) => !isBlankImage(image) && !isWasteImage(image));
-  if (removed.length > 0) reviewReasons.push(`\u5DF2\u5254\u9664 ${removed.length} \u5F20\u5E9F\u56FE`);
-  const lowResCount = usable.filter((image) => image.lowRes).length;
-  if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
-  if (imageOptions.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
-  if (usable.length === 0) {
-    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF0C\u8BF7\u7B49\u5F85\u9605\u5377\u9875\u56FE\u7247\u52A0\u8F7D\u5B8C\u6210\u540E\u91CD\u8BD5");
-  }
-  const payloadImages = await mergePreparedImages(usable, imageOptions);
   const outputMode = normalizeOutputMode(config.pipeline?.outputMode);
-  const prompt = buildGradingPrompt(question, config.context, {
-    outputMode,
-    removedImages: removed.length
-  });
+  // 缓存键只依赖原始作答图地址与批改参数，与图片预处理结果无关。
+  // 先查缓存能在命中时跳过下载与缩放：双评第二遍几乎不用等图。
   const cacheKey = makeGradeCacheKey({
     question,
     context: config.context,
@@ -2188,6 +2117,25 @@ async function gradeQuestion(options) {
     recordUsage({ graded: true, localHit: true });
     return { ...cached, cacheHit: true, elapsedMs: Date.now() - startedAt, cacheKey, usage: null };
   }
+  stage("\u51C6\u5907\u4F5C\u7B54\u56FE\u7247");
+  const preparedList = (await Promise.all(
+    question.images.map((src) => prepareImage(src, imageOptions).catch(() => null))
+  )).filter((item) => item !== null);
+  const prepared = dedupePrepared(preparedList);
+  const removed = prepared.filter((image) => isBlankImage(image) || isWasteImage(image));
+  const usable = prepared.filter((image) => !isBlankImage(image) && !isWasteImage(image));
+  if (removed.length > 0) reviewReasons.push(`\u5DF2\u5254\u9664 ${removed.length} \u5F20\u5E9F\u56FE`);
+  const lowResCount = usable.filter((image) => image.lowRes).length;
+  if (lowResCount > 0) reviewReasons.push(`\u6709 ${lowResCount} \u5F20\u56FE\u7247\u5206\u8FA8\u7387\u504F\u4F4E\uFF0C\u624B\u5199\u5C0F\u5B57\u53EF\u80FD\u8BC6\u522B\u4E0D\u51C6`);
+  if (imageOptions.detail === "low") reviewReasons.push("\u56FE\u7247\u4F7F\u7528\u4F4E\u7CBE\u5EA6\u6A21\u5F0F\uFF0C\u5206\u6570\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
+  if (usable.length === 0) {
+    throw new Error("\u672A\u83B7\u53D6\u5230\u53EF\u7528\u4F5C\u7B54\u56FE\u7247\uFF0C\u8BF7\u7B49\u5F85\u9605\u5377\u9875\u56FE\u7247\u52A0\u8F7D\u5B8C\u6210\u540E\u91CD\u8BD5");
+  }
+  const payloadImages = usable;
+  const prompt = buildGradingPrompt(question, config.context, {
+    outputMode,
+    removedImages: removed.length
+  });
   stage("\u6A21\u578B\u8BC4\u5206", gradeService.model);
   const grade = await runGrade(gradeService, question, maxScore, prompt, payloadImages, config, rateLimiter, imageOptions, forcedByModel);
   if (grade.status === "blank" && grade.score > 0) {
@@ -2212,7 +2160,8 @@ async function gradeQuestion(options) {
     request: true,
     prompt: grade.usage?.prompt || 0,
     cached: grade.usage?.cached || 0,
-    completion: grade.usage?.completion || 0
+    completion: grade.usage?.completion || 0,
+    reasoning: grade.usage?.reasoning || 0
   });
   return result;
 }
@@ -2429,6 +2378,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 }
 .zygr-field input:focus, .zygr-field select:focus { border-color: var(--zygr-primary); box-shadow: 0 0 0 3px var(--zygr-glow); }
 .zygr-hint { font-size: 11px; color: var(--zygr-muted); line-height: 1.6; }
+.zygr-summary { margin: -6px 0 0; font-size: 11px; color: var(--zygr-muted); line-height: 1.6; }
 .zygr-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 [data-model-options] { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 [data-model-options] select { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid var(--zygr-line); border-radius: 8px; background: #fff; color: var(--zygr-text); font-size: 13px; }
@@ -2726,6 +2676,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           <select data-filter="review" aria-label="\u590D\u6838\u7B5B\u9009"><option value="">\u5168\u90E8\u72B6\u6001</option><option value="review">\u9700\u590D\u6838</option><option value="normal">\u6B63\u5E38</option></select>
           <input data-filter="keyword" type="search" placeholder="\u641C\u7D22\u9898\u53F7\u6216\u4F9D\u636E" aria-label="\u641C\u7D22">
         </div>
+        <div class="zygr-summary" data-summary></div>
         <div class="zygr-history-grid">
           <div class="zygr-history-list"><div class="zygr-list" data-list></div></div>
           <div class="zygr-card zygr-history-detail" data-detail><div class="zygr-empty">\u9009\u62E9\u4E00\u6761\u8BB0\u5F55\u67E5\u770B\u8BE6\u60C5</div></div>
@@ -2776,6 +2727,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       const list = this.q("[data-list]");
       list.replaceChildren();
       const entries = this.filtered();
+      // 汇总只统计当前筛选结果，方便核对某个范围内的输入/输出与命中情况。
+      this.q("[data-summary]").textContent = summaryText(entries);
       if (entries.length === 0) {
         const empty = document.createElement("div");
         empty.className = "zygr-empty";
@@ -2805,10 +2758,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       }
       const detail = document.createElement("div");
       detail.className = "zygr-detail";
+      const usage = entryUsage(entry);
       const lines = [
         `\u9898\u53F7\uFF1A${entry.question.questionId}`,
         `\u94FE\u8DEF / \u6A21\u578B\uFF1A${entry.result.pipeline} / ${entry.result.model}`,
         `\u7ED3\u679C\uFF1A${entry.result.score} / ${entry.result.maxScore}\uFF08${entry.result.status}\uFF09`,
+        `\u7528\u91CF\uFF1A\u8F93\u5165 ${usage.prompt}${usage.cached ? `\uFF08\u524D\u7F00\u547D\u4E2D ${usage.cached}\uFF09` : ""} \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`,
+        `\u7F13\u5B58 / \u8017\u65F6\uFF1A${entryHitText(entry)} / ${entryElapsed(entry)}s`,
         `\u4F9D\u636E\uFF1A${entry.result.reason || "\u65E0"}`,
         `\u590D\u6838\uFF1A${entry.result.reviewReasons.join("\uFF1B") || "\u65E0"}`,
         `\u5C0F\u9898\uFF1A${entry.result.subScores.map((item) => `${item.label} ${item.score}/${item.maxScore}`).join("\uFF1B") || "\u65E0"}`
@@ -2946,11 +2902,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
             ${field("\u7F13\u5B58\u6709\u6548\u671F\uFF08\u5929\uFF09", "cacheTtlDays", "number")}
             ${field("\u7F13\u5B58\u6761\u6570\u4E0A\u9650", "cacheMaxEntries", "number")}
           </div>
-          <label class="zygr-row"><input type="checkbox" data-field="image.cropToAnswer"> \u81EA\u52A8\u88C1\u5207\u7A7A\u767D\u8FB9\u8DDD\uFF08\u9ED8\u8BA4\u5173\u95ED\uFF1B\u5F00\u542F\u540E\u4FDD\u7559 6% \u8FB9\u8DDD\uFF09</label>
-          <label class="zygr-row"><input type="checkbox" data-field="image.splitWideStrip"> \u5BBD\u6241\u4F5C\u7B54\u6761\u5207\u5757\u91CD\u6392\uFF08\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4EC5\u5F53\u5E76\u6392\u5C0F\u7A7A\u4F1A\u88AB\u6253\u4E71\uFF0C\u52FF\u5F00\uFF09</label>
           <label class="zygr-row"><input type="checkbox" data-field="image.autoBySubject"> \u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF08\u5DF2\u9009\u5B66\u79D1\u65F6\u751F\u6548\uFF09</label>
-          <label class="zygr-row"><input type="checkbox" data-field="image.mergeImages"> \u540C\u9898\u591A\u56FE\u5408\u5E76\u6210\u4E00\u5F20\uFF08\u7701\u56FA\u5B9A\u5F00\u9500\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u4F1A\u7565\u964D\u5355\u9875\u6E05\u6670\u5EA6\uFF09</label>
-          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u8F93\u51FA\u6863\u4F4D\u76F4\u63A5\u5F71\u54CD\u8F93\u51FA token\uFF1A\u7B80\u7565\u6700\u7701\u3001\u6807\u51C6\u9002\u4E2D\u3001\u8BE6\u7EC6\u6700\u8D35\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\uFF1B\u591A\u56FE\u5408\u5E76\u4EC5\u5728\u4E24\u5F20\u56FE\u90FD\u4E0D\u5C0F\u4E8E 1100px \u4E14\u5408\u5E76\u540E\u4E0D\u8FC7\u9AD8\u65F6\u751F\u6548\uFF0C\u5426\u5219\u81EA\u52A8\u653E\u5F03\u3002\u88C1\u5207\u4E0E\u5207\u5757\u91CD\u6392\u4F1A\u6539\u53D8\u7248\u9762\uFF0C\u9ED8\u8BA4\u5173\u95ED\uFF0C\u5E76\u6392\u5C0F\u7A7A\u9898\u578B\u4E0D\u5EFA\u8BAE\u5F00\u542F\u3002</p>
+          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u8F93\u51FA\u6863\u4F4D\u76F4\u63A5\u5F71\u54CD\u8F93\u51FA token\uFF1A\u7B80\u7565\u6700\u7701\u3001\u6807\u51C6\u9002\u4E2D\u3001\u8BE6\u7EC6\u6700\u8D35\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\u3002\u56FE\u7247\u53EA\u6309\u957F\u8FB9\u7B49\u6BD4\u7F29\u5C0F\uFF0C\u7EDD\u4E0D\u653E\u5927\uFF1A\u539F\u56FE\u672C\u6765\u5C31\u5C0F\u4E8E\u8BE5\u957F\u8FB9\u65F6\u4FDD\u6301\u539F\u59CB\u50CF\u7D20\uFF0C\u4EA4\u7ED9\u670D\u52A1\u5546\u5F52\u4E00\u5316\u4E5F\u4E0D\u4F1A\u4E22\u4FE1\u606F\u3002</p>
           <p class="zygr-hint" data-stats>\u7D2F\u8BA1\u7528\u91CF\uFF1A\u6682\u65E0</p>
           <h3>\u9650\u901F\u4E0E\u8D85\u65F6</h3>
           <div class="zygr-grid">
@@ -3111,7 +3064,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       }
       const hitRate = stats.graded > 0 ? Math.round((stats.localHits / stats.graded) * 100) : 0;
       const cacheRate = stats.promptTokens > 0 ? Math.round((stats.cachedTokens / stats.promptTokens) * 100) : 0;
-      element.textContent = `\u7D2F\u8BA1\uFF1A\u6279\u6539 ${stats.graded} \u6B21 \xB7 \u672C\u5730\u547D\u4E2D ${stats.localHits} \u6B21\uFF08${hitRate}%\uFF09 \xB7 \u8BF7\u6C42 ${stats.requests} \u6B21 \xB7 \u8F93\u5165 ${stats.promptTokens} token\uFF08\u524D\u7F00\u547D\u4E2D ${stats.cachedTokens}\uFF0C${cacheRate}%\uFF09 \xB7 \u8F93\u51FA ${stats.completionTokens} token`;
+      const reasoning = stats.reasoningTokens > 0 ? ` \xB7 \u601D\u8003 ${stats.reasoningTokens} token` : "";
+      element.textContent = `\u7D2F\u8BA1\uFF1A\u6279\u6539 ${stats.graded} \u6B21 \xB7 \u672C\u5730\u547D\u4E2D ${stats.localHits} \u6B21\uFF08${hitRate}%\uFF09 \xB7 \u8BF7\u6C42 ${stats.requests} \u6B21 \xB7 \u8F93\u5165 ${stats.promptTokens} token\uFF08\u524D\u7F00\u547D\u4E2D ${stats.cachedTokens}\uFF0C${cacheRate}%\uFF09 \xB7 \u8F93\u51FA ${stats.completionTokens} token${reasoning}`;
     }
     refreshPlatformSelects() {
       const presets = listPlatformPresets();
@@ -3622,6 +3576,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       const history = loadHistory().map((entry) => entry.id === lastHistoryId ? { ...entry, result: lastResult, submitted: true } : entry);
       writeJson(STORAGE_KEYS.history, history);
       historyPanel.refresh(history);
+      // 把人工改过的分数回写缓存：双评换第二个账号时命中缓存拿到的是最终分，而不是模型原始分。
+      if (cache && lastResult.cacheKey) cache.set(lastResult.cacheKey, lastResult);
       lastResult = null;
       panel.setSubtitle(options.silent ? "\u8FDE\u7EED\u6279\u9605\u4E2D" : "\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u4E0B\u4E00\u4EFD");
       if (options.silent) {

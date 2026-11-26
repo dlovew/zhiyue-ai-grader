@@ -44,41 +44,6 @@
       });
     });
   }
-  function contentBox(ctx, width, height) {
-    try {
-      const data = ctx.getImageData(0, 0, width, height).data;
-      let minX = width;
-      let minY = height;
-      let maxX = 0;
-      let maxY = 0;
-      let found = false;
-      for (let y2 = 0; y2 < height; y2 += 2) {
-        for (let x2 = 0; x2 < width; x2 += 2) {
-          const index = (y2 * width + x2) * 4;
-          const alpha = data[index + 3];
-          const brightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
-          if (alpha > 32 && brightness < 245) {
-            found = true;
-            if (x2 < minX) minX = x2;
-            if (y2 < minY) minY = y2;
-            if (x2 > maxX) maxX = x2;
-            if (y2 > maxY) maxY = y2;
-          }
-        }
-      }
-      if (!found) return null;
-      // 留够边距，避免裁掉贴在边缘的作答与跨栏标注。
-      const pad = Math.max(6, Math.floor(Math.min(width, height) * 0.06));
-      const x = Math.max(0, minX - pad);
-      const y = Math.max(0, minY - pad);
-      const w = Math.min(width, maxX + pad + 1) - x;
-      const h = Math.min(height, maxY + pad + 1) - y;
-      if (w < 32 || h < 32 || w * h > width * height * 0.72) return null;
-      return { x, y, w, h };
-    } catch {
-      return null;
-    }
-  }
   function blankRatio(ctx, width, height) {
     try {
       const data = ctx.getImageData(0, 0, width, height).data;
@@ -92,18 +57,6 @@
     } catch {
       return 0;
     }
-  }
-  // 宽扁的作答条在视觉模型里会被"短边拉到 768"规则放大宽度，tile 数暴涨。
-  // 切成等宽小块后按网格重排成接近方形的版面，tile 数可降到 1/3 左右。
-  function stripLayout(width, height) {
-    const ratio = height > 0 ? width / height : 0;
-    // 阈值取 3.2：常见的"两个空并排"宽条约 2.5～3，绝不能切，否则会打乱空的对应关系。
-    if (ratio <= 3.2 || height < 200) return null;
-    const rows = Math.max(1, Math.round(Math.sqrt(ratio)));
-    const cols = Math.max(1, Math.ceil(ratio / rows));
-    const pieces = rows * cols;
-    if (pieces < 2 || pieces > 16) return null;
-    return { rows, cols, pieces };
   }
   // 学科策略：公式/符号密集的学科保分辨率；文字为主的科目适度收敛以省 token。
   // 只在用户明确选了学科时生效，detail 一律高精度，避免手写小字被糊掉。
@@ -128,10 +81,7 @@
     const resolved = {
       maxEdge: Math.min(2400, Math.max(600, positive(image.maxEdge, 1600))),
       quality: Math.min(1, Math.max(0.5, positive(image.quality, 0.82))),
-      detail: ["high", "auto", "low"].includes(image.detail) ? image.detail : "high",
-      cropToAnswer: image.cropToAnswer === true,
-      splitWideStrip: image.splitWideStrip === true,
-      mergeImages: image.mergeImages === true
+      detail: ["high", "auto", "low"].includes(image.detail) ? image.detail : "high"
     };
     const subject = String(config?.context?.subject || "").trim();
     const preset = image.autoBySubject === false ? null : SUBJECT_IMAGE_PROFILES[subject];
@@ -154,45 +104,14 @@
     if (!workCtx) throw new Error("\u65E0\u6CD5\u521B\u5EFA\u753B\u5E03\u4E0A\u4E0B\u6587");
     workCtx.drawImage(image, 0, 0);
     const ratio = blankRatio(workCtx, sourceWidth, sourceHeight);
-    let sx = 0;
-    let sy = 0;
-    let sw = sourceWidth;
-    let sh = sourceHeight;
-    if (config.cropToAnswer) {
-      const box = contentBox(workCtx, sourceWidth, sourceHeight);
-      if (box) {
-        sx = box.x;
-        sy = box.y;
-        sw = box.w;
-        sh = box.h;
-      }
-    }
-    const layout = config.splitWideStrip === false ? null : stripLayout(sw, sh);
-    const gap = 16;
-    const piecesW = layout ? sw / layout.pieces : sw;
-    const boardW = layout ? layout.cols * piecesW : sw;
-    const boardH = layout ? layout.rows * sh + (layout.rows - 1) * gap : sh;
-    const scale = Math.min(1, config.maxEdge / Math.max(boardW, boardH));
+    // 只做等比缩小，绝不放大：放大不会带来新信息，只会被服务商的短边归一化规则再插值一次。
+    const scale = Math.min(1, config.maxEdge / Math.max(sourceWidth, sourceHeight));
     const output = document.createElement("canvas");
-    output.width = Math.max(1, Math.round(boardW * scale));
-    output.height = Math.max(1, Math.round(boardH * scale));
+    output.width = Math.max(1, Math.round(sourceWidth * scale));
+    output.height = Math.max(1, Math.round(sourceHeight * scale));
     const outputCtx = output.getContext("2d");
     if (!outputCtx) throw new Error("\u65E0\u6CD5\u521B\u5EFA\u753B\u5E03\u4E0A\u4E0B\u6587");
-    if (layout) {
-      // 左上到右下按原顺序重排，阅读顺序不乱；块间留白避免笔画粘连。
-      for (let index = 0; index < layout.pieces; index += 1) {
-        const col = index % layout.cols;
-        const row = Math.floor(index / layout.cols);
-        outputCtx.drawImage(
-          work,
-          sx + index * piecesW, sy, piecesW, sh,
-          Math.round(col * piecesW * scale), Math.round(row * (sh + gap) * scale),
-          Math.ceil(piecesW * scale), Math.ceil(sh * scale)
-        );
-      }
-    } else {
-      outputCtx.drawImage(work, sx, sy, sw, sh, 0, 0, output.width, output.height);
-    }
+    outputCtx.drawImage(work, 0, 0, output.width, output.height);
     const encoded = output.toDataURL("image/jpeg", Math.min(1, Math.max(0.5, config.quality)));
     return {
       dataUrl: encoded,
@@ -200,61 +119,9 @@
       width: output.width,
       height: output.height,
       blankRatio: ratio,
-      // 只有"原图本来够清晰、被我们缩到看不清"才算问题；
-      // 宽扁作答条本身短边就小，属正常，不再误报。
-      lowRes: Math.min(output.width, output.height) < 320 && Math.min(sourceWidth, sourceHeight) >= 320,
-      restructured: Boolean(layout)
+      // 只有"原图本来够清晰、被我们缩到看不清"才算问题；题块裁切图本身短边就小，属正常。
+      lowRes: Math.min(output.width, output.height) < 320 && Math.min(sourceWidth, sourceHeight) >= 320
     };
-  }
-  // 同题多图按顺序两两纵向拼成一张：省掉每张图的固定开销与 tile 取整浪费。
-  // 拼后过高则放弃合并，避免整页被缩到短边 768 后手写发糊。
-  async function mergePreparedImages(images, options) {
-    if (!options?.mergeImages || !Array.isArray(images) || images.length < 2) return images;
-    const merged = [];
-    for (let index = 0; index < images.length; index += 2) {
-      const first = images[index];
-      const second = images[index + 1];
-      if (!second) {
-        merged.push(first);
-        continue;
-      }
-      // 只有两张图都足够清晰时才合并，否则单页有效分辨率会掉到看不清手写。
-      if (Math.min(first.width, first.height, second.width, second.height) < 1100) {
-        merged.push(first, second);
-        continue;
-      }
-      const width = Math.max(first.width, second.width);
-      const gap = Math.max(16, Math.round(Math.min(first.width, second.width) * 0.03));
-      const height = first.height + second.height + gap;
-      if (height > width * 2.4) {
-        merged.push(first, second);
-        continue;
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const context = canvas.getContext("2d");
-      if (!context) {
-        merged.push(first, second);
-        continue;
-      }
-      context.fillStyle = "#ffffff";
-      context.fillRect(0, 0, width, height);
-      context.drawImage(await loadImage(first.dataUrl), 0, 0, first.width, first.height);
-      context.drawImage(await loadImage(second.dataUrl), 0, first.height + gap, second.width, second.height);
-      const dataUrl = canvas.toDataURL("image/jpeg", Math.min(1, Math.max(0.5, options.quality)));
-      merged.push({
-        dataUrl,
-        hash: await sha256(dataUrl),
-        width,
-        height,
-        blankRatio: Math.min(first.blankRatio, second.blankRatio),
-        lowRes: Boolean(first.lowRes || second.lowRes),
-        restructured: true,
-        mergedCount: 2
-      });
-    }
-    return merged;
   }
   function dedupePrepared(images) {
     const seen = /* @__PURE__ */ new Set();
