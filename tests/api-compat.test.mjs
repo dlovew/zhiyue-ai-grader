@@ -91,6 +91,9 @@ function exportSample() {
       id: 'h2',
       createdAt: Date.UTC(2026, 0, 2, 3, 5, 6),
       submitted: false,
+      reviewedAt: Date.UTC(2026, 0, 2, 4, 0, 0),
+      confirmedScore: 2.5,
+      reviewNote: '已核对',
       question: {
         questionId: 'Q2,含逗号"引号',
         topicNumStr: '43,1',
@@ -254,9 +257,56 @@ function loadHook() {
     .map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n'))
     .join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__hook = { handleHookResponse, hookField, hookIdentity, hookUrlsFrom, hookIdentityKey, freshAnswerImages, currentHookIdentity, nextHookIdentity, hookState, hookActive, commitFeed, pushCommitSignal, resetCommitSignal, waitCommitSignal, resolveMaxScore, checkMaxScore, currentScanRecordId };`, context);
+  vm.runInContext(`${code}\n;globalThis.__hook = { handleHookResponse, hookField, hookIdentity, hookUrlsFrom, hookIdentityKey, freshAnswerImages, currentHookIdentity, nextHookIdentity, hookState, hookActive, commitFeed, pushCommitSignal, resetCommitSignal, waitCommitSignal, resolveMaxScore, checkMaxScore, currentScanRecordId, hookProgress, readProgress };`, context);
   return context.__hook;
 }
+
+// 2026-11 真机取样（字段已裁剪，结构一致）
+const REAL_DETAIL = {
+  code: 200,
+  msg: '操作成功',
+  data: {
+    topicNum: '43,1',
+    topicInfo: {
+      detail: {
+        scanRecordId: '91118d7a-ef5d-4d15-9a1e-e03cd5df23f7',
+        userCode: '14801889',
+        topicNums: [43],
+        topicImageIds: ['https://zhixue-sc.oss-cn-hangzhou.aliyuncs.com/a.jpg?Expires=1795682628&Signature=x&x-oss-process=image%2Fcrop%2Cx_91%2Cy_941%2Cw_913%2Ch_67'],
+        paperImgIds: ['scDV2dv_marking/scanFile/a.jpg']
+      },
+      item: { subTopicScore: 2 },
+      topicNumStr: '43,1',
+      topicNum: [43, 1]
+    },
+    hasPrev: true,
+    hasNext: false,
+    markingCount: 533,
+    teacherTopic: [
+      { topicNumStr: '43,1', teacherTodo: 147, teacherMarked: 533 },
+      { topicNumStr: '43,2', teacherTodo: 147, teacherMarked: 0 }
+    ],
+    cutBlock: { subTopicScore: 2, topicNumStr: '43,1', dispTopic: '43(1)' }
+  }
+};
+const REAL_NEXT = {
+  code: 200,
+  data: {
+    topicNum: null,
+    topicInfo: null,
+    nextTopicInfo: {
+      detail: {
+        scanRecordId: '0dcc94c0-2cf6-4d6a-b599-ba4585f6e503',
+        userCode: '14801978',
+        topicImageIds: ['https://zhixue-sc.oss-cn-hangzhou.aliyuncs.com/b.jpg?Expires=1795682629&Signature=y']
+      },
+      topicNumStr: '43,1'
+    },
+    hasPrev: true,
+    hasNext: false,
+    markingCount: 533
+  }
+};
 
 test('后台标签页（visibility=hidden）图片虽无 getClientRects 仍判定可见', () => {
   const { api, image } = loadZhixue({ visibility: 'hidden' });
@@ -591,15 +641,13 @@ test('接口优先同步满分与题号，未装观察器退回 DOM', () => {
   const hook = loadHook();
   // 没有接口数据、DOM 也为空：满分 0，不误判
   assert.equal(hook.resolveMaxScore(null), 0);
-  hook.handleHookResponse('/api/scanrecorddetail/get', JSON.stringify({
-    data: { scanRecordId: 'S1', topicNumStr: '43,1', subTopicScore: 4 }
-  }));
-  assert.equal(hook.resolveMaxScore(null), 4);
+  hook.handleHookResponse('/api/personal/scanrecorddetail/', JSON.stringify(REAL_DETAIL));
+  assert.equal(hook.resolveMaxScore(null), 2);
   const check = hook.checkMaxScore(5, null);
-  assert.equal(check.maxScore, 4);
+  assert.equal(check.maxScore, 2);
   assert.equal(check.mismatch, true);
-  assert.equal(hook.checkMaxScore(4, null).mismatch, false);
-  assert.equal(hook.currentScanRecordId(), 'S1');
+  assert.equal(hook.checkMaxScore(2, null).mismatch, false);
+  assert.equal(hook.currentScanRecordId(), '91118d7a-ef5d-4d15-9a1e-e03cd5df23f7');
 });
 
 test('限流不死等：单次超预算直接拒绝，等待超时有上限', async () => {
@@ -624,6 +672,28 @@ test('finish_reason=length 整次作废，不把空正文当零分', async () =>
     ),
     /finish_reason=length/
   );
+});
+
+test('回评接口与钩子回调已接线，题号靠 scanRecordId 判重', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /markingBack\|markingNext/);
+  assert.match(built, /function onHookUpdate/);
+  assert.match(built, /onHookUpdate\(\(\) => \{/);
+  assert.match(built, /scanRecordId: String\(hookCurrentField\("scanRecordId"\)/);
+  assert.match(built, /currentQuestion\.scanRecordId === question\.scanRecordId/);
+});
+
+test('进度显示与复核留痕已接线', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  // 进度：页面 .progress 文本优先，接口计数兜底
+  assert.match(built, /SELECTORS\.progress/);
+  assert.match(built, /readProgress\(markingDoc\)/);
+  assert.match(built, /id="zygr-progress"/);
+  assert.match(built, /setProgress\(progress \?/);
+  // 复核留痕：历史回调 + 两个按钮
+  assert.match(built, /onReview: \(id, patch\) =>/);
+  assert.match(built, /reviewedAt: Date\.now\(\), reviewNote/);
+  assert.match(built, /confirmedScore: Math\.min\(Math\.max\(value, 0\), max\)/);
 });
 
 test('连续批阅有份数上限，避免无人看管跑到没配额', () => {
@@ -965,22 +1035,41 @@ test('构建产物与 buildOutput() 逐字一致', async () => {
   assert.equal(buildOutput(), readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8'));
 });
 
-test('接口观察器只读解析三接口，current 与 next 不互相覆盖', () => {
+test('接口观察器按真机结构解析 scanrecorddetail / preLoad / commitTopic', () => {
   const hook = loadHook();
   assert.equal(hook.hookActive(), false);
-  hook.handleHookResponse('https://www.zhixue.com/api/commitTopic/commit', '{"result":"success"}');
+  hook.handleHookResponse('https://pt-ali-bj.zhixue.com/marking/marking/commitTopic/', '{"result":"success"}');
   assert.equal(hook.hookActive(), true);
   assert.equal(hook.commitFeed.last.ok, true);
-  hook.handleHookResponse('https://www.zhixue.com/api/scanrecorddetail/get', JSON.stringify({
-    data: { scanRecordId: 'S1', topicNumStr: '43,1', topicImageIds: ['https://oss.example/a.jpg?Signature=x'] }
-  }));
-  assert.equal(hook.hookIdentityKey(), 'S1|43,1');
-  // 跨 vm 域数组无法用 deepEqual 比引用，直接比拼接结果
-  assert.equal(hook.freshAnswerImages().join(','), 'https://oss.example/a.jpg?Signature=x');
+
+  hook.handleHookResponse('https://pt-ali-bj.zhixue.com/marking/marking/personal/scanrecorddetail/', JSON.stringify(REAL_DETAIL));
+  const current = hook.currentHookIdentity();
+  assert.equal(current.scanRecordId, '91118d7a-ef5d-4d15-9a1e-e03cd5df23f7');
+  assert.equal(current.topicNumStr, '43,1');
+  assert.equal(current.userCode, '14801889');
+  // 满分取 cutBlock.subTopicScore（当前小题），不是大题 standardScore
+  assert.equal(current.subTopicScore, 2);
+  assert.equal(hook.resolveMaxScore(null), 2);
+  assert.equal(hook.hookIdentityKey(), '91118d7a-ef5d-4d15-9a1e-e03cd5df23f7|43,1');
+  assert.equal(hook.freshAnswerImages().length, 1);
+  assert.match(hook.freshAnswerImages()[0], /zhixue-sc\.oss/);
+  // 进度来自 teacherMarked / teacherTodo
+  assert.equal(hook.hookProgress().marked, 533);
+  assert.equal(hook.hookProgress().todo, 147);
+
+  // 「回评上一份」走 markingBack，结构与 scanrecorddetail 相同，必须同样接管
+  const back = JSON.parse(JSON.stringify(REAL_DETAIL));
+  back.data.topicInfo.detail.scanRecordId = 'back-1';
+  back.data.cutBlock.subTopicScore = 2;
+  hook.handleHookResponse('https://pt-ali-bj.zhixue.com/marking/marking/personal/markingBack/', JSON.stringify(back));
+  assert.equal(hook.currentHookIdentity().scanRecordId, 'back-1');
+  assert.equal(hook.hookProgress().marked, 533);
+
   // preLoad 只写 next，不能把 current 顶掉（否则换卷判定会错）
-  hook.handleHookResponse('https://www.zhixue.com/api/preLoadScanrecorddetail/get', '{"data":{"scanRecordId":"S2","topicNumStr":"43,2"}}');
-  assert.equal(hook.currentHookIdentity().scanRecordId, 'S1');
-  assert.equal(hook.nextHookIdentity().scanRecordId, 'S2');
+  hook.handleHookResponse('https://pt-ali-bj.zhixue.com/marking/marking/personal/preLoadScanrecorddetail/', JSON.stringify(REAL_NEXT));
+  assert.equal(hook.currentHookIdentity().scanRecordId, 'back-1');
+  assert.equal(hook.nextHookIdentity().scanRecordId, '0dcc94c0-2cf6-4d6a-b599-ba4585f6e503');
+  assert.equal(hook.nextHookIdentity().subTopicScore, null);
 });
 
 test('提交回执非 success 时判为拒绝，早到的回执也能取到', async () => {
@@ -1068,8 +1157,10 @@ test('CSV 导出每行列数与表头一致，汇总行只填合计列', () => {
   const { core } = loadCore();
   const lines = core.toCsv(exportSample()).replace(/^\uFEFF/, '').split('\r\n');
   const header = splitCsvLine(lines[0]);
-  assert.equal(header.length, 21);
-  assert.equal(header[15], '"输入 Token"');
+  assert.equal(header.length, 23);
+  assert.equal(header[17], '"输入 Token"');
+  assert.equal(header[15], '"确认分"');
+  assert.equal(header[16], '"复核状态"');
   // 表头、每条数据、汇总行都必须同宽，否则 Excel 里会错列
   for (const line of lines) assert.equal(splitCsvLine(line).length, header.length, line);
   const csv = lines.join('\n');
@@ -1077,24 +1168,27 @@ test('CSV 导出每行列数与表头一致，汇总行只填合计列', () => {
   assert.match(csv, /"43,1"/);
   assert.match(csv, /"S1"/);
   assert.match(csv, /"U100"/);
+  // 复核留痕随记录导出
+  assert.match(csv, /"2\.5"/);
+  assert.match(csv, /已复核/);
   const summary = splitCsvLine(lines[lines.length - 1]);
   assert.equal(summary[0], '"汇总"');
   assert.equal(summary[1], '"共 2 条"');
-  assert.equal(summary[15], '"1000"');
-  assert.equal(summary[16], '"800"');
-  assert.equal(summary[17], '"180"');
-  assert.equal(summary[18], '"60"');
-  assert.match(summary[19], /本地命中 1 次（50%）/);
+  assert.equal(summary[17], '"1000"');
+  assert.equal(summary[18], '"800"');
+  assert.equal(summary[19], '"180"');
+  assert.equal(summary[20], '"60"');
+  assert.match(summary[21], /本地命中 1 次（50%）/);
 });
 
 test('HTML 导出列数与表头一致，并带用量汇总条', () => {
   const { core } = loadCore();
   const html = core.toHtml(exportSample());
-  assert.equal((html.match(/<th>/g) || []).length, 18);
+  assert.equal((html.match(/<th>/g) || []).length, 20);
   const body = html.split('<tbody>')[1].split('</tbody>')[0];
   const rows = body.split('</tr>').filter((row) => row.includes('<td>'));
   assert.equal(rows.length, 2);
-  for (const row of rows) assert.equal((row.match(/<td>/g) || []).length, 18);
+  for (const row of rows) assert.equal((row.match(/<td>/g) || []).length, 20);
   assert.match(html, /class="zygr-summary"/);
   assert.match(html, /思考 Token/);
   assert.match(html, /耗时（秒）/);

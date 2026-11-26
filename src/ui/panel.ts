@@ -44,7 +44,7 @@
         </div>
       </header>
       <div class="zygr-body">
-        <div class="zygr-statusbar"><span id="zygr-stage">\u5C31\u7EEA</span><span class="zygr-chip" id="zygr-cache">\u5F85\u914D\u7F6E</span></div>
+        <div class="zygr-statusbar"><span id="zygr-stage">\u5C31\u7EEA</span><span id="zygr-progress" hidden></span><span class="zygr-chip" id="zygr-cache">\u5F85\u914D\u7F6E</span></div>
         <div class="zygr-progress"><i id="zygr-bar"></i></div>
         <section class="zygr-card"><div class="zygr-meta" id="zygr-meta">\u5C1A\u672A\u68C0\u6D4B\u5230\u9605\u5377\u9875\u9762</div><div class="zygr-thumbs" id="zygr-thumbs"></div></section>
         <section class="zygr-card" id="zygr-result"><div class="zygr-reason">\u6279\u6539\u7ED3\u679C\u5C06\u663E\u793A\u5728\u8FD9\u91CC</div></section>
@@ -139,6 +139,11 @@
       this.setText("zygr-stage", detail ? `${stage} \xB7 ${detail}` : stage);
       const progress = this.q("#zygr-bar");
       progress.style.width = stage.includes("\u7F13\u5B58\u547D\u4E2D") || stage === "\u5B8C\u6210" ? "100%" : stage.includes("\u8BC4\u5206") ? "70%" : "35%";
+    }
+    setProgress(text) {
+      const element = this.q("#zygr-progress");
+      element.textContent = text || "";
+      element.hidden = !text;
     }
     setCache(label, kind = "idle") {
       const chip = this.q("#zygr-cache");

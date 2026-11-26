@@ -34,7 +34,7 @@ const MODULES = [
 const BANNER = `// ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.0.6
+// @version      1.0.7
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*

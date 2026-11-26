@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.0.6
+// @version      1.0.7
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -30,7 +30,10 @@
     submitButton: "#bnt_save",
     submitText: "\u63D0\u4EA4\u5206\u6570",
     topicIndex: "#currentTopicIndex",
-    scoreTotal: "#containter_topicTxt #totalScore"
+    scoreTotal: "#containter_topicTxt #totalScore",
+    progress: ".progress",
+    reviewPrev: ".pre",
+    reviewNext: ".unnext"
   };
   function mainDoc() {
     return typeof unsafeWindow !== "undefined" ? unsafeWindow.document : document;
@@ -217,6 +220,8 @@
     return {
       questionId: topicNumStr,
       topicNumStr,
+      // 同一小题换人时题号不变，必须靠 scanRecordId 判断是否真的换卷。
+      scanRecordId: String(hookCurrentField("scanRecordId") || ""),
       questionText: heading,
       maxScore,
       subQuestions,
@@ -241,6 +246,17 @@
   }
   function currentScanRecordId() {
     return String(hookCurrentField("scanRecordId") || "");
+  }
+  // 进度：页面文本「初评已阅量/任务量： 532/147」优先，接口 teacherMarked/teacherTodo 兜底。
+  function readProgress(doc) {
+    const root = doc ?? getIframeDoc() ?? mainDoc();
+    const text = root.querySelector(SELECTORS.progress)?.textContent || "";
+    const match = text.match(/已阅量\s*\/\s*任务量\s*[：:]\s*(\d+)\s*\/\s*(\d+)/) || text.match(/(\d+)\s*\/\s*(\d+)/);
+    if (match) return { marked: Number(match[1]), todo: Number(match[2]) };
+    try {
+      if (typeof hookProgress === "function") return hookProgress();
+    } catch { /* 观察器不可用时忽略 */ }
+    return null;
   }
   // 满分以页面/接口为准：不再阻断批改，由上层自动写回配置并提示一行。
   function checkMaxScore(configured2, doc) {
@@ -365,7 +381,9 @@ var ZHIXUE_HOOK_FLAG = "__zygrHooked";
 var HOOK_COMMIT = /commitTopic/i;
 var HOOK_NEXT = /preLoadScanrecorddetail/i;
 var HOOK_CURRENT = /scanrecorddetail/i;
-var hookState = { installed: false, doc: null, current: null, next: null, updatedAt: 0 };
+// 「回评上一份 / 下一份」走的是 markingBack / markingNext，返回结构与 scanrecorddetail 相同。
+var HOOK_NAV = /markingBack|markingNext/i;
+var hookState = { installed: false, doc: null, current: null, next: null, root: null, updatedAt: 0 };
 
 // 平台响应层级不固定，按字段名深搜第一个非空值即可，别假设固定路径。
 function hookField(node, key, depth = 0) {
@@ -386,16 +404,27 @@ function hookField(node, key, depth = 0) {
   }
   return null;
 }
-function hookIdentity(body) {
+// 真机结构（2026-11 取样）：
+// data.topicNumStr / data.topicInfo.topicNumStr = "43,1"
+// data.topicInfo.detail = { scanRecordId, userCode, topicImageIds[签名URL], paperImgIds }
+// data.cutBlock.subTopicScore = 当前小题满分（与打分框 score 属性一致）
+// data.hasPrev / data.hasNext / data.markingCount / data.teacherTopic[]（teacherMarked/teacherTodo）
+// preLoad 返回的是 data.nextTopicInfo，结构与 topicInfo 相同。
+function hookIdentity(body, mode = "current") {
+  const root = body && typeof body === "object" && body.data !== void 0 ? body.data : body;
+  const info = (mode === "next" ? root?.nextTopicInfo : root?.topicInfo) || null;
+  const detail = info?.detail || null;
+  const cutBlock = root?.cutBlock || null;
   return {
-    scanRecordId: hookField(body, "scanRecordId"),
-    topicNumStr: hookField(body, "topicNumStr"),
-    userCode: hookField(body, "userCode"),
-    subTopicScore: hookField(body, "subTopicScore"),
-    topicImageIds: hookField(body, "topicImageIds"),
-    paperImgIds: hookField(body, "paperImgIds"),
-    hasPrev: hookField(body, "hasPrev"),
-    hasNext: hookField(body, "hasNext")
+    scanRecordId: detail?.scanRecordId || null,
+    topicNumStr: info?.topicNumStr || (mode === "current" ? root?.topicNum : null) || null,
+    userCode: detail?.userCode || null,
+    // 只有 current 的 cutBlock 才有当前小题满分，next 里没有。
+    subTopicScore: mode === "current" ? cutBlock?.subTopicScore ?? null : null,
+    topicImageIds: detail?.topicImageIds || null,
+    paperImgIds: detail?.paperImgIds || null,
+    hasPrev: root?.hasPrev ?? null,
+    hasNext: root?.hasNext ?? null
   };
 }
 // 从接口字段里捞出 http(s) 图片地址（签名 URL 只有几分钟有效期，需要时才算）。
@@ -414,17 +443,31 @@ function hookUrlsFrom(value, out) {
   }
   return out;
 }
-function handleHookResponse(url, text) {
-  if (!url || typeof text !== "string") return false;
-  const trimmed = text.trim();
-  if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return false;
-  let data;
+// 观察器拿到新卷后通知上层刷新题号/进度：页面 DOM 往往比请求先就绪，光靠 MutationObserver 会漏。
+var hookListener = null;
+function onHookUpdate(fn) {
+  hookListener = typeof fn === "function" ? fn : null;
+}
+function notifyHookUpdate() {
   try {
-    data = JSON.parse(trimmed);
-  } catch {
-    return false;
+    hookListener?.();
+  } catch { /* 上层异常不影响解析 */ }
+}
+function handleHookResponse(url, payload) {
+  if (!url || payload === null || payload === void 0) return false;
+  let data = payload;
+  // 多数请求 responseType 为空（文本），个别封装会直接给对象，两种都支持。
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return false;
+    try {
+      data = JSON.parse(trimmed);
+    } catch {
+      return false;
+    }
   }
-  const body = data && typeof data === "object" && data.data !== void 0 ? data.data : data;
+  if (!data || typeof data !== "object") return false;
+  const body = data.data !== void 0 ? data.data : data;
   // 提交回执：优先看 result，兼容只有 success 的写法。
   if (HOOK_COMMIT.test(url)) {
     const result = hookField(body, "result");
@@ -434,13 +477,16 @@ function handleHookResponse(url, text) {
   }
   // preLoad 的地址里也含 scanrecorddetail，必须先判 next。
   if (HOOK_NEXT.test(url)) {
-    hookState.next = hookIdentity(body);
+    hookState.next = hookIdentity(body, "next");
     hookState.updatedAt = Date.now();
+    notifyHookUpdate();
     return true;
   }
-  if (HOOK_CURRENT.test(url)) {
-    hookState.current = hookIdentity(body);
+  if (HOOK_CURRENT.test(url) || HOOK_NAV.test(url)) {
+    hookState.current = hookIdentity(body, "current");
+    hookState.root = body && typeof body === "object" && body.data !== void 0 ? body.data : body;
     hookState.updatedAt = Date.now();
+    notifyHookUpdate();
     return true;
   }
   return false;
@@ -476,10 +522,11 @@ function installZhixueHook(doc) {
     try {
       this.addEventListener("loadend", () => {
         try {
-          const text = typeof this.responseText === "string"
+          // responseType 为空时用文本，其它情况直接拿已解析对象。
+          const raw = this.responseType === "" || this.responseType === "text"
             ? this.responseText
-            : typeof this.response === "string" ? this.response : "";
-          handleHookResponse(this.__zygrUrl, text);
+            : this.response;
+          handleHookResponse(this.__zygrUrl, raw);
         } catch { /* 解析失败按未捕获处理 */ }
       });
     } catch { /* 挂不上 loadend 就降级 */ }
@@ -521,6 +568,18 @@ function freshAnswerImages() {
   if (urls.length === 0) hookUrlsFrom(hookState.current?.paperImgIds, urls);
   if (urls.length === 0) hookUrlsFrom(hookState.next?.topicImageIds, urls);
   return [...new Set(urls)];
+}
+// 进度：markingCount 是已批份数，teacherTodo 是当前小题任务量（真机字段）。
+function hookProgress() {
+  const root = hookState.root;
+  if (!root) return null;
+  const list = Array.isArray(root.teacherTopic) ? root.teacherTopic : [];
+  const current = hookState.current || {};
+  const topic = list.find((item) => item && item.topicNumStr === current.topicNumStr) || list[0] || null;
+  const marked = Number(root.markingCount ?? topic?.teacherMarked ?? 0) || 0;
+  const todo = Number(topic?.teacherTodo ?? 0) || 0;
+  if (!marked && !todo) return null;
+  return { marked, todo };
 }
   // src/infra/storage.ts
   var STORAGE_KEYS = {
@@ -966,6 +1025,8 @@ function judgeSubmit(hookActive2, signal) {
       "\u9700\u590D\u6838",
       "\u590D\u6838\u539F\u56E0",
       "\u5DF2\u63D0\u4EA4",
+      "\u786E\u8BA4\u5206",
+      "\u590D\u6838\u72B6\u6001",
       "\u8F93\u5165 Token",
       "\u524D\u7F00\u547D\u4E2D Token",
       "\u8F93\u51FA Token",
@@ -992,6 +1053,8 @@ function judgeSubmit(hookActive2, signal) {
         entry.result.needsReview ? "\u662F" : "\u5426",
         entry.result.reviewReasons.join("\uFF1B"),
         entry.submitted ? "\u662F" : "\u5426",
+        entry.confirmedScore === void 0 || entry.confirmedScore === null ? "" : entry.confirmedScore,
+        entry.reviewedAt ? "\u5DF2\u590D\u6838" : "\u672A\u590D\u6838",
         usage.prompt,
         usage.cached,
         usage.completion,
@@ -1001,12 +1064,12 @@ function judgeSubmit(hookActive2, signal) {
       ];
     });
     const summary = summarizeEntries(entries);
-    // 末尾追加一行汇总：第 3～15 列是逐条字段，留空避免与逐条数据混读；只填合计列。
+    // 末尾追加一行汇总：第 3～17 列是逐条字段，留空避免与逐条数据混读；只填合计列。
     const summaryRow = [
       "\u6C47\u603B",
       `\u5171 ${summary.total} \u6761`,
-      // 接口题号到已提交共 13 列留空（第 3～15 列）
-      "", "", "", "", "", "", "", "", "", "", "", "", "",
+      // 接口题号到复核状态共 15 列留空（第 3～17 列）
+      "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
       summary.prompt,
       summary.cached,
       summary.completion,
@@ -1036,6 +1099,8 @@ function judgeSubmit(hookActive2, signal) {
        <td>${escapeHtml(entry.result.score)} / ${escapeHtml(entry.result.maxScore)}</td>
        <td>${escapeHtml(subScoreText(entry))}</td>
        <td>${escapeHtml(entry.result.reason)}</td>
+       <td>${escapeHtml(entry.confirmedScore ?? "")}</td>
+       <td>${entry.reviewedAt ? "\u5DF2\u590D\u6838" : "\u672A\u590D\u6838"}</td>
        <td>${escapeHtml(usage.prompt)}</td>
        <td>${escapeHtml(usage.cached)}</td>
        <td>${escapeHtml(usage.completion)}</td>
@@ -1055,7 +1120,7 @@ function judgeSubmit(hookActive2, signal) {
   .zygr-summary{margin:0 0 14px;padding:10px 12px;border-radius:10px;background:#eef2ff;color:#3730a3;font-size:13px}
   </style></head><body><h1>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u5386\u53F2\u5BFC\u51FA</h1>
   <p class="zygr-summary">${escapeHtml(summaryText(entries))}</p>
-  <table><thead><tr><th>\u65F6\u95F4</th><th>\u9898\u53F7</th><th>\u63A5\u53E3\u9898\u53F7</th><th>\u626B\u63CF\u8BB0\u5F55ID</th><th>\u5B66\u53F7</th><th>\u94FE\u8DEF</th><th>\u6A21\u578B</th><th>\u72B6\u6001</th><th>\u5F97\u5206</th><th>\u5C0F\u9898\u5206</th><th>\u4F9D\u636E</th><th>\u8F93\u5165 Token</th><th>\u524D\u7F00\u547D\u4E2D</th><th>\u8F93\u51FA Token</th><th>\u601D\u8003 Token</th><th>\u547D\u4E2D</th><th>\u8017\u65F6\uFF08\u79D2\uFF09</th><th>\u6807\u8BB0</th></tr></thead><tbody>${rows}</tbody></table>
+  <table><thead><tr><th>\u65F6\u95F4</th><th>\u9898\u53F7</th><th>\u63A5\u53E3\u9898\u53F7</th><th>\u626B\u63CF\u8BB0\u5F55ID</th><th>\u5B66\u53F7</th><th>\u94FE\u8DEF</th><th>\u6A21\u578B</th><th>\u72B6\u6001</th><th>\u5F97\u5206</th><th>\u5C0F\u9898\u5206</th><th>\u4F9D\u636E</th><th>\u786E\u8BA4\u5206</th><th>\u590D\u6838</th><th>\u8F93\u5165 Token</th><th>\u524D\u7F00\u547D\u4E2D</th><th>\u8F93\u51FA Token</th><th>\u601D\u8003 Token</th><th>\u547D\u4E2D</th><th>\u8017\u65F6\uFF08\u79D2\uFF09</th><th>\u6807\u8BB0</th></tr></thead><tbody>${rows}</tbody></table>
   </body></html>`;
   }
   function downloadText(filename, content, mime) {
@@ -2636,6 +2701,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .zygr-panel.zygr-collapsed .zygr-body,
 .zygr-panel.zygr-collapsed .zygr-actions { display: none; }
 .zygr-statusbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--zygr-muted); }
+#zygr-progress { font-size: 11px; color: var(--zygr-muted); white-space: nowrap; }
 .zygr-chip {
   padding: 3px 9px; border-radius: 999px; font-size: 11px; white-space: nowrap;
   background: rgba(79,70,229,.1); color: #4338ca; border: 1px solid rgba(79,70,229,.18);
@@ -2806,7 +2872,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         </div>
       </header>
       <div class="zygr-body">
-        <div class="zygr-statusbar"><span id="zygr-stage">\u5C31\u7EEA</span><span class="zygr-chip" id="zygr-cache">\u5F85\u914D\u7F6E</span></div>
+        <div class="zygr-statusbar"><span id="zygr-stage">\u5C31\u7EEA</span><span id="zygr-progress" hidden></span><span class="zygr-chip" id="zygr-cache">\u5F85\u914D\u7F6E</span></div>
         <div class="zygr-progress"><i id="zygr-bar"></i></div>
         <section class="zygr-card"><div class="zygr-meta" id="zygr-meta">\u5C1A\u672A\u68C0\u6D4B\u5230\u9605\u5377\u9875\u9762</div><div class="zygr-thumbs" id="zygr-thumbs"></div></section>
         <section class="zygr-card" id="zygr-result"><div class="zygr-reason">\u6279\u6539\u7ED3\u679C\u5C06\u663E\u793A\u5728\u8FD9\u91CC</div></section>
@@ -2901,6 +2967,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.setText("zygr-stage", detail ? `${stage} \xB7 ${detail}` : stage);
       const progress = this.q("#zygr-bar");
       progress.style.width = stage.includes("\u7F13\u5B58\u547D\u4E2D") || stage === "\u5B8C\u6210" ? "100%" : stage.includes("\u8BC4\u5206") ? "70%" : "35%";
+    }
+    setProgress(text) {
+      const element = this.q("#zygr-progress");
+      element.textContent = text || "";
+      element.hidden = !text;
     }
     setCache(label, kind = "idle") {
       const chip = this.q("#zygr-cache");
@@ -3024,6 +3095,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   };
 
   // src/ui/history.ts
+  // 复核状态文案：供详情展示，导出用同一套口径。
+  function reviewText(entry) {
+    const confirmed = entry.confirmedScore === void 0 || entry.confirmedScore === null ? "" : `\uFF08\u786E\u8BA4 ${entry.confirmedScore} \u5206\uFF09`;
+    const note = entry.reviewNote ? ` \xB7 ${entry.reviewNote}` : "";
+    return entry.reviewedAt ? `\u5DF2\u590D\u6838${confirmed}${note}` : "\u672A\u590D\u6838";
+  }
   var HistoryPanel = class {
     constructor(callbacks) {
       this.callbacks = callbacks;
@@ -3135,10 +3212,35 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         `\u7F13\u5B58 / \u8017\u65F6\uFF1A${entryHitText(entry)} / ${entryElapsed(entry)}s`,
         `\u4F9D\u636E\uFF1A${entry.result.reason || "\u65E0"}`,
         `\u590D\u6838\uFF1A${entry.result.reviewReasons.join("\uFF1B") || "\u65E0"}`,
-        `\u5C0F\u9898\uFF1A${entry.result.subScores.map((item) => `${item.label} ${item.score}/${item.maxScore}`).join("\uFF1B") || "\u65E0"}`
+        `\u5C0F\u9898\uFF1A${entry.result.subScores.map((item) => `${item.label} ${item.score}/${item.maxScore}`).join("\uFF1B") || "\u65E0"}`,
+        `\u590D\u6838\u7ED3\u679C\uFF1A${reviewText(entry)}`
       ];
       detail.textContent = lines.join("\n");
       container.appendChild(detail);
+      // 复核留痕：备注与确认分都写回历史，导出时一并带出。
+      const actions = document.createElement("div");
+      actions.className = "zygr-row";
+      const reviewButton = document.createElement("button");
+      reviewButton.className = "zygr-btn zygr-ghost";
+      reviewButton.textContent = entry.reviewedAt ? "\u4FEE\u6539\u590D\u6838\u5907\u6CE8" : "\u6807\u8BB0\u5DF2\u590D\u6838";
+      reviewButton.addEventListener("click", () => {
+        const note = window.prompt("\u590D\u6838\u5907\u6CE8\uFF08\u53EF\u7559\u7A7A\uFF09", entry.reviewNote || "");
+        if (note === null) return;
+        this.callbacks.onReview?.(entry.id, { reviewedAt: Date.now(), reviewNote: note.trim() });
+      });
+      const scoreButton = document.createElement("button");
+      scoreButton.className = "zygr-btn zygr-ghost";
+      scoreButton.textContent = "\u8BB0\u5F55\u786E\u8BA4\u5206";
+      scoreButton.addEventListener("click", () => {
+        const raw = window.prompt("\u786E\u8BA4\u5206\u6570", String(entry.confirmedScore ?? entry.result.score));
+        if (raw === null) return;
+        const value = Number(raw);
+        if (!Number.isFinite(value)) return;
+        const max = Number(entry.result.maxScore) || 999;
+        this.callbacks.onReview?.(entry.id, { confirmedScore: Math.min(Math.max(value, 0), max) });
+      });
+      actions.append(reviewButton, scoreButton);
+      container.appendChild(actions);
     }
     mount() {
       if (!this.host.isConnected) document.body.appendChild(this.host);
@@ -3830,9 +3932,22 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         clearHistory();
         historyPanel.refresh([]);
         panel.toast("\u5386\u53F2\u5DF2\u6E05\u7A7A");
+      },
+      // 复核留痕写回历史：备注、确认分、复核时间都只在本地。
+      onReview: (id, patch) => {
+        const history = loadHistory().map((entry) => entry.id === id ? { ...entry, ...patch } : entry);
+        writeJson(STORAGE_KEYS.history, history);
+        historyPanel.refresh(history);
+        panel.toast("\u590D\u6838\u4FE1\u606F\u5DF2\u4FDD\u5B58");
       }
     });
     panel.mount();
+    // 观察器拿到新卷后立刻刷新题号与进度：页面 DOM 常比接口先就绪，只靠 MutationObserver 会漏。
+    onHookUpdate(() => {
+      if (!markingDoc) return;
+      applyQuestion(readQuestion(markingDoc));
+      updateProgress();
+    });
     panel.setCache(pipelineLabel(config));
     if (validateConfig(config).length > 0) {
       panel.setSubtitle("\u8BF7\u70B9\u51FB\u300C\u8BBE\u7F6E\u300D\u5B8C\u6210\u914D\u7F6E");
@@ -4010,6 +4125,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         // 把人工改过的分数回写缓存：双评换第二个账号时命中缓存拿到的是最终分，而不是模型原始分。
         if (cache && lastResult.cacheKey) cache.set(lastResult.cacheKey, lastResult);
         lastResult = null;
+        updateProgress();
         panel.setSubtitle(options.silent ? "\u8FDE\u7EED\u6279\u9605\u4E2D" : "\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u4E0B\u4E00\u4EFD");
         if (options.silent) {
           panel.setStage("\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377");
@@ -4083,23 +4199,34 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       // 每次拿到阅卷文档都校验一次：平台路由切换会换掉 iframe，旧 hook 随之失效。
       ensureZhixueHook(doc);
       applyQuestion(readQuestion(doc));
+      updateProgress();
       watchDocument(doc);
     }
     function applyQuestion(question) {
       if (!question) return;
-      if (currentQuestion?.questionId === question.questionId && currentQuestion.images.length === question.images.length) return;
+      if (currentQuestion?.questionId === question.questionId
+        && currentQuestion.scanRecordId === question.scanRecordId
+        && currentQuestion.images.length === question.images.length) return;
       currentQuestion = question;
       lastResult = null;
       panel.setQuestion(question);
       panel.setSubtitle(`\u5DF2\u8BFB\u53D6\u9898\u53F7 ${question.questionId}`);
       panel.clearError();
     }
+    // 进度条：页面文本「初评已阅量/任务量」优先，接口计数兜底。
+    function updateProgress() {
+      const progress = readProgress(markingDoc);
+      panel.setProgress(progress ? `\u5DF2\u6279 ${progress.marked} / \u4EFB\u52A1 ${progress.todo}` : "");
+    }
     function watchDocument(doc) {
       observer?.disconnect();
       if (!doc.body) return;
       observer = new MutationObserver(() => {
         window.clearTimeout(observerTimer);
-        observerTimer = window.setTimeout(() => applyQuestion(readQuestion(doc)), 600);
+        observerTimer = window.setTimeout(() => {
+          applyQuestion(readQuestion(doc));
+          updateProgress();
+        }, 600);
       });
       observer.observe(doc.body, { childList: true, subtree: true, characterData: true });
     }

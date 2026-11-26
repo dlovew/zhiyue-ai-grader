@@ -66,6 +66,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .zygr-panel.zygr-collapsed .zygr-body,
 .zygr-panel.zygr-collapsed .zygr-actions { display: none; }
 .zygr-statusbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--zygr-muted); }
+#zygr-progress { font-size: 11px; color: var(--zygr-muted); white-space: nowrap; }
 .zygr-chip {
   padding: 3px 9px; border-radius: 999px; font-size: 11px; white-space: nowrap;
   background: rgba(79,70,229,.1); color: #4338ca; border: 1px solid rgba(79,70,229,.18);

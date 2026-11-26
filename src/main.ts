@@ -115,9 +115,22 @@
         clearHistory();
         historyPanel.refresh([]);
         panel.toast("\u5386\u53F2\u5DF2\u6E05\u7A7A");
+      },
+      // 复核留痕写回历史：备注、确认分、复核时间都只在本地。
+      onReview: (id, patch) => {
+        const history = loadHistory().map((entry) => entry.id === id ? { ...entry, ...patch } : entry);
+        writeJson(STORAGE_KEYS.history, history);
+        historyPanel.refresh(history);
+        panel.toast("\u590D\u6838\u4FE1\u606F\u5DF2\u4FDD\u5B58");
       }
     });
     panel.mount();
+    // 观察器拿到新卷后立刻刷新题号与进度：页面 DOM 常比接口先就绪，只靠 MutationObserver 会漏。
+    onHookUpdate(() => {
+      if (!markingDoc) return;
+      applyQuestion(readQuestion(markingDoc));
+      updateProgress();
+    });
     panel.setCache(pipelineLabel(config));
     if (validateConfig(config).length > 0) {
       panel.setSubtitle("\u8BF7\u70B9\u51FB\u300C\u8BBE\u7F6E\u300D\u5B8C\u6210\u914D\u7F6E");
@@ -295,6 +308,7 @@
         // 把人工改过的分数回写缓存：双评换第二个账号时命中缓存拿到的是最终分，而不是模型原始分。
         if (cache && lastResult.cacheKey) cache.set(lastResult.cacheKey, lastResult);
         lastResult = null;
+        updateProgress();
         panel.setSubtitle(options.silent ? "\u8FDE\u7EED\u6279\u9605\u4E2D" : "\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u4E0B\u4E00\u4EFD");
         if (options.silent) {
           panel.setStage("\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377");
@@ -368,23 +382,34 @@
       // 每次拿到阅卷文档都校验一次：平台路由切换会换掉 iframe，旧 hook 随之失效。
       ensureZhixueHook(doc);
       applyQuestion(readQuestion(doc));
+      updateProgress();
       watchDocument(doc);
     }
     function applyQuestion(question) {
       if (!question) return;
-      if (currentQuestion?.questionId === question.questionId && currentQuestion.images.length === question.images.length) return;
+      if (currentQuestion?.questionId === question.questionId
+        && currentQuestion.scanRecordId === question.scanRecordId
+        && currentQuestion.images.length === question.images.length) return;
       currentQuestion = question;
       lastResult = null;
       panel.setQuestion(question);
       panel.setSubtitle(`\u5DF2\u8BFB\u53D6\u9898\u53F7 ${question.questionId}`);
       panel.clearError();
     }
+    // 进度条：页面文本「初评已阅量/任务量」优先，接口计数兜底。
+    function updateProgress() {
+      const progress = readProgress(markingDoc);
+      panel.setProgress(progress ? `\u5DF2\u6279 ${progress.marked} / \u4EFB\u52A1 ${progress.todo}` : "");
+    }
     function watchDocument(doc) {
       observer?.disconnect();
       if (!doc.body) return;
       observer = new MutationObserver(() => {
         window.clearTimeout(observerTimer);
-        observerTimer = window.setTimeout(() => applyQuestion(readQuestion(doc)), 600);
+        observerTimer = window.setTimeout(() => {
+          applyQuestion(readQuestion(doc));
+          updateProgress();
+        }, 600);
       });
       observer.observe(doc.body, { childList: true, subtree: true, characterData: true });
     }

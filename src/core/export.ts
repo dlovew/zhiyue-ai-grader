@@ -91,6 +91,8 @@
       "\u9700\u590D\u6838",
       "\u590D\u6838\u539F\u56E0",
       "\u5DF2\u63D0\u4EA4",
+      "\u786E\u8BA4\u5206",
+      "\u590D\u6838\u72B6\u6001",
       "\u8F93\u5165 Token",
       "\u524D\u7F00\u547D\u4E2D Token",
       "\u8F93\u51FA Token",
@@ -117,6 +119,8 @@
         entry.result.needsReview ? "\u662F" : "\u5426",
         entry.result.reviewReasons.join("\uFF1B"),
         entry.submitted ? "\u662F" : "\u5426",
+        entry.confirmedScore === void 0 || entry.confirmedScore === null ? "" : entry.confirmedScore,
+        entry.reviewedAt ? "\u5DF2\u590D\u6838" : "\u672A\u590D\u6838",
         usage.prompt,
         usage.cached,
         usage.completion,
@@ -126,12 +130,12 @@
       ];
     });
     const summary = summarizeEntries(entries);
-    // 末尾追加一行汇总：第 3～15 列是逐条字段，留空避免与逐条数据混读；只填合计列。
+    // 末尾追加一行汇总：第 3～17 列是逐条字段，留空避免与逐条数据混读；只填合计列。
     const summaryRow = [
       "\u6C47\u603B",
       `\u5171 ${summary.total} \u6761`,
-      // 接口题号到已提交共 13 列留空（第 3～15 列）
-      "", "", "", "", "", "", "", "", "", "", "", "", "",
+      // 接口题号到复核状态共 15 列留空（第 3～17 列）
+      "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
       summary.prompt,
       summary.cached,
       summary.completion,
@@ -161,6 +165,8 @@
        <td>${escapeHtml(entry.result.score)} / ${escapeHtml(entry.result.maxScore)}</td>
        <td>${escapeHtml(subScoreText(entry))}</td>
        <td>${escapeHtml(entry.result.reason)}</td>
+       <td>${escapeHtml(entry.confirmedScore ?? "")}</td>
+       <td>${entry.reviewedAt ? "\u5DF2\u590D\u6838" : "\u672A\u590D\u6838"}</td>
        <td>${escapeHtml(usage.prompt)}</td>
        <td>${escapeHtml(usage.cached)}</td>
        <td>${escapeHtml(usage.completion)}</td>
@@ -180,7 +186,7 @@
   .zygr-summary{margin:0 0 14px;padding:10px 12px;border-radius:10px;background:#eef2ff;color:#3730a3;font-size:13px}
   </style></head><body><h1>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u5386\u53F2\u5BFC\u51FA</h1>
   <p class="zygr-summary">${escapeHtml(summaryText(entries))}</p>
-  <table><thead><tr><th>\u65F6\u95F4</th><th>\u9898\u53F7</th><th>\u63A5\u53E3\u9898\u53F7</th><th>\u626B\u63CF\u8BB0\u5F55ID</th><th>\u5B66\u53F7</th><th>\u94FE\u8DEF</th><th>\u6A21\u578B</th><th>\u72B6\u6001</th><th>\u5F97\u5206</th><th>\u5C0F\u9898\u5206</th><th>\u4F9D\u636E</th><th>\u8F93\u5165 Token</th><th>\u524D\u7F00\u547D\u4E2D</th><th>\u8F93\u51FA Token</th><th>\u601D\u8003 Token</th><th>\u547D\u4E2D</th><th>\u8017\u65F6\uFF08\u79D2\uFF09</th><th>\u6807\u8BB0</th></tr></thead><tbody>${rows}</tbody></table>
+  <table><thead><tr><th>\u65F6\u95F4</th><th>\u9898\u53F7</th><th>\u63A5\u53E3\u9898\u53F7</th><th>\u626B\u63CF\u8BB0\u5F55ID</th><th>\u5B66\u53F7</th><th>\u94FE\u8DEF</th><th>\u6A21\u578B</th><th>\u72B6\u6001</th><th>\u5F97\u5206</th><th>\u5C0F\u9898\u5206</th><th>\u4F9D\u636E</th><th>\u786E\u8BA4\u5206</th><th>\u590D\u6838</th><th>\u8F93\u5165 Token</th><th>\u524D\u7F00\u547D\u4E2D</th><th>\u8F93\u51FA Token</th><th>\u601D\u8003 Token</th><th>\u547D\u4E2D</th><th>\u8017\u65F6\uFF08\u79D2\uFF09</th><th>\u6807\u8BB0</th></tr></thead><tbody>${rows}</tbody></table>
   </body></html>`;
   }
   function downloadText(filename, content, mime) {

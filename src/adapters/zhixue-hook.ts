@@ -5,7 +5,9 @@ var ZHIXUE_HOOK_FLAG = "__zygrHooked";
 var HOOK_COMMIT = /commitTopic/i;
 var HOOK_NEXT = /preLoadScanrecorddetail/i;
 var HOOK_CURRENT = /scanrecorddetail/i;
-var hookState = { installed: false, doc: null, current: null, next: null, updatedAt: 0 };
+// 「回评上一份 / 下一份」走的是 markingBack / markingNext，返回结构与 scanrecorddetail 相同。
+var HOOK_NAV = /markingBack|markingNext/i;
+var hookState = { installed: false, doc: null, current: null, next: null, root: null, updatedAt: 0 };
 
 // 平台响应层级不固定，按字段名深搜第一个非空值即可，别假设固定路径。
 function hookField(node, key, depth = 0) {
@@ -26,16 +28,27 @@ function hookField(node, key, depth = 0) {
   }
   return null;
 }
-function hookIdentity(body) {
+// 真机结构（2026-11 取样）：
+// data.topicNumStr / data.topicInfo.topicNumStr = "43,1"
+// data.topicInfo.detail = { scanRecordId, userCode, topicImageIds[签名URL], paperImgIds }
+// data.cutBlock.subTopicScore = 当前小题满分（与打分框 score 属性一致）
+// data.hasPrev / data.hasNext / data.markingCount / data.teacherTopic[]（teacherMarked/teacherTodo）
+// preLoad 返回的是 data.nextTopicInfo，结构与 topicInfo 相同。
+function hookIdentity(body, mode = "current") {
+  const root = body && typeof body === "object" && body.data !== void 0 ? body.data : body;
+  const info = (mode === "next" ? root?.nextTopicInfo : root?.topicInfo) || null;
+  const detail = info?.detail || null;
+  const cutBlock = root?.cutBlock || null;
   return {
-    scanRecordId: hookField(body, "scanRecordId"),
-    topicNumStr: hookField(body, "topicNumStr"),
-    userCode: hookField(body, "userCode"),
-    subTopicScore: hookField(body, "subTopicScore"),
-    topicImageIds: hookField(body, "topicImageIds"),
-    paperImgIds: hookField(body, "paperImgIds"),
-    hasPrev: hookField(body, "hasPrev"),
-    hasNext: hookField(body, "hasNext")
+    scanRecordId: detail?.scanRecordId || null,
+    topicNumStr: info?.topicNumStr || (mode === "current" ? root?.topicNum : null) || null,
+    userCode: detail?.userCode || null,
+    // 只有 current 的 cutBlock 才有当前小题满分，next 里没有。
+    subTopicScore: mode === "current" ? cutBlock?.subTopicScore ?? null : null,
+    topicImageIds: detail?.topicImageIds || null,
+    paperImgIds: detail?.paperImgIds || null,
+    hasPrev: root?.hasPrev ?? null,
+    hasNext: root?.hasNext ?? null
   };
 }
 // 从接口字段里捞出 http(s) 图片地址（签名 URL 只有几分钟有效期，需要时才算）。
@@ -54,17 +67,31 @@ function hookUrlsFrom(value, out) {
   }
   return out;
 }
-function handleHookResponse(url, text) {
-  if (!url || typeof text !== "string") return false;
-  const trimmed = text.trim();
-  if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return false;
-  let data;
+// 观察器拿到新卷后通知上层刷新题号/进度：页面 DOM 往往比请求先就绪，光靠 MutationObserver 会漏。
+var hookListener = null;
+function onHookUpdate(fn) {
+  hookListener = typeof fn === "function" ? fn : null;
+}
+function notifyHookUpdate() {
   try {
-    data = JSON.parse(trimmed);
-  } catch {
-    return false;
+    hookListener?.();
+  } catch { /* 上层异常不影响解析 */ }
+}
+function handleHookResponse(url, payload) {
+  if (!url || payload === null || payload === void 0) return false;
+  let data = payload;
+  // 多数请求 responseType 为空（文本），个别封装会直接给对象，两种都支持。
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) return false;
+    try {
+      data = JSON.parse(trimmed);
+    } catch {
+      return false;
+    }
   }
-  const body = data && typeof data === "object" && data.data !== void 0 ? data.data : data;
+  if (!data || typeof data !== "object") return false;
+  const body = data.data !== void 0 ? data.data : data;
   // 提交回执：优先看 result，兼容只有 success 的写法。
   if (HOOK_COMMIT.test(url)) {
     const result = hookField(body, "result");
@@ -74,13 +101,16 @@ function handleHookResponse(url, text) {
   }
   // preLoad 的地址里也含 scanrecorddetail，必须先判 next。
   if (HOOK_NEXT.test(url)) {
-    hookState.next = hookIdentity(body);
+    hookState.next = hookIdentity(body, "next");
     hookState.updatedAt = Date.now();
+    notifyHookUpdate();
     return true;
   }
-  if (HOOK_CURRENT.test(url)) {
-    hookState.current = hookIdentity(body);
+  if (HOOK_CURRENT.test(url) || HOOK_NAV.test(url)) {
+    hookState.current = hookIdentity(body, "current");
+    hookState.root = body && typeof body === "object" && body.data !== void 0 ? body.data : body;
     hookState.updatedAt = Date.now();
+    notifyHookUpdate();
     return true;
   }
   return false;
@@ -116,10 +146,11 @@ function installZhixueHook(doc) {
     try {
       this.addEventListener("loadend", () => {
         try {
-          const text = typeof this.responseText === "string"
+          // responseType 为空时用文本，其它情况直接拿已解析对象。
+          const raw = this.responseType === "" || this.responseType === "text"
             ? this.responseText
-            : typeof this.response === "string" ? this.response : "";
-          handleHookResponse(this.__zygrUrl, text);
+            : this.response;
+          handleHookResponse(this.__zygrUrl, raw);
         } catch { /* 解析失败按未捕获处理 */ }
       });
     } catch { /* 挂不上 loadend 就降级 */ }
@@ -161,4 +192,16 @@ function freshAnswerImages() {
   if (urls.length === 0) hookUrlsFrom(hookState.current?.paperImgIds, urls);
   if (urls.length === 0) hookUrlsFrom(hookState.next?.topicImageIds, urls);
   return [...new Set(urls)];
+}
+// 进度：markingCount 是已批份数，teacherTodo 是当前小题任务量（真机字段）。
+function hookProgress() {
+  const root = hookState.root;
+  if (!root) return null;
+  const list = Array.isArray(root.teacherTopic) ? root.teacherTopic : [];
+  const current = hookState.current || {};
+  const topic = list.find((item) => item && item.topicNumStr === current.topicNumStr) || list[0] || null;
+  const marked = Number(root.markingCount ?? topic?.teacherMarked ?? 0) || 0;
+  const todo = Number(topic?.teacherTodo ?? 0) || 0;
+  if (!marked && !todo) return null;
+  return { marked, todo };
 }

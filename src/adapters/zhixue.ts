@@ -10,7 +10,10 @@
     submitButton: "#bnt_save",
     submitText: "\u63D0\u4EA4\u5206\u6570",
     topicIndex: "#currentTopicIndex",
-    scoreTotal: "#containter_topicTxt #totalScore"
+    scoreTotal: "#containter_topicTxt #totalScore",
+    progress: ".progress",
+    reviewPrev: ".pre",
+    reviewNext: ".unnext"
   };
   function mainDoc() {
     return typeof unsafeWindow !== "undefined" ? unsafeWindow.document : document;
@@ -197,6 +200,8 @@
     return {
       questionId: topicNumStr,
       topicNumStr,
+      // 同一小题换人时题号不变，必须靠 scanRecordId 判断是否真的换卷。
+      scanRecordId: String(hookCurrentField("scanRecordId") || ""),
       questionText: heading,
       maxScore,
       subQuestions,
@@ -221,6 +226,17 @@
   }
   function currentScanRecordId() {
     return String(hookCurrentField("scanRecordId") || "");
+  }
+  // 进度：页面文本「初评已阅量/任务量： 532/147」优先，接口 teacherMarked/teacherTodo 兜底。
+  function readProgress(doc) {
+    const root = doc ?? getIframeDoc() ?? mainDoc();
+    const text = root.querySelector(SELECTORS.progress)?.textContent || "";
+    const match = text.match(/已阅量\s*\/\s*任务量\s*[：:]\s*(\d+)\s*\/\s*(\d+)/) || text.match(/(\d+)\s*\/\s*(\d+)/);
+    if (match) return { marked: Number(match[1]), todo: Number(match[2]) };
+    try {
+      if (typeof hookProgress === "function") return hookProgress();
+    } catch { /* 观察器不可用时忽略 */ }
+    return null;
   }
   // 满分以页面/接口为准：不再阻断批改，由上层自动写回配置并提示一行。
   function checkMaxScore(configured2, doc) {

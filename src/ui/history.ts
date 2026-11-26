@@ -1,4 +1,10 @@
   // src/ui/history.ts
+  // 复核状态文案：供详情展示，导出用同一套口径。
+  function reviewText(entry) {
+    const confirmed = entry.confirmedScore === void 0 || entry.confirmedScore === null ? "" : `\uFF08\u786E\u8BA4 ${entry.confirmedScore} \u5206\uFF09`;
+    const note = entry.reviewNote ? ` \xB7 ${entry.reviewNote}` : "";
+    return entry.reviewedAt ? `\u5DF2\u590D\u6838${confirmed}${note}` : "\u672A\u590D\u6838";
+  }
   var HistoryPanel = class {
     constructor(callbacks) {
       this.callbacks = callbacks;
@@ -110,10 +116,35 @@
         `\u7F13\u5B58 / \u8017\u65F6\uFF1A${entryHitText(entry)} / ${entryElapsed(entry)}s`,
         `\u4F9D\u636E\uFF1A${entry.result.reason || "\u65E0"}`,
         `\u590D\u6838\uFF1A${entry.result.reviewReasons.join("\uFF1B") || "\u65E0"}`,
-        `\u5C0F\u9898\uFF1A${entry.result.subScores.map((item) => `${item.label} ${item.score}/${item.maxScore}`).join("\uFF1B") || "\u65E0"}`
+        `\u5C0F\u9898\uFF1A${entry.result.subScores.map((item) => `${item.label} ${item.score}/${item.maxScore}`).join("\uFF1B") || "\u65E0"}`,
+        `\u590D\u6838\u7ED3\u679C\uFF1A${reviewText(entry)}`
       ];
       detail.textContent = lines.join("\n");
       container.appendChild(detail);
+      // 复核留痕：备注与确认分都写回历史，导出时一并带出。
+      const actions = document.createElement("div");
+      actions.className = "zygr-row";
+      const reviewButton = document.createElement("button");
+      reviewButton.className = "zygr-btn zygr-ghost";
+      reviewButton.textContent = entry.reviewedAt ? "\u4FEE\u6539\u590D\u6838\u5907\u6CE8" : "\u6807\u8BB0\u5DF2\u590D\u6838";
+      reviewButton.addEventListener("click", () => {
+        const note = window.prompt("\u590D\u6838\u5907\u6CE8\uFF08\u53EF\u7559\u7A7A\uFF09", entry.reviewNote || "");
+        if (note === null) return;
+        this.callbacks.onReview?.(entry.id, { reviewedAt: Date.now(), reviewNote: note.trim() });
+      });
+      const scoreButton = document.createElement("button");
+      scoreButton.className = "zygr-btn zygr-ghost";
+      scoreButton.textContent = "\u8BB0\u5F55\u786E\u8BA4\u5206";
+      scoreButton.addEventListener("click", () => {
+        const raw = window.prompt("\u786E\u8BA4\u5206\u6570", String(entry.confirmedScore ?? entry.result.score));
+        if (raw === null) return;
+        const value = Number(raw);
+        if (!Number.isFinite(value)) return;
+        const max = Number(entry.result.maxScore) || 999;
+        this.callbacks.onReview?.(entry.id, { confirmedScore: Math.min(Math.max(value, 0), max) });
+      });
+      actions.append(reviewButton, scoreButton);
+      container.appendChild(actions);
     }
     mount() {
       if (!this.host.isConnected) document.body.appendChild(this.host);
