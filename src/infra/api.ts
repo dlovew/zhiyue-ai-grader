@@ -215,6 +215,12 @@
       try {
         const response = options.rateLimiter ? await options.rateLimiter.run(execute, options.estimatedTokens ?? 0) : await execute();
         const body = parseJsonResponse(response.responseText);
+        // 思考占满输出预算时正文会被截断：这种结果不能用，整次作废，别把空正文当零分。
+        if (body?.choices?.[0]?.finish_reason === "length") {
+          const truncated = new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u8C03\u9AD8\u8F93\u51FA\u6863\u4F4D\u3001\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");
+          truncated.code = "truncated";
+          throw truncated;
+        }
         const content = extractContent(body);
         // usage 是响应自带字段，读取它不会产生任何额外 token。
         if (typeof options.onUsage === "function") {

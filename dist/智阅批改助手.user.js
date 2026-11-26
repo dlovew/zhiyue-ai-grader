@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.0.4
+// @version      1.0.5
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -208,25 +208,44 @@
     const total = doc.querySelector(SELECTORS.scoreTotal);
     const scoringQuestion = total?.getAttribute("disptitle") || total?.closest("li")?.querySelector(".label")?.textContent?.trim() || "";
     const heading = textOf(doc, SELECTORS.topicIndex);
-    const pageId = normalizeQuestion(scoringQuestion) || normalizeQuestion(heading) || new URLSearchParams(window.location.search).get("topicId") || "\u5F53\u524D\u9898\u76EE";
-    const maxScore = inputs.reduce((sum, input) => sum + input.maxScore, 0);
+    const domId = normalizeQuestion(scoringQuestion) || normalizeQuestion(heading) || new URLSearchParams(window.location.search).get("topicId") || "\u5F53\u524D\u9898\u76EE";
+    // 接口的 topicNumStr（如 43,1）比 DOM 文本更规范，优先作为题号，两者都保留。
+    const hookTopic = hookCurrentField("topicNumStr");
+    const topicNumStr = hookTopic ? String(hookTopic).trim() : domId;
+    const maxScore = resolveMaxScore(doc) || inputs.reduce((sum, input) => sum + input.maxScore, 0);
     const subQuestions = inputs.length > 1 ? inputs.map((input) => ({ label: input.label, maxScore: input.maxScore })) : [];
     return {
-      questionId: pageId,
+      questionId: topicNumStr,
+      topicNumStr,
       questionText: heading,
       maxScore,
       subQuestions,
       images: answerSnapshot(doc).urls
     };
   }
-  function checkMaxScore(configured2, doc) {
-    const maxima = getScoreInputs(doc).map((input) => input.maxScore).filter((value) => value > 0);
-    if (maxima.length === 0) return "";
-    const total = maxima.reduce((sum, value) => sum + value, 0);
-    if (Math.abs(total - configured2) > 1e-6) {
-      return `\u5F53\u524D\u9898\u76EE\u6EE1\u5206\u4E3A${total}\u5206\uFF0C\u6279\u6539\u65B9\u6848\u4E3A${configured2}\u5206\uFF0C\u8BF7\u6838\u5BF9\u540E\u7EE7\u7EED`;
+  // 接口优先的当前题字段：观察器没装或没数据时返回 null，由调用方退回 DOM。
+  function hookCurrentField(key) {
+    try {
+      if (typeof currentHookIdentity !== "function") return null;
+      const value = currentHookIdentity()?.[key];
+      return value === void 0 || value === null || value === "" ? null : value;
+    } catch {
+      return null;
     }
-    return "";
+  }
+  function resolveMaxScore(doc) {
+    const observed = Number(hookCurrentField("subTopicScore"));
+    if (Number.isFinite(observed) && observed > 0) return observed;
+    const maxima = getScoreInputs(doc).map((input) => input.maxScore).filter((value) => value > 0);
+    return maxima.reduce((sum, value) => sum + value, 0);
+  }
+  function currentScanRecordId() {
+    return String(hookCurrentField("scanRecordId") || "");
+  }
+  // 满分以页面/接口为准：不再阻断批改，由上层自动写回配置并提示一行。
+  function checkMaxScore(configured2, doc) {
+    const maxScore = resolveMaxScore(doc);
+    return { maxScore, mismatch: maxScore > 0 && Math.abs(maxScore - Number(configured2 || 0)) > 1e-6 };
   }
   // 提交回执：接口观察器装上后写入，未装上时保持未激活，提交沿用「点过即提交」的旧行为。
   var commitFeed = { active: false, last: null, resetAt: 0 };
@@ -301,8 +320,11 @@
   function getPaperIdentity() {
     return answerSnapshot().identity;
   }
-  async function waitForNextPaper(oldIdentity, timeout = 25e3) {
-    if (!oldIdentity) return false;
+  async function waitForNextPaper(oldIdentity, oldScan = "", timeout = 25e3) {
+    if (!oldIdentity && !oldScan) return false;
+    const startedAt = Date.now();
+    // 主判据（scanRecordId 变化）只在前 8 秒内生效：接口没反应就退回图片判定。
+    const scanWindow = 8e3;
     let remaining = timeout;
     let lastTick = Date.now();
     let candidate = null;
@@ -313,8 +335,16 @@
       // 页面不可见（切到其它标签页/最小化）时暂停倒计时，避免切走一会儿就判定换卷失败。
       if (!hidden) remaining -= now - lastTick;
       lastTick = now;
+      if (oldScan && now - startedAt <= scanWindow) {
+        const nextScan = currentScanRecordId();
+        if (nextScan && nextScan !== oldScan) return true;
+      }
+      if (!oldIdentity) {
+        await new Promise((resolve) => window.setTimeout(resolve, 200));
+        continue;
+      }
       const snapshot = answerSnapshot();
-      // 换卷只需图片 URL 集合变化，不要求图片已加载完成（后台标签页图片常处于未 complete 状态）。
+      // 兜底：图片 URL 集合变化并连续两次稳定（后台标签页图片常未 complete，不要求加载完成）。
       if (snapshot.identity && snapshot.identity !== oldIdentity) {
         stable = candidate === snapshot.identity ? stable + 1 : 1;
         candidate = snapshot.identity;
@@ -1669,6 +1699,12 @@ function judgeSubmit(hookActive2, signal) {
       try {
         const response = options.rateLimiter ? await options.rateLimiter.run(execute, options.estimatedTokens ?? 0) : await execute();
         const body = parseJsonResponse(response.responseText);
+        // 思考占满输出预算时正文会被截断：这种结果不能用，整次作废，别把空正文当零分。
+        if (body?.choices?.[0]?.finish_reason === "length") {
+          const truncated = new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u8C03\u9AD8\u8F93\u51FA\u6863\u4F4D\u3001\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");
+          truncated.code = "truncated";
+          throw truncated;
+        }
         const content = extractContent(body);
         // usage 是响应自带字段，读取它不会产生任何额外 token。
         if (typeof options.onUsage === "function") {
@@ -2203,16 +2239,16 @@ ${subQuestionLines(question)}`,
     if (typeof value !== "string") return "legible";
     return STATUS_MAP[value.trim()] ?? "legible";
   }
+  // 分数提取：先看【得分】标注（"3/5" 取分子），再看带标签的数字，最后只在全文只有一个数字时才采信。
+  // 仍然无法确定就返回 uncertain，交给上层标记人工复核，绝不瞎猜一个数。
   function extractScore(text, maxScore) {
-    const labeled = text.match(/【得分】\s*([+\-]?\d+(?:\.\d+)?)/);
-    if (labeled) return clamp(Number(labeled[1]), maxScore);
-    const equations = [...text.matchAll(/=\s*([+\-]?\d+(?:\.\d+)?)/g)];
-    if (equations.length > 0) {
-      return clamp(Number(equations[equations.length - 1][1]), maxScore);
-    }
+    const labeled = text.match(/【得分】\s*([+\-]?\d+(?:\.\d+)?)\s*(?:\/\s*\d+(?:\.\d+)?)?/);
+    if (labeled) return { value: clamp(Number(labeled[1]), maxScore), certain: true };
+    const tagged = text.match(/(?:得分|分数|总评|总分|score)\s*[:：=]?\s*([+\-]?\d+(?:\.\d+)?)/i);
+    if (tagged) return { value: clamp(Number(tagged[1]), maxScore), certain: true };
     const numbers = [...text.matchAll(/[+\-]?\d+(?:\.\d+)?/g)].map((match) => Number(match[0]));
-    if (numbers.length === 0) return 0;
-    return clamp(numbers[numbers.length - 1], maxScore);
+    if (numbers.length === 1) return { value: clamp(numbers[0], maxScore), certain: true };
+    return { value: 0, certain: false };
   }
   // 兼容两种协议：紧凑版（i/sc/r）与旧版（label/score/maxScore/reason）。
   // 小题名称与满分由输入给出，模型不再回写，避免每份卷子白花几十个输出 token。
@@ -2249,14 +2285,28 @@ ${subQuestionLines(question)}`,
       const record = asRecord(JSON.parse(cleaned.slice(start, end + 1)));
       if (!record) return null;
       const subScores = parseSubScores(record.subScores ?? record.sub, maxScore, subQuestions);
-      const fallbackScore = subScores.reduce((sum, item) => sum + item.score, 0);
-      const scoreValue = record.sc ?? record.score ?? fallbackScore;
+      const subSum = subScores.reduce((sum, item) => sum + item.score, 0);
+      const declared = record.sc ?? record.score;
+      // 小题分齐全时以小题合计为准：模型自报的总分经常与明细对不上。
+      const complete = subScores.length > 0 && (subQuestions.length === 0 || subScores.length >= subQuestions.length);
+      let scoreValue = declared;
+      let scoreAdjusted = false;
+      let scoreUncertain = false;
+      if (complete) {
+        scoreAdjusted = declared !== void 0 && Math.abs(Number(declared) - subSum) > 0.01;
+        scoreValue = subSum;
+      } else if (declared === void 0) {
+        scoreValue = subSum;
+        scoreUncertain = subScores.length === 0;
+      }
       return {
         status: mapStatus(record.s ?? record.status),
         score: clamp(Number(scoreValue), maxScore),
         subScores,
         reason: String(record.r ?? record.reason ?? "").slice(0, 300),
         confidence: clamp(Number(record.c ?? record.confidence ?? 0.7), 1),
+        scoreAdjusted,
+        scoreUncertain,
         raw
       };
     } catch {
@@ -2280,12 +2330,15 @@ ${subQuestionLines(question)}`,
       }
     }
     const subTotal = subScores.reduce((sum, item) => sum + item.score, 0);
+    const fallback = extractScore(raw, maxScore);
     return {
       status: statusMatch ? mapStatus(statusMatch[1]) : "legible",
-      score: subScores.length > 0 ? subTotal : extractScore(raw, maxScore),
+      score: subScores.length > 0 ? subTotal : fallback.value,
       subScores,
       reason: reasonMatch ? reasonMatch[1].trim().slice(0, 300) : "",
       confidence: 0.5,
+      scoreAdjusted: false,
+      scoreUncertain: subScores.length === 0 && !fallback.certain,
       raw
     };
   }
@@ -2394,6 +2447,16 @@ async function gradeQuestion(options) {
   if (grade.status === "blank" && grade.score > 0) {
     reviewReasons.push("\u8BC6\u522B\u4E3A\u672A\u4F5C\u7B54\u4F46\u7ED9\u51FA\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u67E5");
   }
+  // 无法辨认却给了分：多半是模型凭印象打分，必须人工确认。
+  if (grade.status === "illegible" && grade.score > 0) {
+    reviewReasons.push("\u8BC6\u522B\u4E3A\u65E0\u6CD5\u8FA8\u8BA4\u5374\u7ED9\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u5B9E");
+  }
+  if (grade.scoreUncertain) reviewReasons.push("\u672A\u80FD\u4ECE\u6A21\u578B\u8F93\u51FA\u4E2D\u786E\u5B9A\u5206\u6570\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u5B9A");
+  if (grade.scoreAdjusted) reviewReasons.push("\u603B\u5206\u4E0E\u5C0F\u9898\u5408\u8BA1\u4E0D\u4E00\u81F4\uFF0C\u5DF2\u6309\u5C0F\u9898\u91CD\u7B97");
+  const missingSubs = question.subQuestions.length - grade.subScores.length;
+  if (question.subQuestions.length > 0 && missingSubs > 0) {
+    reviewReasons.push(`\u6709 ${missingSubs} \u4E2A\u5C0F\u9898\u672A\u8FD4\u56DE\u5206\u6570\uFF0C\u8BF7\u6838\u5BF9`);
+  }
   if (grade.confidence < 0.5) reviewReasons.push("\u6A21\u578B\u7F6E\u4FE1\u5EA6\u8F83\u4F4E\uFF0C\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
   const result = {
     ...grade,
@@ -2436,13 +2499,22 @@ async function gradeQuestion(options) {
     tokenUsed() {
       return this.tokens.reduce((sum, entry) => sum + entry.value, 0);
     }
-    async acquire(estimatedTokens) {
+    async acquire(estimatedTokens, timeoutMs = 3e4) {
+      // 单次请求就超预算时永远等不到配额，直接拒绝比死循环好。
+      if (this.options.maxTpm > 0 && estimatedTokens > this.options.maxTpm) {
+        throw new Error(`\u5355\u6B21\u8BF7\u6C42\u9884\u4F30 ${estimatedTokens} token\uFF0C\u5DF2\u8D85\u8FC7 TPM \u9884\u7B97 ${this.options.maxTpm}\uFF0C\u8BF7\u8C03\u5927 TPM \u6216\u51CF\u5C11\u56FE\u7247`);
+      }
+      const deadline = this.now() + timeoutMs;
       for (; ; ) {
         this.prune();
         const rpmFull = this.starts.length >= this.options.maxRpm;
         const tpmFull = this.tokenUsed() + estimatedTokens > this.options.maxTpm;
         const concurrencyFull = this.active >= this.options.maxConcurrent;
         if (!rpmFull && !tpmFull && !concurrencyFull) break;
+        // 配额一直不释放时给个上限，避免按钮永远卡在「处理中」。
+        if (this.now() >= deadline) {
+          throw new Error("\u7B49\u5F85\u9650\u6D41\u914D\u989D\u8D85\u65F6\uFF0830 \u79D2\uFF09\uFF0C\u8BF7\u8C03\u5927\u5E76\u53D1\uFF0FRPM \u6216 TPM");
+        }
         await this.wait(200);
       }
       const time = this.now();
@@ -3654,6 +3726,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       onSave: (draft) => {
         config = draft;
         saveConfig(config);
+        // TPM 太低时大图会长期排队，提示一次而不是等用户自己发现。
+        if (config.pipeline.maxTpm < 12000) panel.toast("TPM \u9884\u7B97\u4F4E\u4E8E 12000\uFF0C\u5927\u56FE\u5BB9\u6613\u6392\u961F\uFF0C\u5EFA\u8BAE\u8C03\u5927");
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
         syncThinkingModesFromConfig(config);
@@ -3738,14 +3812,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         panel.showError("\u5C1A\u672A\u8BFB\u53D6\u5230\u9898\u76EE\uFF0C\u8BF7\u6253\u5F00\u667A\u5B66\u7F51\u9605\u5377\u9875");
         return false;
       }
+      // 满分以页面（接口优先）为准：不一致就自动写回配置，不再阻断批改。
+      const scoreCheck = checkMaxScore(config.context.maxScore, markingDoc);
+      if (scoreCheck.maxScore > 0 && scoreCheck.mismatch) {
+        config.context.maxScore = scoreCheck.maxScore;
+        saveConfig(config);
+        panel.toast(`\u5DF2\u6309\u9875\u9762\u540C\u6B65\u6EE1\u5206\uFF1A${scoreCheck.maxScore} \u5206`);
+      }
       const errors = validateConfig(config);
       if (errors.length > 0) {
         panel.showError(`${errors[0]}\uFF08\u8BF7\u70B9\u51FB\u300C\u8BBE\u7F6E\u300D\u624B\u52A8\u4FEE\u6539\uFF09`);
-        return false;
-      }
-      const scoreError = checkMaxScore(config.context.maxScore, markingDoc);
-      if (scoreError) {
-        panel.showError(scoreError);
         return false;
       }
       busy = true;
@@ -3803,6 +3879,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     function historyQuestion(question) {
       return {
         questionId: question.questionId,
+        // 题号与接口原始题号都留一份，方便按平台口径对账。
+        topicNumStr: question.topicNumStr || question.questionId,
         questionText: question.questionText,
         maxScore: question.maxScore,
         subQuestions: question.subQuestions,
@@ -3864,6 +3942,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           return { ok: false, oldIdentity: null };
         }
         const oldIdentity = getPaperIdentity();
+        // 换卷判据需要提交前的 scanRecordId；接口没给就留空、退回图片判定。
+        const oldScan = currentScanRecordId();
         // 填分必须回读一致才算写入成功，否则宁可不提交。
         const filled = fillScores(scores, markingDoc);
         if (!filled.ok) {
@@ -3897,12 +3977,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           panel.setStage("\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377");
         } else {
           panel.toast(verdict.confirmed ? "\u5DF2\u63D0\u4EA4\uFF08\u5E73\u53F0\u5DF2\u786E\u8BA4\uFF09" : "\u5DF2\u63D0\u4EA4");
-          void waitForNextPaper(oldIdentity).then((changed) => {
+          void waitForNextPaper(oldIdentity, oldScan).then((changed) => {
             if (changed) void detect();
             else panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u6362\u5377\uFF0C\u53EF\u7EE7\u7EED\u4EBA\u5DE5\u64CD\u4F5C");
           });
         }
-        return { ok: true, oldIdentity };
+        return { ok: true, oldIdentity, oldScan };
       } finally {
         submitting = false;
       }
@@ -3931,7 +4011,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         const submitted = await submitResult({ silent: true });
         if (!submitted.ok || !autoMode || autoStopRequested) break;
         panel.setSubtitle(`\u8FDE\u7EED\u6279\u9605\u4E2D \xB7 \u7B2C ${count} \u4EFD\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377\uFF08\u53EF\u5207\u6362\u5230\u5176\u4ED6\u6807\u7B7E\u9875\uFF09`);
-        const changed = await waitForNextPaper(submitted.oldIdentity);
+        const changed = await waitForNextPaper(submitted.oldIdentity, submitted.oldScan);
         if (!changed || !autoMode || autoStopRequested) {
           if (autoMode) panel.showError("\u7B49\u5F85\u6362\u5377\u8D85\u65F6\uFF0C\u8FDE\u7EED\u6279\u9605\u5DF2\u505C\u6B62\u3002\u82E5\u521A\u624D\u5207\u6362\u4E86\u754C\u9762\uFF0C\u8BF7\u786E\u8BA4\u9605\u5377\u9875\u4ECD\u6253\u5F00\u4E14\u5DF2\u663E\u793A\u65B0\u4F5C\u7B54\u56FE\u540E\u91CD\u65B0\u5F00\u59CB");
           break;

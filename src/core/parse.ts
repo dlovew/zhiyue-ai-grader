@@ -28,16 +28,16 @@
     if (typeof value !== "string") return "legible";
     return STATUS_MAP[value.trim()] ?? "legible";
   }
+  // 分数提取：先看【得分】标注（"3/5" 取分子），再看带标签的数字，最后只在全文只有一个数字时才采信。
+  // 仍然无法确定就返回 uncertain，交给上层标记人工复核，绝不瞎猜一个数。
   function extractScore(text, maxScore) {
-    const labeled = text.match(/【得分】\s*([+\-]?\d+(?:\.\d+)?)/);
-    if (labeled) return clamp(Number(labeled[1]), maxScore);
-    const equations = [...text.matchAll(/=\s*([+\-]?\d+(?:\.\d+)?)/g)];
-    if (equations.length > 0) {
-      return clamp(Number(equations[equations.length - 1][1]), maxScore);
-    }
+    const labeled = text.match(/【得分】\s*([+\-]?\d+(?:\.\d+)?)\s*(?:\/\s*\d+(?:\.\d+)?)?/);
+    if (labeled) return { value: clamp(Number(labeled[1]), maxScore), certain: true };
+    const tagged = text.match(/(?:得分|分数|总评|总分|score)\s*[:：=]?\s*([+\-]?\d+(?:\.\d+)?)/i);
+    if (tagged) return { value: clamp(Number(tagged[1]), maxScore), certain: true };
     const numbers = [...text.matchAll(/[+\-]?\d+(?:\.\d+)?/g)].map((match) => Number(match[0]));
-    if (numbers.length === 0) return 0;
-    return clamp(numbers[numbers.length - 1], maxScore);
+    if (numbers.length === 1) return { value: clamp(numbers[0], maxScore), certain: true };
+    return { value: 0, certain: false };
   }
   // 兼容两种协议：紧凑版（i/sc/r）与旧版（label/score/maxScore/reason）。
   // 小题名称与满分由输入给出，模型不再回写，避免每份卷子白花几十个输出 token。
@@ -74,14 +74,28 @@
       const record = asRecord(JSON.parse(cleaned.slice(start, end + 1)));
       if (!record) return null;
       const subScores = parseSubScores(record.subScores ?? record.sub, maxScore, subQuestions);
-      const fallbackScore = subScores.reduce((sum, item) => sum + item.score, 0);
-      const scoreValue = record.sc ?? record.score ?? fallbackScore;
+      const subSum = subScores.reduce((sum, item) => sum + item.score, 0);
+      const declared = record.sc ?? record.score;
+      // 小题分齐全时以小题合计为准：模型自报的总分经常与明细对不上。
+      const complete = subScores.length > 0 && (subQuestions.length === 0 || subScores.length >= subQuestions.length);
+      let scoreValue = declared;
+      let scoreAdjusted = false;
+      let scoreUncertain = false;
+      if (complete) {
+        scoreAdjusted = declared !== void 0 && Math.abs(Number(declared) - subSum) > 0.01;
+        scoreValue = subSum;
+      } else if (declared === void 0) {
+        scoreValue = subSum;
+        scoreUncertain = subScores.length === 0;
+      }
       return {
         status: mapStatus(record.s ?? record.status),
         score: clamp(Number(scoreValue), maxScore),
         subScores,
         reason: String(record.r ?? record.reason ?? "").slice(0, 300),
         confidence: clamp(Number(record.c ?? record.confidence ?? 0.7), 1),
+        scoreAdjusted,
+        scoreUncertain,
         raw
       };
     } catch {
@@ -105,12 +119,15 @@
       }
     }
     const subTotal = subScores.reduce((sum, item) => sum + item.score, 0);
+    const fallback = extractScore(raw, maxScore);
     return {
       status: statusMatch ? mapStatus(statusMatch[1]) : "legible",
-      score: subScores.length > 0 ? subTotal : extractScore(raw, maxScore),
+      score: subScores.length > 0 ? subTotal : fallback.value,
       subScores,
       reason: reasonMatch ? reasonMatch[1].trim().slice(0, 300) : "",
       confidence: 0.5,
+      scoreAdjusted: false,
+      scoreUncertain: subScores.length === 0 && !fallback.certain,
       raw
     };
   }

@@ -188,25 +188,44 @@
     const total = doc.querySelector(SELECTORS.scoreTotal);
     const scoringQuestion = total?.getAttribute("disptitle") || total?.closest("li")?.querySelector(".label")?.textContent?.trim() || "";
     const heading = textOf(doc, SELECTORS.topicIndex);
-    const pageId = normalizeQuestion(scoringQuestion) || normalizeQuestion(heading) || new URLSearchParams(window.location.search).get("topicId") || "\u5F53\u524D\u9898\u76EE";
-    const maxScore = inputs.reduce((sum, input) => sum + input.maxScore, 0);
+    const domId = normalizeQuestion(scoringQuestion) || normalizeQuestion(heading) || new URLSearchParams(window.location.search).get("topicId") || "\u5F53\u524D\u9898\u76EE";
+    // 接口的 topicNumStr（如 43,1）比 DOM 文本更规范，优先作为题号，两者都保留。
+    const hookTopic = hookCurrentField("topicNumStr");
+    const topicNumStr = hookTopic ? String(hookTopic).trim() : domId;
+    const maxScore = resolveMaxScore(doc) || inputs.reduce((sum, input) => sum + input.maxScore, 0);
     const subQuestions = inputs.length > 1 ? inputs.map((input) => ({ label: input.label, maxScore: input.maxScore })) : [];
     return {
-      questionId: pageId,
+      questionId: topicNumStr,
+      topicNumStr,
       questionText: heading,
       maxScore,
       subQuestions,
       images: answerSnapshot(doc).urls
     };
   }
-  function checkMaxScore(configured2, doc) {
-    const maxima = getScoreInputs(doc).map((input) => input.maxScore).filter((value) => value > 0);
-    if (maxima.length === 0) return "";
-    const total = maxima.reduce((sum, value) => sum + value, 0);
-    if (Math.abs(total - configured2) > 1e-6) {
-      return `\u5F53\u524D\u9898\u76EE\u6EE1\u5206\u4E3A${total}\u5206\uFF0C\u6279\u6539\u65B9\u6848\u4E3A${configured2}\u5206\uFF0C\u8BF7\u6838\u5BF9\u540E\u7EE7\u7EED`;
+  // 接口优先的当前题字段：观察器没装或没数据时返回 null，由调用方退回 DOM。
+  function hookCurrentField(key) {
+    try {
+      if (typeof currentHookIdentity !== "function") return null;
+      const value = currentHookIdentity()?.[key];
+      return value === void 0 || value === null || value === "" ? null : value;
+    } catch {
+      return null;
     }
-    return "";
+  }
+  function resolveMaxScore(doc) {
+    const observed = Number(hookCurrentField("subTopicScore"));
+    if (Number.isFinite(observed) && observed > 0) return observed;
+    const maxima = getScoreInputs(doc).map((input) => input.maxScore).filter((value) => value > 0);
+    return maxima.reduce((sum, value) => sum + value, 0);
+  }
+  function currentScanRecordId() {
+    return String(hookCurrentField("scanRecordId") || "");
+  }
+  // 满分以页面/接口为准：不再阻断批改，由上层自动写回配置并提示一行。
+  function checkMaxScore(configured2, doc) {
+    const maxScore = resolveMaxScore(doc);
+    return { maxScore, mismatch: maxScore > 0 && Math.abs(maxScore - Number(configured2 || 0)) > 1e-6 };
   }
   // 提交回执：接口观察器装上后写入，未装上时保持未激活，提交沿用「点过即提交」的旧行为。
   var commitFeed = { active: false, last: null, resetAt: 0 };
@@ -281,8 +300,11 @@
   function getPaperIdentity() {
     return answerSnapshot().identity;
   }
-  async function waitForNextPaper(oldIdentity, timeout = 25e3) {
-    if (!oldIdentity) return false;
+  async function waitForNextPaper(oldIdentity, oldScan = "", timeout = 25e3) {
+    if (!oldIdentity && !oldScan) return false;
+    const startedAt = Date.now();
+    // 主判据（scanRecordId 变化）只在前 8 秒内生效：接口没反应就退回图片判定。
+    const scanWindow = 8e3;
     let remaining = timeout;
     let lastTick = Date.now();
     let candidate = null;
@@ -293,8 +315,16 @@
       // 页面不可见（切到其它标签页/最小化）时暂停倒计时，避免切走一会儿就判定换卷失败。
       if (!hidden) remaining -= now - lastTick;
       lastTick = now;
+      if (oldScan && now - startedAt <= scanWindow) {
+        const nextScan = currentScanRecordId();
+        if (nextScan && nextScan !== oldScan) return true;
+      }
+      if (!oldIdentity) {
+        await new Promise((resolve) => window.setTimeout(resolve, 200));
+        continue;
+      }
       const snapshot = answerSnapshot();
-      // 换卷只需图片 URL 集合变化，不要求图片已加载完成（后台标签页图片常处于未 complete 状态）。
+      // 兜底：图片 URL 集合变化并连续两次稳定（后台标签页图片常未 complete，不要求加载完成）。
       if (snapshot.identity && snapshot.identity !== oldIdentity) {
         stable = candidate === snapshot.identity ? stable + 1 : 1;
         candidate = snapshot.identity;

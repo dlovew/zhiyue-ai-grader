@@ -99,6 +99,16 @@ async function gradeQuestion(options) {
   if (grade.status === "blank" && grade.score > 0) {
     reviewReasons.push("\u8BC6\u522B\u4E3A\u672A\u4F5C\u7B54\u4F46\u7ED9\u51FA\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u67E5");
   }
+  // 无法辨认却给了分：多半是模型凭印象打分，必须人工确认。
+  if (grade.status === "illegible" && grade.score > 0) {
+    reviewReasons.push("\u8BC6\u522B\u4E3A\u65E0\u6CD5\u8FA8\u8BA4\u5374\u7ED9\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u5B9E");
+  }
+  if (grade.scoreUncertain) reviewReasons.push("\u672A\u80FD\u4ECE\u6A21\u578B\u8F93\u51FA\u4E2D\u786E\u5B9A\u5206\u6570\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u5B9A");
+  if (grade.scoreAdjusted) reviewReasons.push("\u603B\u5206\u4E0E\u5C0F\u9898\u5408\u8BA1\u4E0D\u4E00\u81F4\uFF0C\u5DF2\u6309\u5C0F\u9898\u91CD\u7B97");
+  const missingSubs = question.subQuestions.length - grade.subScores.length;
+  if (question.subQuestions.length > 0 && missingSubs > 0) {
+    reviewReasons.push(`\u6709 ${missingSubs} \u4E2A\u5C0F\u9898\u672A\u8FD4\u56DE\u5206\u6570\uFF0C\u8BF7\u6838\u5BF9`);
+  }
   if (grade.confidence < 0.5) reviewReasons.push("\u6A21\u578B\u7F6E\u4FE1\u5EA6\u8F83\u4F4E\uFF0C\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
   const result = {
     ...grade,

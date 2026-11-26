@@ -27,10 +27,10 @@ function loadModules(queue = []) {
     }
   };
   context.globalThis = context;
-  const files = ['src/infra/storage.ts', 'src/config.ts', 'src/infra/platforms.ts', 'src/infra/api.ts', 'src/core/prompt.ts', 'src/core/parse.ts', 'src/core/pipeline.ts'];
+  const files = ['src/infra/storage.ts', 'src/config.ts', 'src/infra/platforms.ts', 'src/infra/api.ts', 'src/infra/rate-limit.ts', 'src/core/prompt.ts', 'src/core/parse.ts', 'src/core/pipeline.ts'];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG, getPlatformThinkingLevels, thinkingLevelLabel, clampThinkingLevel, THINKING_LEVEL_LABELS, isForcedThinkingModel, markForcedThinking, loadForcedThinking, runGrade };`, context);
+  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG, getPlatformThinkingLevels, thinkingLevelLabel, clampThinkingLevel, THINKING_LEVEL_LABELS, isForcedThinkingModel, markForcedThinking, loadForcedThinking, runGrade, RateLimiter };`, context);
   return { api: context.__exposed, calls, store };
 }
 
@@ -236,9 +236,12 @@ function loadZhixue({ visibility = 'visible', imageSrc = 'https://img.example/a.
 
 // 接口观察器单独装载：适配器 + hook，只测解析与身份，不碰真实 XHR。
 function loadHook() {
+  const emptyDoc = { visibilityState: 'visible', querySelector: () => null, querySelectorAll: () => [] };
   const context = {
     console: { log() {}, warn() {}, error() {} },
     window: { setTimeout: (fn) => setTimeout(fn, 0) },
+    document: emptyDoc,
+    unsafeWindow: { document: emptyDoc },
     URL
   };
   context.globalThis = context;
@@ -246,7 +249,7 @@ function loadHook() {
     .map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n'))
     .join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__hook = { handleHookResponse, hookField, hookIdentity, hookUrlsFrom, hookIdentityKey, freshAnswerImages, currentHookIdentity, nextHookIdentity, hookState, hookActive, commitFeed, pushCommitSignal, resetCommitSignal, waitCommitSignal };`, context);
+  vm.runInContext(`${code}\n;globalThis.__hook = { handleHookResponse, hookField, hookIdentity, hookUrlsFrom, hookIdentityKey, freshAnswerImages, currentHookIdentity, nextHookIdentity, hookState, hookActive, commitFeed, pushCommitSignal, resetCommitSignal, waitCommitSignal, resolveMaxScore, checkMaxScore, currentScanRecordId };`, context);
   return context.__hook;
 }
 
@@ -556,7 +559,9 @@ test('紧凑输出协议按索引映射小题名称与满分', () => {
   const subs = [{ label: '第1小问', maxScore: 3 }, { label: '第2小问', maxScore: 2 }];
   const grade = core.parseGrade('{"s":"p","sc":4,"c":0.8,"r":"第2问漏步骤","sub":[{"i":0,"sc":1.5},{"i":1,"sc":2}]}', 5, subs);
   assert.equal(grade.status, 'partial');
-  assert.equal(grade.score, 4);
+  // 模型自报 4 分，但小题合计 3.5：以小题为准并标记重算
+  assert.equal(grade.score, 3.5);
+  assert.equal(grade.scoreAdjusted, true);
   assert.equal(grade.confidence, 0.8);
   assert.equal(grade.reason, '第2问漏步骤');
   assert.equal(grade.subScores.length, 2);
@@ -575,6 +580,80 @@ test('小题索引按 1 开始编号时自动左移，避免错位', () => {
   assert.equal(grade.subScores[0].maxScore, 2);
   assert.equal(grade.subScores[1].label, '第2空');
   assert.equal(grade.subScores[1].reason, '依据不符');
+});
+
+test('接口优先同步满分与题号，未装观察器退回 DOM', () => {
+  const hook = loadHook();
+  // 没有接口数据、DOM 也为空：满分 0，不误判
+  assert.equal(hook.resolveMaxScore(null), 0);
+  hook.handleHookResponse('/api/scanrecorddetail/get', JSON.stringify({
+    data: { scanRecordId: 'S1', topicNumStr: '43,1', subTopicScore: 4 }
+  }));
+  assert.equal(hook.resolveMaxScore(null), 4);
+  const check = hook.checkMaxScore(5, null);
+  assert.equal(check.maxScore, 4);
+  assert.equal(check.mismatch, true);
+  assert.equal(hook.checkMaxScore(4, null).mismatch, false);
+  assert.equal(hook.currentScanRecordId(), 'S1');
+});
+
+test('限流不死等：单次超预算直接拒绝，等待超时有上限', async () => {
+  const { api } = loadModules();
+  const limiter = new api.RateLimiter({ maxConcurrent: 1, maxRpm: 60, maxTpm: 1000 });
+  await assert.rejects(() => limiter.acquire(5000, 50), /超过 TPM 预算/);
+  const busy = new api.RateLimiter({ maxConcurrent: 1, maxRpm: 60, maxTpm: 1e5 });
+  busy.active = 1;
+  await assert.rejects(() => busy.acquire(10, 60), /等待限流配额超时/);
+});
+
+test('finish_reason=length 整次作废，不把空正文当零分', async () => {
+  const { api } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '' } }] })
+  }]);
+  await assert.rejects(
+    () => api.chatCompletion(
+      { platform: 'custom', endpoint: 'https://example.com/v1/chat/completions', model: 'm', apiKey: 'k' },
+      [{ role: 'user', content: 'hi' }],
+      {}
+    ),
+    /finish_reason=length/
+  );
+});
+
+test('P1 判分质量接线：满分同步、换卷主判据、截断作废', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /checkMaxScore\(config\.context\.maxScore, markingDoc\)/);
+  assert.match(built, /config\.context\.maxScore = scoreCheck\.maxScore/);
+  assert.match(built, /const scanWindow = 8e3/);
+  assert.match(built, /nextScan !== oldScan/);
+  assert.match(built, /await waitForNextPaper\(submitted\.oldIdentity, submitted\.oldScan\)/);
+  assert.match(built, /finish_reason === "length"/);
+  assert.match(built, /scoreAdjusted|scoreUncertain/);
+});
+
+test('小题不全时不重算总分，并标记需要复核', () => {
+  const { core } = loadCore();
+  const subs = [{ label: '第1问', maxScore: 2 }, { label: '第2问', maxScore: 3 }];
+  // 只回了 1 个小题：不能把自报总分抹掉
+  const partial = core.parseGrade('{"s":"p","sc":3,"sub":[{"i":0,"sc":2}]}', 5, subs);
+  assert.equal(partial.score, 3);
+  assert.equal(partial.scoreAdjusted, false);
+  assert.equal(partial.subScores.length, 1);
+});
+
+test('分数解析：优先【得分】x/y 的分子，无法确定时不猜', () => {
+  const { core } = loadCore();
+  const labeled = core.parseGrade('【作答状态】可辨认\n【得分】3/5\n【理由】步骤对', 5, []);
+  assert.equal(labeled.score, 3);
+  assert.equal(labeled.scoreUncertain, false);
+  const tagged = core.parseGrade('作答状态：可辨认\n得分：4\n理由：ok', 5, []);
+  assert.equal(tagged.score, 4);
+  const single = core.parseGrade('【作答状态】可辨认\n【理由】扣 1 分', 5, []);
+  assert.equal(single.scoreUncertain, false);
+  const ambiguous = core.parseGrade('【作答状态】可辨认\n【理由】第1步 2 分，第2步 3 分', 5, []);
+  assert.equal(ambiguous.scoreUncertain, true);
+  assert.equal(ambiguous.score, 0);
 });
 
 test('旧版 JSON 协议仍然可以解析', () => {

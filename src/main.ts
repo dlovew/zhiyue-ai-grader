@@ -49,6 +49,8 @@
       onSave: (draft) => {
         config = draft;
         saveConfig(config);
+        // TPM 太低时大图会长期排队，提示一次而不是等用户自己发现。
+        if (config.pipeline.maxTpm < 12000) panel.toast("TPM \u9884\u7B97\u4F4E\u4E8E 12000\uFF0C\u5927\u56FE\u5BB9\u6613\u6392\u961F\uFF0C\u5EFA\u8BAE\u8C03\u5927");
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
         syncThinkingModesFromConfig(config);
@@ -133,14 +135,16 @@
         panel.showError("\u5C1A\u672A\u8BFB\u53D6\u5230\u9898\u76EE\uFF0C\u8BF7\u6253\u5F00\u667A\u5B66\u7F51\u9605\u5377\u9875");
         return false;
       }
+      // 满分以页面（接口优先）为准：不一致就自动写回配置，不再阻断批改。
+      const scoreCheck = checkMaxScore(config.context.maxScore, markingDoc);
+      if (scoreCheck.maxScore > 0 && scoreCheck.mismatch) {
+        config.context.maxScore = scoreCheck.maxScore;
+        saveConfig(config);
+        panel.toast(`\u5DF2\u6309\u9875\u9762\u540C\u6B65\u6EE1\u5206\uFF1A${scoreCheck.maxScore} \u5206`);
+      }
       const errors = validateConfig(config);
       if (errors.length > 0) {
         panel.showError(`${errors[0]}\uFF08\u8BF7\u70B9\u51FB\u300C\u8BBE\u7F6E\u300D\u624B\u52A8\u4FEE\u6539\uFF09`);
-        return false;
-      }
-      const scoreError = checkMaxScore(config.context.maxScore, markingDoc);
-      if (scoreError) {
-        panel.showError(scoreError);
         return false;
       }
       busy = true;
@@ -198,6 +202,8 @@
     function historyQuestion(question) {
       return {
         questionId: question.questionId,
+        // 题号与接口原始题号都留一份，方便按平台口径对账。
+        topicNumStr: question.topicNumStr || question.questionId,
         questionText: question.questionText,
         maxScore: question.maxScore,
         subQuestions: question.subQuestions,
@@ -259,6 +265,8 @@
           return { ok: false, oldIdentity: null };
         }
         const oldIdentity = getPaperIdentity();
+        // 换卷判据需要提交前的 scanRecordId；接口没给就留空、退回图片判定。
+        const oldScan = currentScanRecordId();
         // 填分必须回读一致才算写入成功，否则宁可不提交。
         const filled = fillScores(scores, markingDoc);
         if (!filled.ok) {
@@ -292,12 +300,12 @@
           panel.setStage("\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377");
         } else {
           panel.toast(verdict.confirmed ? "\u5DF2\u63D0\u4EA4\uFF08\u5E73\u53F0\u5DF2\u786E\u8BA4\uFF09" : "\u5DF2\u63D0\u4EA4");
-          void waitForNextPaper(oldIdentity).then((changed) => {
+          void waitForNextPaper(oldIdentity, oldScan).then((changed) => {
             if (changed) void detect();
             else panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u6362\u5377\uFF0C\u53EF\u7EE7\u7EED\u4EBA\u5DE5\u64CD\u4F5C");
           });
         }
-        return { ok: true, oldIdentity };
+        return { ok: true, oldIdentity, oldScan };
       } finally {
         submitting = false;
       }
@@ -326,7 +334,7 @@
         const submitted = await submitResult({ silent: true });
         if (!submitted.ok || !autoMode || autoStopRequested) break;
         panel.setSubtitle(`\u8FDE\u7EED\u6279\u9605\u4E2D \xB7 \u7B2C ${count} \u4EFD\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377\uFF08\u53EF\u5207\u6362\u5230\u5176\u4ED6\u6807\u7B7E\u9875\uFF09`);
-        const changed = await waitForNextPaper(submitted.oldIdentity);
+        const changed = await waitForNextPaper(submitted.oldIdentity, submitted.oldScan);
         if (!changed || !autoMode || autoStopRequested) {
           if (autoMode) panel.showError("\u7B49\u5F85\u6362\u5377\u8D85\u65F6\uFF0C\u8FDE\u7EED\u6279\u9605\u5DF2\u505C\u6B62\u3002\u82E5\u521A\u624D\u5207\u6362\u4E86\u754C\u9762\uFF0C\u8BF7\u786E\u8BA4\u9605\u5377\u9875\u4ECD\u6253\u5F00\u4E14\u5DF2\u663E\u793A\u65B0\u4F5C\u7B54\u56FE\u540E\u91CD\u65B0\u5F00\u59CB");
           break;
