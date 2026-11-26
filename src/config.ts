@@ -24,7 +24,6 @@
       detail: "high",
       autoBySubject: true
     },
-    promptVersion: "zygr-prompt-v2",
     historyLimit: 500,
     // 连续批阅份数上限：无人看管时也不至于一路跑到底。
     continuousLimit: 20,
@@ -54,7 +53,6 @@
       if (!isRecord(data) || data.app !== "zygr" || !isRecord(data.config)) return null;
       return {
         config: data.config,
-        presets: Array.isArray(data.presets) ? data.presets : [],
         keys: isRecord(data.keys) ? data.keys : {},
         models: isRecord(data.models) ? data.models : {},
         thinkingModes: isRecord(data.thinkingModes) ? data.thinkingModes : {}
@@ -104,6 +102,7 @@
     removeKey(STORAGE_KEYS.stats);
     removeKey(STORAGE_KEYS.thinkingForced);
     removeKey(PRESET_STORAGE_KEY);
+    removeKey(RUBRIC_LIBRARY_KEY);
     removeKey(PLATFORM_KEYS_KEY);
     removeKey(PLATFORM_MODELS_KEY);
     removeKey(PLATFORM_THINKING_KEY);

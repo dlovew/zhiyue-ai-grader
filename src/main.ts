@@ -21,6 +21,8 @@
     let currentQuestion = null;
     let lastResult = null;
     let lastHistoryId = "";
+    // 从历史定位过来后重新批改：结果写回原条目，避免待复核队列一直指着旧分数打转。
+    let regradeTargetId = "";
     let busy = false;
     // 提交互斥与冷却：连续批阅与手动点击可能同时触发提交，必须串行化。
     let submitting = false;
@@ -29,8 +31,11 @@
     const forcedNotified = new Set();
     let autoMode = false;
     let autoStopRequested = false;
+    // 复核队列：从「下一条需复核」进入后，提交完自动标记并跳到下一条待复核的卷子。
+    let reviewQueueActive = false;
     let observer = null;
     let observerTimer = 0;
+    let watchTimer = 0;
     const panel = new GraderPanel({
       onGrade: () => {
         void runGrade2();
@@ -57,7 +62,42 @@
         cache = createCache();
         limiter = buildLimiter(config);
         panel.setCache(pipelineLabel(config));
+        // 保存配置时顺手把这套标准存进「本题」槽位，下次切回来直接可用。
+        const slot = rubricSlotKey(currentQuestion);
+        if (slot) putRubricPreset(slot, config.context);
         panel.setSubtitle("\u914D\u7F6E\u5DF2\u66F4\u65B0");
+      },
+      // 标准库的增删都用「当前题号」定位，避免把 A 题的标准存到 B 题上。
+      onRubricSave: (context) => {
+        const slot = rubricSlotKey(currentQuestion);
+        if (!slot) {
+          panel.toast("\u5C1A\u672A\u8BFB\u53D6\u5230\u9898\u53F7\uFF0C\u65E0\u6CD5\u5B58\u5165\u6807\u51C6\u5E93");
+          return;
+        }
+        if (!rubricHasContent(context)) {
+          panel.toast("\u53C2\u8003\u7B54\u6848\u4E0E\u8BC4\u5206\u6807\u51C6\u90FD\u662F\u7A7A\u7684\uFF0C\u6CA1\u5FC5\u8981\u5B58");
+          return;
+        }
+        config = { ...config, context: rubricContextFields(context) };
+        saveConfig(config);
+        putRubricPreset(slot, config.context);
+        panel.toast(`\u5DF2\u5B58\u5165\u6807\u51C6\u5E93\uFF1A\u9898\u53F7 ${rubricSlotLabel(currentQuestion)}`);
+      },
+      onRubricLoad: () => {
+        const slot = rubricSlotKey(currentQuestion);
+        const preset = getRubricPreset(slot);
+        if (!preset) {
+          panel.toast(`\u9898\u53F7 ${rubricSlotLabel(currentQuestion) || "\u672C\u9898"} \u8FD8\u6CA1\u5B58\u8FC7\u6807\u51C6`);
+          return;
+        }
+        config = { ...config, context: rubricContextFields(preset) };
+        saveConfig(config);
+        panel.toast(`\u5DF2\u8F7D\u5165\u9898\u53F7 ${rubricSlotLabel(currentQuestion)} \u7684\u6807\u51C6`);
+      },
+      onRubricClear: () => {
+        const slot = rubricSlotKey(currentQuestion);
+        const removed = removeRubricPreset(slot);
+        panel.toast(removed ? `\u5DF2\u6E05\u7A7A\u9898\u53F7 ${rubricSlotLabel(currentQuestion)} \u7684\u6807\u51C6` : "\u672C\u9898\u8FD8\u6CA1\u5B58\u8FC7\u6807\u51C6");
       },
       onTest: (draft) => testService(draft),
       onFetchModels: (draft) => fetchModels(draft.pipeline.vlm),
@@ -73,7 +113,6 @@
       onImport: (data) => {
         config = merge(DEFAULT_CONFIG, data.config);
         saveConfig(config);
-        if (Array.isArray(data.presets)) saveCustomPresets(data.presets);
         if (isRecord(data.keys)) savePlatformKeys(data.keys);
         if (isRecord(data.models)) savePlatformModels(data.models);
         if (isRecord(data.thinkingModes)) savePlatformThinkingModes(data.thinkingModes);
@@ -122,7 +161,14 @@
         writeJson(STORAGE_KEYS.history, history);
         historyPanel.refresh(history);
         panel.toast("\u590D\u6838\u4FE1\u606F\u5DF2\u4FDD\u5B58");
-      }
+      },
+      // 点历史记录直接回到阅卷页对应那份卷子（复用平台的阅卷记录链路）。
+      onJump: (entry, fromQueue) => {
+        // 手动定位要退出队列模式，免得下一次提交被自动带去别的卷子。
+        if (!fromQueue) reviewQueueActive = false;
+        void jumpToHistory(entry, { fromQueue: Boolean(fromQueue) });
+      },
+      onEmptyQueue: () => panel.toast("\u6CA1\u6709\u5F85\u590D\u6838\u7684\u8BB0\u5F55")
     });
     panel.mount();
     // 观察器拿到新卷后立刻刷新题号与进度：页面 DOM 常比接口先就绪，只靠 MutationObserver 会漏。
@@ -173,8 +219,14 @@
         if (images.length === 0) throw new Error("\u4F5C\u7B54\u56FE\u7247\u5C1A\u672A\u7A33\u5B9A\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
         // 身份只取台账号与题号：跨账号一致，且不含会过期的签名。
         const observedIdentity = currentHookIdentity();
+        // 学号与试卷 ID 是「历史记录定位」的钥匙：记录列表只认学号，接口只认试卷 ID。
         const identity = observedIdentity && observedIdentity.scanRecordId
-          ? { scanRecordId: observedIdentity.scanRecordId, topicNumStr: observedIdentity.topicNumStr || "" }
+          ? {
+            scanRecordId: observedIdentity.scanRecordId,
+            topicNumStr: observedIdentity.topicNumStr || "",
+            userCode: observedIdentity.userCode || "",
+            markingPaperId: observedIdentity.markingPaperId || ""
+          }
           : null;
         currentQuestion = { ...currentQuestion, images, identity };
         panel.setQuestion(currentQuestion);
@@ -187,15 +239,36 @@
         });
         lastResult = result;
         panel.setResult(result);
-        lastHistoryId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        appendHistory({
-          id: lastHistoryId,
-          createdAt: Date.now(),
+        // 从历史定位过来重批时更新原条目，普通批改才新增：否则复核队列会一直指着旧分数打转。
+        const regradeTarget = regradeTargetId && loadHistory().find((entry) => entry.id === regradeTargetId);
+        const historyEntry = {
+          id: regradeTarget?.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          createdAt: regradeTarget?.createdAt || Date.now(),
           question: historyQuestion(currentQuestion),
           result,
           submitted: false
-        }, config.historyLimit);
-        historyPanel.refresh(loadHistory());
+        };
+        lastHistoryId = historyEntry.id;
+        if (regradeTarget) {
+          const history = loadHistory().map((entry) => entry.id === regradeTarget.id
+            ? {
+              ...entry,
+              ...historyEntry,
+              // 新结果要重新复核：清掉上一轮的复核留痕，但保留用户填过的确认分。
+              reviewedAt: void 0,
+              reviewNote: void 0
+            }
+            : entry);
+          writeJson(STORAGE_KEYS.history, history);
+          historyPanel.refresh(history);
+        } else {
+          appendHistory(historyEntry, config.historyLimit);
+          historyPanel.refresh(loadHistory());
+        }
+        if (!identity) {
+          const gradedKeys = (currentQuestion.images || []).map(stableImageKey).join("|");
+          void backfillIdentity(lastHistoryId, gradedKeys);
+        }
         if (result.needsReview) panel.toast("\u6279\u6539\u5B8C\u6210\uFF0C\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
         // 强制思考的模型只提示一次，避免每份卷子都弹。
         if (result.thinkingForced && !forcedNotified.has(config.pipeline.vlm.model)) {
@@ -209,6 +282,40 @@
       } finally {
         busy = false;
         panel.setBusy(false);
+      }
+    }
+    // 观察器晚于首份卷加载时（刷新后立刻批改、脚本刚注入），identity 是空的；
+    // 等接口数据到了再回填，否则这条历史永远点不了「定位」。
+    async function backfillIdentity(historyId, imageKeys) {
+      const deadline = Date.now() + 8e3;
+      while (Date.now() < deadline) {
+        const observed = currentHookIdentity();
+        if (observed && observed.scanRecordId) {
+          // 卷子已经换了就别回填，否则会把上一位学生的身份贴到这条记录上。
+          const nowKeys = (currentQuestion?.images || []).map(stableImageKey).join("|");
+          if (nowKeys !== imageKeys) return;
+          const history = loadHistory().map((entry) => entry.id === historyId
+            ? {
+              ...entry,
+              question: {
+                ...entry.question,
+                // 顺带把题号修正成接口口径（DOM 的 "43(1)" 查记录列表查不到），
+                // 只改「原本就是 DOM 口径」的那种，接口口径原样保留。
+                topicNumStr: observed.topicNumStr || entry.question.topicNumStr,
+                identity: {
+                  scanRecordId: observed.scanRecordId,
+                  topicNumStr: observed.topicNumStr || "",
+                  userCode: observed.userCode || "",
+                  markingPaperId: observed.markingPaperId || ""
+                }
+              }
+            }
+            : entry);
+          writeJson(STORAGE_KEYS.history, history);
+          historyPanel.refresh(history);
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 300));
       }
     }
     // 历史只留定位字段与归一化后的图片键：签名 URL / data URI 会过期并迅速撑爆存储。
@@ -258,8 +365,13 @@
       }
     }
     async function submitResult(options = {}) {
-      if (!lastResult || !markingDoc) {
-        panel.showError("\u8BF7\u5148\u5B8C\u6210\u6279\u6539\u5E76\u8FDB\u5165\u9605\u5377\u9875\u9762");
+      // 两种失败原因分开说：「没进阅卷页」和「还没批改」是两件事。
+      if (!markingDoc) {
+        panel.showError("\u672A\u68C0\u6D4B\u5230\u9605\u5377\u63A7\u4EF6\uFF0C\u8BF7\u5148\u6253\u5F00\u9605\u5377\u9875");
+        return { ok: false, oldIdentity: null };
+      }
+      if (!lastResult) {
+        panel.showError("\u8FD8\u6CA1\u6709\u6279\u6539\u7ED3\u679C\uFF0C\u8BF7\u5148\u70B9\u300C\u5F00\u59CB\u6279\u6539\u300D");
         return { ok: false, oldIdentity: null };
       }
       // 互斥 + 冷却：连点会把同一份卷提交两次，也会让提交回执错位到下一次点击上。
@@ -271,8 +383,16 @@
       submitting = true;
       try {
         applyScoreEdits();
+        // 提交要等回执、最多几秒，这期间页面可能已经换卷，applyQuestion 会把 lastResult 清空。
+        // 先用局部变量抓住这份结果，后面写历史、回缓存都只认它。
+        const submittedResult = lastResult;
         const inputs = getScoreInputs(markingDoc);
-        const scores = inputs.length > 1 && lastResult.subScores.length === inputs.length ? lastResult.subScores.map((item) => item.score) : [Math.round(lastResult.score * 10) / 10];
+        // 打分框比小题分多时，硬填只会把第一个框写上、后面留空，必须拦住说清楚。
+        if (inputs.length > 1 && submittedResult.subScores.length !== inputs.length) {
+          panel.showError(`小题分未回全（${submittedResult.subScores.length}/${inputs.length}），请先补齐再提交`);
+          return { ok: false, oldIdentity: null };
+        }
+        const scores = inputs.length > 1 ? submittedResult.subScores.map((item) => item.score) : [Math.round(submittedResult.score * 10) / 10];
         const label = scores.length > 1 ? `\u5404\u5C0F\u9898\u5206\u6570 ${scores.join("\u3001")}` : `${scores[0]} \u5206`;
         if (!options.silent && !options.skipConfirm && !window.confirm(`\u786E\u8BA4\u5199\u5165${label}\u5E76\u63D0\u4EA4\uFF1F`)) {
           return { ok: false, oldIdentity: null };
@@ -297,32 +417,199 @@
         // 有接口观察器就以平台回执为准（最多等 2.5 秒）；没有观察器时保持旧行为。
         const observed = hookActive();
         const signal = observed ? await waitCommitSignal(2500) : null;
-        const verdict = judgeSubmit(observed, signal);
+        // 回执丢了不代表没提交：再看一眼卷子有没有真的换，避免误报失败后老师重复提交。
+        const changed = observed && !signal ? await waitPaperChanged(oldIdentity, oldScan, 3e3) : false;
+        const verdict = judgeSubmit(observed, signal, changed);
         if (!verdict.ok) {
           panel.showError(verdict.reason);
           return { ok: false, oldIdentity };
         }
-        const history = loadHistory().map((entry) => entry.id === lastHistoryId ? { ...entry, result: lastResult, submitted: true, submitConfirmed: verdict.confirmed } : entry);
+        // 提交即人工确认：需复核的条目顺手标记已复核，复核队列不会越积越长。
+        const history = loadHistory().map((entry) => {
+          if (entry.id !== lastHistoryId) return entry;
+          const patch = { ...entry, result: submittedResult, submitted: true, submitConfirmed: verdict.confirmed };
+          if (submittedResult?.needsReview && !entry.reviewedAt) {
+            patch.reviewedAt = Date.now();
+            patch.reviewNote = entry.reviewNote || "\u63D0\u4EA4\u65F6\u81EA\u52A8\u6807\u8BB0";
+          }
+          return patch;
+        });
         writeJson(STORAGE_KEYS.history, history);
         historyPanel.refresh(history);
+        // 顺手把「阅卷记录」里的记录 id 解析出来存进历史：下次点定位不用再翻列表。
+        const submittedHistoryId = lastHistoryId;
+        // 题号/试卷 ID 以刚写进历史的那条为准：此刻 currentQuestion 可能已经换成下一份了。
+        const submittedEntry = loadHistory().find((entry) => entry.id === submittedHistoryId);
+        const submittedIdentity = submittedEntry?.question?.identity || null;
+        if (submittedHistoryId) {
+          const fallbackIdentity = submittedIdentity || {
+            scanRecordId: "",
+            topicNumStr: submittedEntry?.question?.topicNumStr || "",
+            userCode: "",
+            markingPaperId: hookCurrentField("markingPaperId") || ""
+          };
+          void resolveMarkedRecordId(markingDoc, fallbackIdentity, submittedResult?.score).then((record) => {
+            if (!record || !record.id) return;
+            const patched = loadHistory().map((entry) => {
+              if (entry.id !== submittedHistoryId) return entry;
+              const identity = entry.question.identity || { scanRecordId: "", topicNumStr: "", userCode: "", markingPaperId: "" };
+              return {
+                ...entry,
+                question: {
+                  ...entry.question,
+                  recordId: record.id,
+                  // 学号是定位的钥匙：观察器漏了首份卷时靠这里补上。
+                  identity: {
+                    ...identity,
+                    userCode: identity.userCode || record.userCode,
+                    markingPaperId: identity.markingPaperId || fallbackIdentity.markingPaperId,
+                    // 身份里的题号统一存接口口径（43,1），DOM 口径留着只用于显示
+                    topicNumStr: identity.topicNumStr || jumpApiTopicNum(fallbackIdentity.topicNumStr)
+                  }
+                }
+              };
+            });
+            writeJson(STORAGE_KEYS.history, patched);
+            historyPanel.refresh(patched);
+          }).catch(() => { /* 解析失败不影响提交结果 */ });
+        }
         // 把人工改过的分数回写缓存：双评换第二个账号时命中缓存拿到的是最终分，而不是模型原始分。
-        if (cache && lastResult.cacheKey) cache.set(lastResult.cacheKey, lastResult);
+        if (cache && submittedResult?.cacheKey) cache.set(submittedResult.cacheKey, submittedResult);
         lastResult = null;
+        // 这份已提交，重批归属到此结束；下一份若来自队列，jumpToHistory 会重新设置。
+        regradeTargetId = "";
         updateProgress();
         panel.setSubtitle(options.silent ? "\u8FDE\u7EED\u6279\u9605\u4E2D" : "\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u4E0B\u4E00\u4EFD");
         if (options.silent) {
           panel.setStage("\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377");
         } else {
-          panel.toast(verdict.confirmed ? "\u5DF2\u63D0\u4EA4\uFF08\u5E73\u53F0\u5DF2\u786E\u8BA4\uFF09" : "\u5DF2\u63D0\u4EA4");
+          panel.toast(
+            verdict.confirmed
+              ? "\u5DF2\u63D0\u4EA4\uFF08\u5E73\u53F0\u5DF2\u786E\u8BA4\uFF09"
+              : verdict.inferred
+                ? "\u5DF2\u63D0\u4EA4\uFF08\u672A\u62FF\u5230\u56DE\u6267\uFF0C\u4F46\u9875\u9762\u5DF2\u6362\u5377\uFF09"
+                : "\u5DF2\u63D0\u4EA4"
+          );
           void waitForNextPaper(oldIdentity, oldScan).then((changed) => {
             if (changed) void detect();
             else panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u6362\u5377\uFF0C\u53EF\u7EE7\u7EED\u4EBA\u5DE5\u64CD\u4F5C");
           });
         }
+        // 复核队列模式下，这一份已经提交（需复核的条目会被自动标记已复核），直接推进下一条。
+        if (!options.silent && reviewQueueActive) scheduleReviewAdvance();
         return { ok: true, oldIdentity, oldScan };
       } finally {
         submitting = false;
       }
+    }
+    // 历史记录定位：切题号 → 学号换记录 id → 调页面自己的回评方法 → 重新读题号与满分。
+    async function jumpToHistory(entry, options = {}) {
+      if (autoMode) {
+        panel.toast("\u8FDE\u7EED\u6279\u9605\u4E2D\u4E0D\u80FD\u5B9A\u4F4D\uFF0C\u8BF7\u5148\u505C\u6B62");
+        return;
+      }
+      if (busy || submitting) {
+        panel.toast("\u6B63\u5728\u5904\u7406\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5");
+        return;
+      }
+      const doc = markingDoc || await waitForMarkingDocument(6e3);
+      if (!doc) {
+        panel.showError("\u672A\u68C0\u6D4B\u5230\u9605\u5377\u63A7\u4EF6\uFF0C\u8BF7\u5148\u6253\u5F00\u9605\u5377\u9875");
+        return;
+      }
+      markingDoc = doc;
+      ensureZhixueHook(doc);
+      // 跳转前先记下当前打分框的值，跳完要等它换成目标卷的分数再对账。
+      const scoresBefore = readFilledScores(doc);
+      busy = true;
+      panel.setBusy(true);
+      panel.clearError();
+      panel.setStage("\u5B9A\u4F4D\u5386\u53F2\u8BB0\u5F55");
+      try {
+        const result = await jumpToMarkedRecord(entry, {
+          doc,
+          onPage: (page, total) => panel.setStage("\u5B9A\u4F4D\u5386\u53F2\u8BB0\u5F55", `\u7FFB\u8BB0\u5F55 ${page}/${total} \u9875`)
+        });
+        if (!result.ok) {
+          panel.showError(result.error);
+          // 定位失败就退出队列模式，避免下一次提交被带去别的卷子。
+          reviewQueueActive = false;
+          regradeTargetId = "";
+          return;
+        }
+        // 没换卷时只有「当前学号就是目标学号」才算定位成功：否则队列会把眼前这份卷写到别人的历史记录上。
+        const expectedUser = String(entry?.question?.identity?.userCode || "").trim();
+        const observedUser = String(currentHookIdentity()?.userCode || (answerSnapshot(doc)?.identity || {}).userCode || "").trim();
+        if (!result.changed && (!expectedUser || observedUser !== expectedUser)) {
+          panel.showError("\u56DE\u8BC4\u540E\u6CA1\u770B\u5230\u76EE\u6807\u5377\uFF0C\u5DF2\u505C\u6B62\u5B9A\u4F4D\uFF1B\u8BF7\u4EBA\u5DE5\u786E\u8BA4\u5F53\u524D\u5377\u540E\u91CD\u8BD5");
+          reviewQueueActive = false;
+          regradeTargetId = "";
+          return;
+        }
+        if (!result.changed) panel.toast("\u5DF2\u53D1\u9001\u56DE\u8BC4\uFF0C\u4F46\u6CA1\u770B\u5230\u6362\u5377\uFF0C\u8BF7\u4EBA\u5DE5\u786E\u8BA4");
+        // 定位成功后才进入队列模式：失败时不能让下一次提交被带去别的卷子。
+        if (options.fromQueue) reviewQueueActive = true;
+        // 换卷后旧结果必须作废：面板上留着上一份的分数会诱导提交到这份卷上。
+        lastResult = null;
+        currentQuestion = null;
+        panel.clearResult();
+        if (result.record?.id && entry?.id) {
+          const patched = loadHistory().map((item) => item.id === entry.id
+            ? { ...item, question: { ...item.question, recordId: result.record.id } }
+            : item);
+          writeJson(STORAGE_KEYS.history, patched);
+          historyPanel.refresh(patched);
+        }
+        applyQuestion(readQuestion(doc));
+        // 记录这次批改归属：后面「开始批改」要覆盖这条，而不是再插一条重复历史。
+        regradeTargetId = entry?.id || "";
+        updateProgress();
+        // 平台回填的是「这条记录当时的分数」，和本地历史对不上说明中途有人改过分。
+        // 顺带用它给一句明确的定位反馈：换卷后副标题会被观察器改回「已读取题号」。
+        const filled = await waitScoresSettled(doc, scoresBefore, 1500);
+        const actual = filled.length > 1 ? filled.reduce((sum, value) => sum + value, 0) : filled[0];
+        const expected = Number(entry?.result?.score);
+        const mismatch = Number.isFinite(actual) && Number.isFinite(expected) && Math.abs(actual - expected) > 0.05;
+        panel.toast(
+          mismatch
+            ? `\u8BE5\u5377\u5F53\u524D ${actual} \u5206\uFF0C\u5386\u53F2\u8BB0\u5F55\u662F ${expected} \u5206\uFF0C\u53EF\u80FD\u5DF2\u88AB\u4ED6\u4EBA\u6539\u5206`
+            : `\u5DF2\u5B9A\u4F4D\u5230\u5B66\u53F7 ${result.userCode}${Number.isFinite(actual) ? `\uFF0C\u5F53\u524D ${actual} \u5206` : ""}`
+        );
+        historyPanel.hide();
+        panel.setSubtitle(`\u5DF2\u5B9A\u4F4D\u5230\u5B66\u53F7 ${result.userCode}`);
+        if (reviewQueueActive) {
+          const remain = pendingReviewEntries().length;
+          panel.setSubtitle(`\u590D\u6838\u961F\u5217 \xB7 \u5269\u4F59 ${remain} \u6761`);
+        }
+      } catch (error) {
+        panel.showError(error instanceof Error ? error.message : "\u5B9A\u4F4D\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u5728\u9605\u5377\u8BB0\u5F55\u91CC\u627E\u8FD9\u4E00\u4EFD");
+        reviewQueueActive = false;
+        regradeTargetId = "";
+      } finally {
+        busy = false;
+        panel.setBusy(false);
+      }
+    }
+    // 队列里还剩哪些：需复核 + 未标记已复核 + 能定位。
+    function pendingReviewEntries() {
+      return loadHistory().filter((entry) => entry.result?.needsReview && !entry.reviewedAt && canJumpRecord(entry));
+    }
+    // 提交成功后自动跳下一条，把「复核」做成一路走到底的流程；队列空了就收尾。
+    function scheduleReviewAdvance() {
+      window.setTimeout(() => {
+        void advanceReviewQueue();
+      }, 900);
+    }
+    async function advanceReviewQueue() {
+      if (!reviewQueueActive || autoMode) return;
+      const pending = pendingReviewEntries();
+      if (pending.length === 0) {
+        reviewQueueActive = false;
+        panel.toast("\u590D\u6838\u961F\u5217\u5DF2\u5B8C\u6210");
+        panel.setSubtitle("\u590D\u6838\u961F\u5217\u5DF2\u5B8C\u6210");
+        return;
+      }
+      await jumpToHistory(pending[0], { fromQueue: true });
     }
     async function toggleContinuous() {
       if (autoMode) {
@@ -385,33 +672,99 @@
       updateProgress();
       watchDocument(doc);
     }
+    // 判「还是同一份卷」：题号 + 作答图（去签名）+ 接口身份三者都对得上才算没换。
+    // 刚换卷时观察器比 DOM 慢，scanRecordId 可能一边为空——这时不能据此判换卷，
+    // 否则老师刚批完就被清空结果，点提交只会得到「请先完成批改」。
+    function samePaper(a, b) {
+      if (!a || !b) return false;
+      // 题号口径会从 DOM 的 43(1) 变成接口的 43,1，归一后再比，别把同一道题判成换卷。
+      const topicOf = (value) => (typeof rubricTopicKey === "function" ? rubricTopicKey(value) : String(value || ""));
+      if (topicOf(a.questionId) !== topicOf(b.questionId)) return false;
+      if ((a.images || []).length !== (b.images || []).length) return false;
+      if (a.scanRecordId && b.scanRecordId && a.scanRecordId !== b.scanRecordId) return false;
+      const key = (url) => resourceKey(url) || url;
+      const left = (a.images || []).map(key).sort().join("|");
+      const right = (b.images || []).map(key).sort().join("|");
+      return left === right;
+    }
     function applyQuestion(question) {
       if (!question) return;
-      if (currentQuestion?.questionId === question.questionId
-        && currentQuestion.scanRecordId === question.scanRecordId
-        && currentQuestion.images.length === question.images.length) return;
+      if (samePaper(currentQuestion, question)) return;
+      // 自然换卷后不再属于刚才定位的历史条目，重批目标随之失效。
+      regradeTargetId = "";
+      const previousSlot = rubricSlotKey(currentQuestion);
       currentQuestion = question;
       lastResult = null;
       panel.setQuestion(question);
       panel.setSubtitle(`\u5DF2\u8BFB\u53D6\u9898\u53F7 ${question.questionId}`);
       panel.clearError();
+      syncRubricForQuestion(previousSlot, question);
+    }
+    // 切题时把上一题的标准存回它的槽位，再载入新题号已存的那份。
+    // 新题号没存过就清空答案/标准（上一题已自动保存）：拿错答案键批改比多填一次危险得多。
+    function syncRubricForQuestion(previousSlot, question) {
+      const nextSlot = rubricSlotKey(question);
+      const switched = Boolean(previousSlot) && previousSlot !== nextSlot;
+      const saved = switched ? putRubricPreset(previousSlot, config.context) : false;
+      if (!nextSlot) return;
+      const preset = getRubricPreset(nextSlot);
+      if (preset && rubricHasContent(preset)) {
+        if (sameRubricContext(config.context, preset)) return;
+        config = { ...config, context: rubricContextFields(preset) };
+        saveConfig(config);
+        panel.toast(`\u5DF2\u8F7D\u5165\u9898\u53F7 ${rubricSlotLabel(question)} \u7684\u8BC4\u5206\u6807\u51C6`);
+        return;
+      }
+      if (!switched || !saved || !rubricHasContent(config.context)) return;
+      config = { ...config, context: { ...config.context, question: "", answer: "", rubric: "", maxScore: 0 } };
+      saveConfig(config);
+      panel.toast(`\u9898\u53F7 ${rubricSlotLabel(question)} \u8FD8\u6CA1\u5B58\u8FC7\u6807\u51C6\uFF0C\u4E0A\u4E00\u9898\u7684\u5DF2\u81EA\u52A8\u4FDD\u5B58`);
     }
     // 进度条：页面文本「初评已阅量/任务量」优先，接口计数兜底。
     function updateProgress() {
       const progress = readProgress(markingDoc);
       panel.setProgress(progress ? `\u5DF2\u6279 ${progress.marked} / \u4EFB\u52A1 ${progress.todo}` : "");
     }
+    // 只盯题号/作答图/进度这几个容器：监听整个 body 会让「阅卷记录」这种大列表
+    // 每敲一个字、每翻一页都触发一次全量快照。节点被路由整段替换时靠 2 秒复检重新挂。
     function watchDocument(doc) {
       observer?.disconnect();
+      window.clearTimeout(observerTimer);
+      window.clearInterval(watchTimer);
       if (!doc.body) return;
-      observer = new MutationObserver(() => {
+      const refresh = () => {
+        applyQuestion(readQuestion(doc));
+        updateProgress();
+      };
+      const schedule = () => {
         window.clearTimeout(observerTimer);
-        observerTimer = window.setTimeout(() => {
-          applyQuestion(readQuestion(doc));
-          updateProgress();
-        }, 600);
-      });
-      observer.observe(doc.body, { childList: true, subtree: true, characterData: true });
+        observerTimer = window.setTimeout(refresh, 600);
+      };
+      const targets = () => Array.from(doc.querySelectorAll("#topicImgContent, #currentTopicIndex, #containter_topicTxt, .progress"));
+      const quickKey = () => {
+        const first = doc.querySelector('div[name="topicImg"] img');
+        return `${doc.querySelector(SELECTORS.topicIndex)?.textContent?.trim() || ""}|${(first?.currentSrc || first?.src || "").slice(-80)}`;
+      };
+      let bound = [];
+      let lastKey = quickKey();
+      const bind = () => {
+        const list = targets();
+        const alive = list.length > 0 && list.every((node) => node.isConnected);
+        if (alive && bound.length === list.length && bound.every((node, index) => node === list[index])) return;
+        observer?.disconnect();
+        bound = list.length > 0 ? list : [doc.body];
+        observer = new MutationObserver(schedule);
+        for (const node of bound) observer.observe(node, { childList: true, subtree: true, characterData: true });
+      };
+      bind();
+      // 兜底：接口和 DOM 事件都没反应时，题号或首图变了也补一次刷新。
+      watchTimer = window.setInterval(() => {
+        bind();
+        const key = quickKey();
+        if (key === lastKey) return;
+        lastKey = key;
+        schedule();
+      }, 2000);
     }
     GM_registerMenuCommand("\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u6253\u5F00\u9762\u677F", () => panel.show());
     GM_registerMenuCommand("\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u8FDE\u7EED\u6279\u9605", () => {

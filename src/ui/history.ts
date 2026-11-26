@@ -1,9 +1,39 @@
   // src/ui/history.ts
+  // 能否在阅卷页定位：必须有学号（旧记录没存学号就没法在记录列表里对上号）。
+  function canJumpRecord(entry) {
+    const identity = entry?.question?.identity;
+    return Boolean(identity && String(identity.userCode || "").trim());
+  }
   // 复核状态文案：供详情展示，导出用同一套口径。
   function reviewText(entry) {
     const confirmed = entry.confirmedScore === void 0 || entry.confirmedScore === null ? "" : `\uFF08\u786E\u8BA4 ${entry.confirmedScore} \u5206\uFF09`;
     const note = entry.reviewNote ? ` \xB7 ${entry.reviewNote}` : "";
     return entry.reviewedAt ? `\u5DF2\u590D\u6838${confirmed}${note}` : "\u672A\u590D\u6838";
+  }
+  // 历史里可能有坏记录（早期版本写进过 result: null）：补齐成一个可渲染的占位，
+  // 否则 render 里读 entry.result.score 会直接抛错，整个面板打不开。
+  function normalizeHistoryEntries(entries) {
+    return (Array.isArray(entries) ? entries : []).map((entry) => {
+      if (!entry || !entry.question) return null;
+      if (entry.result && typeof entry.result === "object") return entry;
+      return {
+        ...entry,
+        result: {
+          status: "unknown",
+          score: 0,
+          maxScore: Number(entry.question.maxScore) || 0,
+          subScores: [],
+          reason: "\u8FD9\u6761\u8BB0\u5F55\u7684\u5206\u6570\u4E22\u5931\u4E86\uFF0C\u5EFA\u8BAE\u91CD\u65B0\u6279\u6539",
+          needsReview: true,
+          reviewReasons: ["\u5206\u6570\u4E22\u5931"],
+          cacheHit: false,
+          elapsedMs: 0,
+          usage: null,
+          pipeline: "-",
+          model: "-"
+        }
+      };
+    }).filter(Boolean);
   }
   var HistoryPanel = class {
     constructor(callbacks) {
@@ -35,7 +65,8 @@
         <button class="zygr-btn zygr-ghost" data-act="clear">\u6E05\u7A7A\u5386\u53F2</button>
         <button class="zygr-btn" data-act="csv">\u5BFC\u51FA CSV</button>
         <button class="zygr-btn" data-act="html">\u5BFC\u51FA HTML</button>
-        <button class="zygr-btn zygr-primary" data-act="close">\u5173\u95ED</button>
+        <button class="zygr-btn zygr-primary" data-act="next-review">\u4E0B\u4E00\u6761\u9700\u590D\u6838</button>
+        <button class="zygr-btn zygr-ghost" data-act="close">\u5173\u95ED</button>
       </div>
     </div></div>`;
     }
@@ -52,6 +83,16 @@
         else if (action === "clear") this.callbacks.onClear();
         else if (action === "csv") this.callbacks.onExport("csv");
         else if (action === "html") this.callbacks.onExport("html");
+        if (action === "next-review") {
+          this.jumpNextReview();
+          return;
+        }
+        if (action === "jump") {
+          const row = target.closest("[data-id]");
+          const entry = this.entries.find((item2) => item2.id === row?.dataset.id);
+          if (entry) this.callbacks.onJump?.(entry);
+          return;
+        }
         const item = target.closest("[data-id]");
         if (item?.dataset.id) {
           this.selectedId = item.dataset.id;
@@ -89,7 +130,19 @@
         item.className = "zygr-item";
         if (entry.id === this.selectedId) item.classList.add("zygr-selected");
         item.dataset.id = entry.id;
-        item.textContent = `${new Date(entry.createdAt).toLocaleString("zh-CN")} \xB7 \u9898\u53F7 ${entry.question.questionId} \xB7 ${entry.result.score}/${entry.result.maxScore} \xB7 ${entry.result.pipeline}${entry.result.needsReview ? " \xB7 \u9700\u590D\u6838" : ""}`;
+        const text = document.createElement("div");
+        text.className = "zygr-item-main";
+        text.textContent = `${new Date(entry.createdAt).toLocaleString("zh-CN")} \xB7 \u9898\u53F7 ${entry.question.questionId} \xB7 ${entry.result.score}/${entry.result.maxScore} \xB7 ${entry.result.pipeline}${entry.result.needsReview ? " \xB7 \u9700\u590D\u6838" : ""}`;
+        item.appendChild(text);
+        // 单条记录上就能直接跳回阅卷页，不必先展开详情。
+        if (canJumpRecord(entry)) {
+          const jump = document.createElement("button");
+          jump.className = "zygr-jump";
+          jump.dataset.act = "jump";
+          jump.textContent = "\u5B9A\u4F4D";
+          jump.title = "\u5728\u9605\u5377\u9875\u56DE\u8BC4\u8FD9\u4E00\u4EFD\u5377\u5B50";
+          item.appendChild(jump);
+        }
         list.appendChild(item);
       }
       this.renderDetail();
@@ -117,6 +170,7 @@
         `\u4F9D\u636E\uFF1A${entry.result.reason || "\u65E0"}`,
         `\u590D\u6838\uFF1A${entry.result.reviewReasons.join("\uFF1B") || "\u65E0"}`,
         `\u5C0F\u9898\uFF1A${entry.result.subScores.map((item) => `${item.label} ${item.score}/${item.maxScore}`).join("\uFF1B") || "\u65E0"}`,
+        `\u5B9A\u4F4D\uFF1A${entry.question.identity?.userCode ? `\u5B66\u53F7 ${entry.question.identity.userCode} \xB7 \u8BD5\u5377 ${entry.question.identity.markingPaperId ? "\u5DF2\u8BB0\u5F55" : "\u672A\u8BB0\u5F55"}` : "\u4E0D\u652F\u6301\uFF08\u65E7\u8BB0\u5F55\u6CA1\u5B58\u5B66\u53F7\uFF09"}`,
         `\u590D\u6838\u7ED3\u679C\uFF1A${reviewText(entry)}`
       ];
       detail.textContent = lines.join("\n");
@@ -143,14 +197,38 @@
         const max = Number(entry.result.maxScore) || 999;
         this.callbacks.onReview?.(entry.id, { confirmedScore: Math.min(Math.max(value, 0), max) });
       });
-      actions.append(reviewButton, scoreButton);
+      const jumpButton = document.createElement("button");
+      jumpButton.className = "zygr-btn zygr-primary";
+      jumpButton.textContent = "\u5B9A\u4F4D\u5230\u8BE5\u5377";
+      jumpButton.disabled = !canJumpRecord(entry);
+      jumpButton.title = canJumpRecord(entry) ? "\u5728\u9605\u5377\u9875\u56DE\u8BC4\u8FD9\u4E00\u4EFD\u5377\u5B50" : "\u8BE5\u8BB0\u5F55\u6CA1\u6709\u5B66\u53F7\uFF0C\u65E0\u6CD5\u5B9A\u4F4D";
+      jumpButton.addEventListener("click", () => this.callbacks.onJump?.(entry));
+      actions.append(jumpButton, reviewButton, scoreButton);
       container.appendChild(actions);
+    }
+    // 复核队列：把「需复核且还没标记」的记录按当前筛选排成一条队，一条条定位过去。
+    nextReviewEntry() {
+      const pending = this.filtered().filter((entry) => entry.result.needsReview && !entry.reviewedAt && canJumpRecord(entry));
+      if (pending.length === 0) return null;
+      const index = pending.findIndex((entry) => entry.id === this.selectedId);
+      return pending[index + 1] || pending[0];
+    }
+    jumpNextReview() {
+      const next = this.nextReviewEntry();
+      if (!next) {
+        this.callbacks.onEmptyQueue?.();
+        return;
+      }
+      this.selectedId = next.id;
+      this.render();
+      // 第二个参数标记「来自复核队列」：主流程据此在提交后自动跳下一条。
+      this.callbacks.onJump?.(next, true);
     }
     mount() {
       if (!this.host.isConnected) document.body.appendChild(this.host);
     }
     show(entries) {
-      this.entries = entries;
+      this.entries = normalizeHistoryEntries(entries);
       this.mount();
       this.q(".zygr-overlay").hidden = false;
       this.render();
@@ -159,7 +237,7 @@
       this.q(".zygr-overlay").hidden = true;
     }
     refresh(entries) {
-      this.entries = entries;
+      this.entries = normalizeHistoryEntries(entries);
       if (!this.q(".zygr-overlay").hidden) this.render();
     }
   };

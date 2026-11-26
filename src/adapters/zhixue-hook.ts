@@ -7,7 +7,9 @@ var HOOK_NEXT = /preLoadScanrecorddetail/i;
 var HOOK_CURRENT = /scanrecorddetail/i;
 // 「回评上一份 / 下一份」走的是 markingBack / markingNext，返回结构与 scanrecorddetail 相同。
 var HOOK_NAV = /markingBack|markingNext/i;
-var hookState = { installed: false, doc: null, current: null, next: null, root: null, updatedAt: 0 };
+// 「阅卷记录」里点某一份走的是 loadMarked，返回结构同样属于「当前卷」。
+var HOOK_LOAD = /loadMarked/i;
+var hookState = { installed: false, doc: null, current: null, next: null, root: null, origin: "", updatedAt: 0 };
 
 // 平台响应层级不固定，按字段名深搜第一个非空值即可，别假设固定路径。
 function hookField(node, key, depth = 0) {
@@ -43,6 +45,9 @@ function hookIdentity(body, mode = "current") {
     scanRecordId: detail?.scanRecordId || null,
     topicNumStr: info?.topicNumStr || (mode === "current" ? root?.topicNum : null) || null,
     userCode: detail?.userCode || null,
+    markingPaperId: detail?.markingPaperId || root?.markingPaperId || null,
+    // scanrecorddetail 在「未批过」的卷子上 trace 为 null，只有回评/记录跳转才有 trace.id。
+    traceId: info?.trace?.id || null,
     // 只有 current 的 cutBlock 才有当前小题满分，next 里没有。
     subTopicScore: mode === "current" ? cutBlock?.subTopicScore ?? null : null,
     topicImageIds: detail?.topicImageIds || null,
@@ -79,6 +84,13 @@ function notifyHookUpdate() {
 }
 function handleHookResponse(url, payload) {
   if (!url || payload === null || payload === void 0) return false;
+  // 阅卷接口的域名由平台路由下发（pt-ali-bj / pt-ali-hz ...），记下实际 origin 供回评检索复用。
+  try {
+    if (/\/marking\/marking\//i.test(url)) {
+      const origin = new URL(url, "https://www.zhixue.com").origin;
+      if (/^https?:$/.test(new URL(url, "https://www.zhixue.com").protocol)) hookState.origin = origin;
+    }
+  } catch { /* 解析失败保持上一次的 origin */ }
   let data = payload;
   // 多数请求 responseType 为空（文本），个别封装会直接给对象，两种都支持。
   if (typeof payload === "string") {
@@ -106,7 +118,7 @@ function handleHookResponse(url, payload) {
     notifyHookUpdate();
     return true;
   }
-  if (HOOK_CURRENT.test(url) || HOOK_NAV.test(url)) {
+  if (HOOK_CURRENT.test(url) || HOOK_NAV.test(url) || HOOK_LOAD.test(url)) {
     hookState.current = hookIdentity(body, "current");
     hookState.root = body && typeof body === "object" && body.data !== void 0 ? body.data : body;
     hookState.updatedAt = Date.now();
@@ -180,11 +192,17 @@ function currentHookIdentity() {
 function nextHookIdentity() {
   return hookState.next;
 }
-// 缓存/换卷用的稳定身份：台账号 + 题号，跨账号一致，不含签名。
-function hookIdentityKey() {
-  const current = hookState.current;
-  if (!current || !current.scanRecordId) return "";
-  return `${current.scanRecordId}|${current.topicNumStr || ""}`;
+// 阅卷接口实际域名：记录检索要用同一个 origin，硬编码会在换集群后 404。
+function hookMarkingOrigin() {
+  return hookState.origin || "";
+}
+// 当前小题的批量份数：>0 说明开了批量阅卷，直接调回评会把整批拉进来。
+function hookCurrentBatchSize() {
+  const root = hookState.root;
+  const list = Array.isArray(root?.teacherTopic) ? root.teacherTopic : [];
+  const current = hookState.current || {};
+  const topic = list.find((item) => item && item.topicNumStr === current.topicNumStr) || null;
+  return Number(topic?.batchSize ?? 0) || 0;
 }
 function freshAnswerImages() {
   const urls = [];

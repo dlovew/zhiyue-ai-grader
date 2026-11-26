@@ -246,6 +246,16 @@
       this.setCache(result.cacheHit ? "\u7F13\u5B58\u547D\u4E2D" : "\u65B0\u7ED3\u679C", result.cacheHit ? "ok" : result.needsReview ? "warn" : "idle");
       this.setStage("\u5B8C\u6210");
     }
+    // 换卷/定位后把结果区清空：旧分数留在面板上会诱导老师提交到另一份卷。
+    clearResult() {
+      const container = this.q("#zygr-result");
+      container.replaceChildren();
+      const note = document.createElement("div");
+      note.className = "zygr-reason";
+      note.textContent = "\u6279\u6539\u7ED3\u679C\u5C06\u663E\u793A\u5728\u8FD9\u91CC";
+      container.appendChild(note);
+      this.setStage("\u5C31\u7EEA");
+    }
     getScoreEdits() {
       const total = this.shadow.querySelector(".zygr-score-input[data-score-index=''], .zygr-score-editable .zygr-score-input");
       const subInputs = [...this.shadow.querySelectorAll(".zygr-subscore-input")];

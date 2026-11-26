@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.0.7
+// @version      1.2.0
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -31,9 +31,7 @@
     submitText: "\u63D0\u4EA4\u5206\u6570",
     topicIndex: "#currentTopicIndex",
     scoreTotal: "#containter_topicTxt #totalScore",
-    progress: ".progress",
-    reviewPrev: ".pre",
-    reviewNext: ".unnext"
+    progress: ".progress"
   };
   function mainDoc() {
     return typeof unsafeWindow !== "undefined" ? unsafeWindow.document : document;
@@ -58,14 +56,38 @@
     if (element.getClientRects && !element.getClientRects().length) return false;
     return true;
   }
-  function getIframeDoc() {
-    const iframe = mainDoc().querySelector("iframe");
-    if (!iframe || !visible(iframe)) return null;
+  // 上一个命中的阅卷控件；容器页可能有多个 iframe（任务列表、图表、广告位），
+  // 只认「打分框 + 提交按钮」都在的那个，否则填分和提交会打到别的 frame 上。
+  var lastMarkingDoc = null;
+  function frameAlive(doc) {
     try {
-      return iframe.contentDocument ?? iframe.contentWindow?.document ?? null;
+      const frame = doc?.defaultView?.frameElement;
+      return Boolean(frame && frame.isConnected);
     } catch {
-      return null;
+      return false;
     }
+  }
+  function getIframeDoc() {
+    if (lastMarkingDoc && frameAlive(lastMarkingDoc)) return lastMarkingDoc;
+    lastMarkingDoc = null;
+    let fallback = null;
+    for (const frame of Array.from(mainDoc().querySelectorAll("iframe"))) {
+      if (!visible(frame)) continue;
+      let doc = null;
+      try {
+        doc = frame.contentDocument ?? frame.contentWindow?.document ?? null;
+      } catch {
+        continue;
+      }
+      if (!doc) continue;
+      if (hasScoreInput(doc) && hasSubmitButton(doc)) {
+        lastMarkingDoc = doc;
+        return doc;
+      }
+      // 只有打分框、提交按钮还没渲染出来时先记着，等下一轮再确认。
+      if (!fallback && hasScoreInput(doc)) fallback = doc;
+    }
+    return fallback;
   }
   function accessibleDocs() {
     const docs = [];
@@ -156,6 +178,12 @@
   }
   function answerSnapshot(doc) {
     if (doc) return snapshotFrom(doc);
+    // 没有指定文档时先认阅卷控件：路由切换的瞬间别的 frame 里可能还挂着上一份卷子的图。
+    const primary = getIframeDoc();
+    if (primary) {
+      const snapshot = snapshotFrom(primary);
+      if (snapshot.urls.length > 0) return snapshot;
+    }
     for (const root of accessibleDocs()) {
       const snapshot = snapshotFrom(root);
       if (snapshot.urls.length > 0) return snapshot;
@@ -294,7 +322,14 @@
   // 填分 + 回读：页面上的输入框可能被框架改回原值，写不进去就不能假装提交成功。
   function fillScores(scores, doc) {
     const inputs = getScoreInputs(doc);
-    if (inputs.length === 0 || scores.length > inputs.length) return { ok: false, error: "\u672A\u627E\u5230\u6253\u5206\u8F93\u5165\u6846" };
+    if (inputs.length === 0) return { ok: false, error: "\u672A\u627E\u5230\u6253\u5206\u8F93\u5165\u6846" };
+    // 数量对不上就说清楚是哪边少：报「第 2 个分数不是有效数字」没人看得懂。
+    if (scores.length < inputs.length) {
+      return { ok: false, error: `\u8FD9\u4EFD\u5377\u5B50\u6709 ${inputs.length} \u4E2A\u6253\u5206\u6846\uFF0C\u5F53\u524D\u7ED3\u679C\u53EA\u6709 ${scores.length} \u4E2A\u5206\u6570\uFF0C\u8BF7\u5148\u8865\u9F50\u5C0F\u9898\u5206` };
+    }
+    if (scores.length > inputs.length) {
+      return { ok: false, error: `\u7ED3\u679C\u6709 ${scores.length} \u4E2A\u5206\u6570\uFF0C\u9875\u9762\u53EA\u6709 ${inputs.length} \u4E2A\u6253\u5206\u6846\uFF0C\u8BF7\u6838\u5BF9\u5C0F\u9898\u6570` };
+    }
     for (let i = 0; i < inputs.length; i += 1) {
       const score = scores[i];
       if (score === void 0 || score === null || !Number.isFinite(Number(score))) {
@@ -335,6 +370,38 @@
   }
   function getPaperIdentity() {
     return answerSnapshot().identity;
+  }
+  // 打分框里当前的分数：定位到历史那一条后用它和记录分对账，识别「已被他人改分」。
+  function readFilledScores(doc) {
+    return getScoreInputs(doc)
+      .map((input) => Number(input.element.value))
+      .filter((value) => Number.isFinite(value));
+  }
+  // 换卷后打分框会先清空、再回填记录分。给平台一点时间落值，否则会读到空值或上一份的残留值。
+  async function waitScoresSettled(doc, before, timeout = 1500) {
+    const unchanged = (list) => list.length === before.length && list.every((value, index) => Math.abs(value - before[index]) < 0.05);
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const current = readFilledScores(doc);
+      if (current.length > 0 && !unchanged(current)) return current;
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+    return readFilledScores(doc);
+  }
+  // 短时换卷探测：提交回执丢失时用它兜底判定，纯墙钟计时，不受标签页是否可见影响。
+  async function waitPaperChanged(oldIdentity, oldScan = "", timeout = 3e3) {
+    if (!oldIdentity && !oldScan) return false;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeout) {
+      const scan = currentScanRecordId();
+      if (oldScan && scan && scan !== oldScan) return true;
+      if (oldIdentity) {
+        const snapshot = answerSnapshot();
+        if (snapshot.identity && snapshot.identity !== oldIdentity) return true;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    }
+    return false;
   }
   async function waitForNextPaper(oldIdentity, oldScan = "", timeout = 25e3) {
     if (!oldIdentity && !oldScan) return false;
@@ -383,7 +450,9 @@ var HOOK_NEXT = /preLoadScanrecorddetail/i;
 var HOOK_CURRENT = /scanrecorddetail/i;
 // 「回评上一份 / 下一份」走的是 markingBack / markingNext，返回结构与 scanrecorddetail 相同。
 var HOOK_NAV = /markingBack|markingNext/i;
-var hookState = { installed: false, doc: null, current: null, next: null, root: null, updatedAt: 0 };
+// 「阅卷记录」里点某一份走的是 loadMarked，返回结构同样属于「当前卷」。
+var HOOK_LOAD = /loadMarked/i;
+var hookState = { installed: false, doc: null, current: null, next: null, root: null, origin: "", updatedAt: 0 };
 
 // 平台响应层级不固定，按字段名深搜第一个非空值即可，别假设固定路径。
 function hookField(node, key, depth = 0) {
@@ -419,6 +488,9 @@ function hookIdentity(body, mode = "current") {
     scanRecordId: detail?.scanRecordId || null,
     topicNumStr: info?.topicNumStr || (mode === "current" ? root?.topicNum : null) || null,
     userCode: detail?.userCode || null,
+    markingPaperId: detail?.markingPaperId || root?.markingPaperId || null,
+    // scanrecorddetail 在「未批过」的卷子上 trace 为 null，只有回评/记录跳转才有 trace.id。
+    traceId: info?.trace?.id || null,
     // 只有 current 的 cutBlock 才有当前小题满分，next 里没有。
     subTopicScore: mode === "current" ? cutBlock?.subTopicScore ?? null : null,
     topicImageIds: detail?.topicImageIds || null,
@@ -455,6 +527,13 @@ function notifyHookUpdate() {
 }
 function handleHookResponse(url, payload) {
   if (!url || payload === null || payload === void 0) return false;
+  // 阅卷接口的域名由平台路由下发（pt-ali-bj / pt-ali-hz ...），记下实际 origin 供回评检索复用。
+  try {
+    if (/\/marking\/marking\//i.test(url)) {
+      const origin = new URL(url, "https://www.zhixue.com").origin;
+      if (/^https?:$/.test(new URL(url, "https://www.zhixue.com").protocol)) hookState.origin = origin;
+    }
+  } catch { /* 解析失败保持上一次的 origin */ }
   let data = payload;
   // 多数请求 responseType 为空（文本），个别封装会直接给对象，两种都支持。
   if (typeof payload === "string") {
@@ -482,7 +561,7 @@ function handleHookResponse(url, payload) {
     notifyHookUpdate();
     return true;
   }
-  if (HOOK_CURRENT.test(url) || HOOK_NAV.test(url)) {
+  if (HOOK_CURRENT.test(url) || HOOK_NAV.test(url) || HOOK_LOAD.test(url)) {
     hookState.current = hookIdentity(body, "current");
     hookState.root = body && typeof body === "object" && body.data !== void 0 ? body.data : body;
     hookState.updatedAt = Date.now();
@@ -556,11 +635,17 @@ function currentHookIdentity() {
 function nextHookIdentity() {
   return hookState.next;
 }
-// 缓存/换卷用的稳定身份：台账号 + 题号，跨账号一致，不含签名。
-function hookIdentityKey() {
-  const current = hookState.current;
-  if (!current || !current.scanRecordId) return "";
-  return `${current.scanRecordId}|${current.topicNumStr || ""}`;
+// 阅卷接口实际域名：记录检索要用同一个 origin，硬编码会在换集群后 404。
+function hookMarkingOrigin() {
+  return hookState.origin || "";
+}
+// 当前小题的批量份数：>0 说明开了批量阅卷，直接调回评会把整批拉进来。
+function hookCurrentBatchSize() {
+  const root = hookState.root;
+  const list = Array.isArray(root?.teacherTopic) ? root.teacherTopic : [];
+  const current = hookState.current || {};
+  const topic = list.find((item) => item && item.topicNumStr === current.topicNumStr) || null;
+  return Number(topic?.batchSize ?? 0) || 0;
 }
 function freshAnswerImages() {
   const urls = [];
@@ -580,6 +665,260 @@ function hookProgress() {
   const todo = Number(topic?.teacherTodo ?? 0) || 0;
   if (!marked && !todo) return null;
   return { marked, todo };
+}
+// src/adapters/zhixue-jump.ts
+// 历史记录「定位到该卷」：完全复用阅卷页自己的「阅卷记录」链路——
+// 先按题号对齐，再用 searchMarked 把学号换成记录 id，最后调页面自己的回评方法（内部走 loadMarked）。
+// 不硬编码接口域名：origin 取自观察器实际看到的阅卷接口地址。
+var JUMP_PAGE_CONCURRENCY = 4;
+var JUMP_MAX_PAGES = 80;
+var JUMP_CACHE_TTL = 6e4;
+var jumpRecordCache = { key: "", at: 0, map: null };
+
+// 题号口径：接口的 "43,1" 对应页面上的 "43(1)"，"44" 保持原样。
+function jumpTopicLabel(topicNumStr) {
+  const text = String(topicNumStr || "").trim();
+  if (!text) return "";
+  const parts = text.split(",");
+  return parts.length > 1 ? `${parts[0]}(${parts[1]})` : parts[0];
+}
+// 反向归一：历史里可能存的是 DOM 口径 "43(1)"（当时还没拿到接口题号），
+// 检索接口只认 "43,1"，不转就会查不到任何记录。
+function jumpApiTopicNum(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d+)\s*[（(]\s*(\d+)\s*[)）]$/);
+  return match ? `${match[1]},${match[2]}` : text;
+}
+function jumpCurrentTopicLabel(doc) {
+  const root = doc || getIframeDoc() || mainDoc();
+  const text = (root.querySelector(SELECTORS.topicIndex)?.textContent || "").replace(/\s/g, "");
+  return text.replace(/^第/, "").replace(/题$/, "");
+}
+function jumpWaitFor(predicate, timeout, step = 150) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeout;
+    const tick = () => {
+      let ok = false;
+      try {
+        ok = Boolean(predicate());
+      } catch {
+        ok = false;
+      }
+      if (ok) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      window.setTimeout(tick, step);
+    };
+    tick();
+  });
+}
+// Vue 2 把组件实例挂在根元素上，从已知节点往上摸一层就能拿到页面组件。
+function jumpVueOf(element) {
+  let node = element;
+  for (let i = 0; i < 8 && node; i += 1) {
+    if (node.__vue__) return node.__vue__;
+    node = node.parentElement;
+  }
+  return null;
+}
+// 回评方法：页面组件是 returnMarkingPushToCherkItem，记录面板组件是 toCherkItem。
+function jumpFindVue(doc) {
+  const root = doc || getIframeDoc() || mainDoc();
+  for (const selector of [".personal_box", "#app", "#remarking_box", "body"]) {
+    const element = root.querySelector(selector);
+    if (!element) continue;
+    const vm = jumpVueOf(element);
+    if (!vm) continue;
+    if (typeof vm.returnMarkingPushToCherkItem === "function") return { vm, method: "returnMarkingPushToCherkItem" };
+    if (typeof vm.toCherkItem === "function") return { vm, method: "toCherkItem" };
+  }
+  return null;
+}
+// 切题号：和老师手点题号列表一样，点完等标题真的变过去。
+async function jumpSwitchTopic(doc, label, timeout = 1e4) {
+  const root = doc || getIframeDoc() || mainDoc();
+  if (!label || jumpCurrentTopicLabel(root) === label) return true;
+  const links = Array.from(root.querySelectorAll("#topicList .topiclist-content a"));
+  const target = links.find((item) => (item.textContent || "").trim() === label);
+  if (!target) return false;
+  target.click();
+  return jumpWaitFor(() => jumpCurrentTopicLabel(root) === label, timeout);
+}
+// 阅卷接口域名由平台路由下发。观察器还没抓到任何请求时（脚本刚装、页面早就打开），
+// 直接问一次路由配置，别让用户为了点一下「定位」去刷新阅卷页。
+async function jumpResolveOrigin(win, markingPaperId) {
+  const known = hookMarkingOrigin();
+  if (known) return known;
+  if (!win || typeof win.fetch !== "function" || !markingPaperId) return "";
+  try {
+    const url = `/routingconfig/businessRoutingConfig/getHostByBusinessId?businessType=markingPaper&businessId=${encodeURIComponent(markingPaperId)}&t=${Date.now()}`;
+    const response = await win.fetch(url, { credentials: "include" });
+    const body = await response.json();
+    const host = String(body?.data?.host || "").trim();
+    if (!host) return "";
+    return new URL(/^https?:/i.test(host) ? host : `https://${host}`).origin;
+  } catch {
+    return "";
+  }
+}
+function jumpPostForm(win, url, params) {
+  const body = Object.keys(params)
+    .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(params[key] == null ? "" : params[key])}`)
+    .join("&");
+  const fetchImpl = win && typeof win.fetch === "function" ? win.fetch.bind(win) : fetch;
+  return fetchImpl(url, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body
+  }).then((response) => response.json());
+}
+async function jumpFetchMarkedPage(win, origin, markingPaperId, topicNumStr, pageIndex) {
+  const sort = String(topicNumStr || "").split(",")[0];
+  const data = await jumpPostForm(win, `${origin}/marking/marking/personal/searchMarked/`, {
+    markingPaperId,
+    topicSorts: JSON.stringify([sort]),
+    topicNumStr,
+    score: "",
+    pageIndex: String(pageIndex),
+    isArbitration: "false",
+    superiority: ""
+  });
+  return {
+    pageInfo: data?.pageInfo || null,
+    list: Array.isArray(data?.pageList) ? data.pageList : []
+  };
+}
+// 学号 → 记录 id。记录列表按批改时间倒序，最近批的几乎都在第一页，命中即停。
+async function jumpFindRecord(win, origin, markingPaperId, topicNumStr, userCode, onPage) {
+  const key = `${markingPaperId}|${topicNumStr}`;
+  const now = Date.now();
+  const reusable = jumpRecordCache.key === key && jumpRecordCache.map && now - jumpRecordCache.at < JUMP_CACHE_TTL;
+  if (reusable) {
+    const hit = jumpRecordCache.map[userCode];
+    if (hit) return hit;
+  }
+  const map = reusable ? { ...jumpRecordCache.map } : {};
+  let totalPages = 1;
+  let pageIndex = 0;
+  while (pageIndex < totalPages && pageIndex < JUMP_MAX_PAGES) {
+    const batch = [];
+    for (let i = 0; i < JUMP_PAGE_CONCURRENCY && pageIndex + i < totalPages; i += 1) batch.push(pageIndex + i);
+    const pages = await Promise.all(
+      batch.map((index) => jumpFetchMarkedPage(win, origin, markingPaperId, topicNumStr, index).catch(() => null))
+    );
+    pages.forEach((page) => {
+      if (!page) return;
+      const total = Number(page.pageInfo?.totalPage);
+      if (Number.isFinite(total) && total > totalPages) totalPages = total;
+      page.list.forEach((item) => {
+        if (!item || !item.userCode || !item.id || map[item.userCode]) return;
+        map[item.userCode] = { id: item.id, userCode: item.userCode, totalScore: item.totalScore, score: item.score };
+      });
+    });
+    jumpRecordCache = { key, at: Date.now(), map };
+    if (map[userCode]) return map[userCode];
+    pageIndex += batch.length;
+    if (onPage) onPage(Math.min(pageIndex, totalPages), totalPages);
+  }
+  return null;
+}
+// 调页面自己的回评方法，再等作答图真的换成另一份。
+async function jumpApplyRecord(doc, record) {
+  const found = jumpFindVue(doc);
+  if (!found) return { ok: false, error: "未找到阅卷页面的回评入口，请刷新阅卷页后重试" };
+  const before = answerSnapshot(doc).identity;
+  const item = { id: record.id, userCode: record.userCode, totalScore: record.totalScore, score: record.score };
+  try {
+    if (found.method === "toCherkItem") found.vm.toCherkItem(record.id, void 0, item);
+    else found.vm.returnMarkingPushToCherkItem(record.id, void 0, item);
+  } catch (error) {
+    return { ok: false, error: `回评该卷失败：${error instanceof Error ? error.message : error}` };
+  }
+  const changed = await jumpWaitFor(() => {
+    const after = answerSnapshot(doc).identity;
+    return Boolean(after) && after !== before;
+  }, 8e3);
+  return { ok: true, changed, record };
+}
+// 入口：按历史记录的定位字段把阅卷页切到那一份卷。
+async function jumpToMarkedRecord(entry, options = {}) {
+  const question = entry?.question || {};
+  const identity = question.identity || {};
+  const doc = options.doc || getIframeDoc() || mainDoc();
+  if (!doc) return { ok: false, error: "未检测到阅卷控件，请先打开阅卷页" };
+  const win = doc.defaultView || null;
+  const userCode = String(identity.userCode || "").trim();
+  const markingPaperId = String(identity.markingPaperId || hookCurrentField("markingPaperId") || "").trim();
+  const origin = await jumpResolveOrigin(win, markingPaperId);
+  // 身份里的题号是接口口径，优先用它；历史字段可能是 DOM 口径，统一转成 "43,1" 再查。
+  const topicNumStr = jumpApiTopicNum(identity.topicNumStr || question.topicNumStr || "");
+  if (!userCode) return { ok: false, error: "该记录没有学号，无法定位（旧版记录不支持定位）" };
+  if (!origin) return { ok: false, error: "尚未抓到阅卷接口地址，请刷新阅卷页后重试" };
+  if (!markingPaperId) return { ok: false, error: "该记录缺少试卷 ID，无法定位" };
+  // 批量阅卷开着时，回评会把整批一起拉进来，直接拒绝比悄悄改错卷安全。
+  if (typeof hookCurrentBatchSize === "function" && hookCurrentBatchSize() > 0) {
+    return { ok: false, error: "当前小题开启了批量阅卷，请先关闭批量再定位" };
+  }
+  const label = jumpTopicLabel(topicNumStr);
+  if (label && jumpCurrentTopicLabel(doc) !== label) {
+    const switched = await jumpSwitchTopic(doc, label, 1e4);
+    if (!switched) return { ok: false, error: `未能切换到题号 ${label}` };
+  }
+  let record = question.recordId ? { id: question.recordId, userCode, totalScore: question.recordScore ?? null } : null;
+  if (!record) {
+    record = await jumpFindRecord(win, origin, markingPaperId, topicNumStr, userCode, options.onPage);
+    if (!record) return { ok: false, error: `未在阅卷记录里找到学号 ${userCode} 的卷子` };
+  }
+  const applied = await jumpApplyRecord(doc, record);
+  return { ...applied, topicNumStr, userCode };
+}
+// 提交成功后顺手把记录 id 解析出来写回历史，下次点「定位」就是零等待。
+// 学号缺失时（脚本晚于首份卷加载）退一步：记录列表按批改时间倒序，刚提交的那份就在最前面，
+// 用「分数对得上」+「只认前三行」两个约束把它捞回来，否则这条历史永远定位不了。
+async function resolveMarkedRecordId(doc, identity, expectedScore) {
+  const userCode = String(identity?.userCode || "").trim();
+  const topicNumStr = jumpApiTopicNum(identity?.topicNumStr || "");
+  if (!doc || !topicNumStr) return null;
+  // 观察器漏了首份卷时 identity 是空的：提交后平台会加载下一份卷，接口随即带上试卷 ID，
+  // 同一场考试的 ID 是同一个，等它几秒就能补齐。
+  let markingPaperId = String(identity?.markingPaperId || "").trim();
+  if (!markingPaperId) {
+    const deadline = Date.now() + 6e3;
+    while (!markingPaperId && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+      markingPaperId = String(hookCurrentField("markingPaperId") || "").trim();
+    }
+  }
+  if (!markingPaperId) return null;
+  const win = doc.defaultView || null;
+  const origin = await jumpResolveOrigin(win, markingPaperId);
+  if (!origin) return null;
+  try {
+    const page = await jumpFetchMarkedPage(win, origin, markingPaperId, topicNumStr, 0);
+    let hit = userCode ? page.list.find((item) => item && String(item.userCode) === userCode) : null;
+    let inferred = false;
+    if (!hit && Number.isFinite(Number(expectedScore))) {
+      hit = page.list.slice(0, 3).find((item) => item && item.id && Math.abs(Number(item.totalScore) - Number(expectedScore)) < 0.05) || null;
+      inferred = Boolean(hit);
+    }
+    if (!hit) return null;
+    const resolvedUser = String(hit.userCode || userCode || "");
+    if (!resolvedUser) return null;
+    jumpRecordCache = {
+      key: `${markingPaperId}|${topicNumStr}`,
+      at: Date.now(),
+      map: { ...(jumpRecordCache.key === `${markingPaperId}|${topicNumStr}` ? jumpRecordCache.map || {} : {}), [resolvedUser]: hit }
+    };
+    return { id: hit.id, userCode: resolvedUser, totalScore: hit.totalScore, inferred };
+  } catch {
+    return null;
+  }
 }
   // src/infra/storage.ts
   var STORAGE_KEYS = {
@@ -642,7 +981,6 @@ function hookProgress() {
       detail: "high",
       autoBySubject: true
     },
-    promptVersion: "zygr-prompt-v2",
     historyLimit: 500,
     // 连续批阅份数上限：无人看管时也不至于一路跑到底。
     continuousLimit: 20,
@@ -672,7 +1010,6 @@ function hookProgress() {
       if (!isRecord(data) || data.app !== "zygr" || !isRecord(data.config)) return null;
       return {
         config: data.config,
-        presets: Array.isArray(data.presets) ? data.presets : [],
         keys: isRecord(data.keys) ? data.keys : {},
         models: isRecord(data.models) ? data.models : {},
         thinkingModes: isRecord(data.thinkingModes) ? data.thinkingModes : {}
@@ -722,12 +1059,148 @@ function hookProgress() {
     removeKey(STORAGE_KEYS.stats);
     removeKey(STORAGE_KEYS.thinkingForced);
     removeKey(PRESET_STORAGE_KEY);
+    removeKey(RUBRIC_LIBRARY_KEY);
     removeKey(PLATFORM_KEYS_KEY);
     removeKey(PLATFORM_MODELS_KEY);
     removeKey(PLATFORM_THINKING_KEY);
     removeKey("zygr.submit.skipConfirm.v1");
   }
 
+  // src/core/rubric-library.ts
+  // 评分标准库：按「试卷 + 题号」保存题目 / 参考答案 / 评分标准 / 满分 / 学科。
+  // 切题时自动把当前这份存回旧槽、把新题号已存的那份载入，省掉每换一题重填一遍。
+  var RUBRIC_LIBRARY_KEY = "zygr.rubrics.v1";
+  var RUBRIC_LIBRARY_LIMIT = 300;
+
+  // 槽位键：同一场考试的试卷 ID + 题号；没有试卷 ID 时退回只有题号（旧记录也能用）。
+  // 题号统一成接口口径（43,1）：否则观察器晚到时会从 43(1) 变成 43,1，同一道题被当成两道。
+  function rubricTopicKey(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    return typeof jumpApiTopicNum === "function" ? jumpApiTopicNum(text) : text;
+  }
+  function currentPaperId() {
+    // 观察器拿到试卷 ID 后，即使 question.identity 还没补上，也用真实 ID 当槽位，
+    // 否则同一份卷会先存进 "paper|43,1"、再存进 "<真实ID>|43,1"，切题时读不到自己刚存的标准。
+    try {
+      if (typeof hookCurrentField !== "function") return "";
+      return String(hookCurrentField("markingPaperId") || "").trim();
+    } catch {
+      return "";
+    }
+  }
+  function rubricSlotKey(question) {
+    const identity = question?.identity || {};
+    const paper = String(identity.markingPaperId || "").trim() || currentPaperId();
+    const topic = rubricTopicKey(question?.topicNumStr || question?.questionId || "");
+    if (!topic) return "";
+    return `${paper || "paper"}|${topic}`;
+  }
+  // 老版本按 DOM 题号存过 "paper|43(1)"：读取时统一成接口口径，避免同一题两份标准。
+  function normalizeRubricSlot(slot) {
+    const text = String(slot || "").trim();
+    if (!text) return "";
+    const split = text.indexOf("|");
+    if (split < 0) return rubricTopicKey(text);
+    const storedPaper = text.slice(0, split).trim() || "paper";
+    // 老记录可能在接口身份到位前按通用 paper 存；现在知道真实试卷 ID 就并过去。
+    const paper = storedPaper === "paper" ? (currentPaperId() || storedPaper) : storedPaper;
+    const topic = rubricTopicKey(text.slice(split + 1));
+    return topic ? `${paper}|${topic}` : "";
+  }
+  function rubricSlotLabel(question) {
+    return String(question?.topicNumStr || question?.questionId || "").trim();
+  }
+  function rubricContextSnapshot(context) {
+    const source = isRecord(context) ? context : {};
+    return {
+      question: String(source.question || ""),
+      answer: String(source.answer || ""),
+      rubric: String(source.rubric || ""),
+      maxScore: Number(source.maxScore) || 0,
+      subject: String(source.subject || ""),
+      updatedAt: Date.now()
+    };
+  }
+  // 只取配置里存在的那五个字段，别把 updatedAt 之类的书签字段写回 config。
+  function rubricContextFields(context) {
+    const source = context || {};
+    return {
+      question: String(source.question || ""),
+      answer: String(source.answer || ""),
+      rubric: String(source.rubric || ""),
+      maxScore: Number(source.maxScore) || 0,
+      subject: String(source.subject || "")
+    };
+  }
+  function rubricHasContent(snapshot) {
+    const value = snapshot || {};
+    return Boolean(String(value.answer || "").trim() || String(value.rubric || "").trim() || String(value.question || "").trim());
+  }
+  function sameRubricContext(a, b) {
+    const left = a || {};
+    const right = b || {};
+    return String(left.question || "") === String(right.question || "")
+      && String(left.answer || "") === String(right.answer || "")
+      && String(left.rubric || "") === String(right.rubric || "")
+      && (Number(left.maxScore) || 0) === (Number(right.maxScore) || 0)
+      && String(left.subject || "") === String(right.subject || "");
+  }
+  function loadRubricLibrary() {
+    const raw = readJson(RUBRIC_LIBRARY_KEY, {});
+    if (!isRecord(raw)) return {};
+    // 只在真有旧键/坏记录时回写一次，正常路径不产生额外存储写入。
+    let migrated = false;
+    const normalized = {};
+    Object.keys(raw).forEach((slot) => {
+      const key = normalizeRubricSlot(slot);
+      const entry = raw[slot];
+      if (key !== slot) migrated = true;
+      if (!key || !isRecord(entry)) {
+        migrated = true;
+        return;
+      }
+      const previous = normalized[key];
+      if (!previous || (Number(entry.updatedAt) || 0) > (Number(previous.updatedAt) || 0)) normalized[key] = entry;
+    });
+    if (migrated) saveRubricLibrary(normalized);
+    return normalized;
+  }
+  function saveRubricLibrary(map) {
+    return writeJson(RUBRIC_LIBRARY_KEY, map);
+  }
+  function getRubricPreset(slot) {
+    const key = normalizeRubricSlot(slot);
+    if (!key) return null;
+    const entry = loadRubricLibrary()[key];
+    return isRecord(entry) ? entry : null;
+  }
+  function putRubricPreset(slot, context) {
+    const key = normalizeRubricSlot(slot);
+    if (!key) return false;
+    const snapshot = rubricContextSnapshot(context);
+    if (!rubricHasContent(snapshot)) return false;
+    const library = loadRubricLibrary();
+    library[key] = snapshot;
+    const keys = Object.keys(library);
+    // 超量时按更新时间淘汰最旧的，避免本地存储无限膨胀。
+    if (keys.length > RUBRIC_LIBRARY_LIMIT) {
+      keys.sort((a, b) => (Number(library[a]?.updatedAt) || 0) - (Number(library[b]?.updatedAt) || 0));
+      for (const key of keys.slice(0, keys.length - RUBRIC_LIBRARY_LIMIT)) delete library[key];
+    }
+    return saveRubricLibrary(library);
+  }
+  function removeRubricPreset(slot) {
+    const key = normalizeRubricSlot(slot);
+    if (!key) return false;
+    const library = loadRubricLibrary();
+    if (!Object.prototype.hasOwnProperty.call(library, key)) return false;
+    delete library[key];
+    return saveRubricLibrary(library);
+  }
+  function countRubricPresets() {
+    return Object.keys(loadRubricLibrary()).length;
+  }
 // src/core/cache.ts
 function hashString(input) {
   let hash = 2166136261;
@@ -915,20 +1388,25 @@ var CacheStore = class {
 // src/core/submit.ts
 // 提交结果判定：接口观察器可用时以平台回执为准；没有观察能力时退回「点过即提交」的旧行为，
 // 保证观察器没装上、接口改版或 iframe 跨域时不会把整条提交链路卡死。
-function judgeSubmit(hookActive2, signal) {
-  if (!hookActive2) return { ok: true, confirmed: false, reason: "" };
-  // 观察器活着但没等到 commitTopic 回执：分数很可能没写进平台，宁可让老师看一眼。
+function judgeSubmit(hookActive2, signal, paperChanged = false) {
+  if (!hookActive2) return { ok: true, confirmed: false, reason: "", inferred: false };
+  // 观察器活着但没等到 commitTopic 回执：先看卷子有没有真的换，再决定要不要报错。
   if (!signal) {
+    // 回执被别的请求挤掉、或平台改成分步上报时很常见；此时卷子已经换了，说明分数确实落库。
+    if (paperChanged) return { ok: true, confirmed: false, reason: "", inferred: true };
     return {
       ok: false,
       confirmed: false,
+      inferred: false,
       reason: "\u672A\u6536\u5230\u5E73\u53F0\u63D0\u4EA4\u56DE\u6267\uFF0C\u5206\u6570\u53EF\u80FD\u672A\u5199\u5165\uFF0C\u8BF7\u68C0\u67E5\u6253\u5206\u6846\u540E\u91CD\u8BD5"
     };
   }
-  if (signal.ok === true) return { ok: true, confirmed: true, reason: "" };
+  if (signal.ok === true) return { ok: true, confirmed: true, reason: "", inferred: false };
+  // 平台明确拒绝时不看换卷：换卷可能是老师自己点「回评下一份」造成的，不能拿它掩盖失败。
   return {
     ok: false,
     confirmed: false,
+    inferred: false,
     reason: `\u5E73\u53F0\u62D2\u7EDD\u63D0\u4EA4\uFF1A${signal.result || "\u672A\u77E5\u539F\u56E0"}`
   };
 }
@@ -1141,6 +1619,7 @@ function judgeSubmit(hookActive2, signal) {
   }
 
   // src/infra/platforms.ts
+  // 历史遗留：自定义预设的 UI 已下线，这个键只留给「清空数据」擦除老版本残留。
   var PRESET_STORAGE_KEY = "zygr.presets.v1";
   var PLATFORM_KEYS_KEY = "zygr.platform.keys.v1";
   var PLATFORM_MODELS_KEY = "zygr.platform.models.v1";
@@ -1347,66 +1826,12 @@ function judgeSubmit(hookActive2, signal) {
     return result;
   }
 
-  function loadCustomPresets() {
-    const raw = readJson(PRESET_STORAGE_KEY, []);
-    if (!Array.isArray(raw)) return [];
-    return raw.filter((item) => isRecord(item) && typeof item.id === "string" && item.id.trim()).map((item) => ({
-      id: item.id,
-      label: String(item.label || item.id),
-      endpoint: String(item.endpoint || ""),
-      models: Array.isArray(item.models) ? item.models.filter((m) => typeof m === "string" && m.trim()) : [],
-      authHeader: ["bearer", "api-key", "none"].includes(item.authHeader) ? item.authHeader : "bearer",
-      disableThinkingKey: typeof item.disableThinkingKey === "string" && item.disableThinkingKey ? item.disableThinkingKey : null,
-      thinkingValues: normalizeThinkingValues(item.thinkingValues),
-      thinkingFields: normalizeThinkingValues(item.thinkingFields),
-      jsonModeKey: item.jsonModeKey === null ? null : "response_format",
-      stream: Boolean(item.stream)
-    }));
-  }
-
-  function saveCustomPresets(list) {
-    return writeJson(PRESET_STORAGE_KEY, Array.isArray(list) ? list : []);
-  }
-
   function listPlatformPresets() {
     return BUILTIN_PLATFORM_PRESETS.slice();
   }
 
   function getPlatformPreset(id) {
     return listPlatformPresets().find((preset) => preset.id === id) || null;
-  }
-
-  function isBuiltinPreset(id) {
-    return BUILTIN_PLATFORM_PRESETS.some((preset) => preset.id === id);
-  }
-
-  function upsertPlatformPreset(preset) {
-    if (!isRecord(preset) || typeof preset.id !== "string" || !preset.id.trim() || isBuiltinPreset(preset.id)) return false;
-    const list = loadCustomPresets();
-    const normalized = {
-      id: preset.id.trim(),
-      label: String(preset.label || preset.id).trim(),
-      endpoint: String(preset.endpoint || "").trim(),
-      models: Array.isArray(preset.models) ? preset.models.filter((m) => String(m).trim()) : [],
-      authHeader: ["bearer", "api-key", "none"].includes(preset.authHeader) ? preset.authHeader : "bearer",
-      disableThinkingKey: typeof preset.disableThinkingKey === "string" && preset.disableThinkingKey.trim() ? preset.disableThinkingKey.trim() : null,
-      thinkingValues: normalizeThinkingValues(preset.thinkingValues),
-      thinkingFields: normalizeThinkingValues(preset.thinkingFields),
-      jsonModeKey: preset.jsonModeKey === null ? null : "response_format",
-      stream: Boolean(preset.stream)
-    };
-    const index = list.findIndex((item) => item.id === normalized.id);
-    if (index >= 0) list[index] = normalized;
-    else list.push(normalized);
-    return saveCustomPresets(list);
-  }
-
-  function deletePlatformPreset(id) {
-    if (isBuiltinPreset(id)) return false;
-    const list = loadCustomPresets();
-    const next = list.filter((item) => item.id !== id);
-    if (next.length === list.length) return false;
-    return saveCustomPresets(next);
   }
 
   function loadPlatformKeys() {
@@ -1519,22 +1944,6 @@ function judgeSubmit(hookActive2, signal) {
     const mode = String(pipeline.thinkingMode || "off");
     if (getPlatformThinkingMode(service.platform) === mode) return true;
     return setPlatformThinkingMode(service.platform, mode);
-  }
-
-  // 从某个服务的当前配置生成一个可复用预设（用于"存为预设"）。
-  function presetFromService(service, id, label) {
-    return {
-      id: String(id || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-"),
-      label: String(label || id || "自定义预设").trim(),
-      endpoint: String(service?.endpoint || "").trim(),
-      models: String(service?.model || "").trim() ? [String(service.model).trim()] : [],
-      authHeader: "bearer",
-      disableThinkingKey: null,
-      thinkingValues: {},
-      thinkingFields: {},
-      jsonModeKey: "response_format",
-      stream: false
-    };
   }
 
   // 已下线的内置平台：预设条目已删除，这里只保留鉴权方式，避免历史配置静默退回 bearer 而失效。
@@ -2071,21 +2480,16 @@ function judgeSubmit(hookActive2, signal) {
     const image = await loadImage(dataUrl);
     const sourceWidth = image.naturalWidth || image.width;
     const sourceHeight = image.naturalHeight || image.height;
-    const work = document.createElement("canvas");
-    work.width = sourceWidth;
-    work.height = sourceHeight;
-    const workCtx = work.getContext("2d", { willReadFrequently: true });
-    if (!workCtx) throw new Error("\u65E0\u6CD5\u521B\u5EFA\u753B\u5E03\u4E0A\u4E0B\u6587");
-    workCtx.drawImage(image, 0, 0);
-    const ratio = blankRatio(workCtx, sourceWidth, sourceHeight);
     // 只做等比缩小，绝不放大：放大不会带来新信息，只会被服务商的短边归一化规则再插值一次。
     const scale = Math.min(1, config.maxEdge / Math.max(sourceWidth, sourceHeight));
     const output = document.createElement("canvas");
     output.width = Math.max(1, Math.round(sourceWidth * scale));
     output.height = Math.max(1, Math.round(sourceHeight * scale));
-    const outputCtx = output.getContext("2d");
+    const outputCtx = output.getContext("2d", { willReadFrequently: true });
     if (!outputCtx) throw new Error("\u65E0\u6CD5\u521B\u5EFA\u753B\u5E03\u4E0A\u4E0B\u6587");
-    outputCtx.drawImage(work, 0, 0, output.width, output.height);
+    outputCtx.drawImage(image, 0, 0, output.width, output.height);
+    // 空白率在缩放后的画布上采样：整幅扫描图直接 getImageData 一次就是几十 MB，且结果没有区别。
+    const ratio = blankRatio(outputCtx, output.width, output.height);
     const encoded = output.toDataURL("image/jpeg", Math.min(1, Math.max(0.5, config.quality)));
     return {
       dataUrl: encoded,
@@ -2179,30 +2583,64 @@ ${subQuestionLines(question)}`,
   return sections.filter(Boolean).join("\n\n");
 }
   // src/core/rubric-generator.ts
+  // 学科 → 题型。按中学实际卷面结构列，且每个题型都要在 RUBRIC_TYPE_HINTS 里有专门提示，
+  // 否则「切换题型」只有名字进提示词，判分口径一模一样，等于没选。
   var RUBRIC_SUBJECTS = {
-    "\u8BED\u6587": ["\u4F5C\u6587", "\u73B0\u4EE3\u6587\u9605\u8BFB", "\u53E4\u8BD7\u6587\u9605\u8BFB", "\u6587\u8A00\u6587\u7FFB\u8BD1", "\u8BED\u8A00\u6587\u5B57\u8FD0\u7528"],
-    "\u6570\u5B66": ["\u89E3\u7B54\u9898", "\u8BC1\u660E\u9898", "\u586B\u7A7A\u9898", "\u9009\u62E9\u9898", "\u5E94\u7528\u9898"],
-    "\u82F1\u8BED": ["\u4F5C\u6587", "\u9605\u8BFB\u7406\u89E3", "\u5B8C\u5F62\u586B\u7A7A", "\u7FFB\u8BD1", "\u8BAD\u6CD5\u586B\u7A7A"],
-    "\u7269\u7406": ["\u8BA1\u7B97\u9898", "\u5B9E\u9A8C\u9898", "\u7B80\u7B54\u9898", "\u9009\u62E9\u9898"],
-    "\u5316\u5B66": ["\u8BA1\u7B97\u9898", "\u5B9E\u9A8C\u9898", "\u7B80\u7B54\u9898", "\u65B9\u7A0B\u5F0F\u4E66\u5199", "\u9009\u62E9\u9898"],
-    "\u751F\u7269": ["\u5B9E\u9A8C\u9898", "\u7B80\u7B54\u9898", "\u8BC6\u56FE\u9898", "\u9009\u62E9\u9898"],
-    "\u5386\u53F2": ["\u6750\u6599\u5206\u6790\u9898", "\u8BBA\u8FF0\u9898", "\u7B80\u7B54\u9898", "\u9009\u62E9\u9898"],
-    "\u653F\u6CBB": ["\u6750\u6599\u5206\u6790\u9898", "\u8BBA\u8FF0\u9898", "\u7B80\u7B54\u9898", "\u9009\u62E9\u9898"],
-    "\u5730\u7406": ["\u7EFC\u5408\u9898", "\u8BFB\u56FE\u9898", "\u7B80\u7B54\u9898", "\u9009\u62E9\u9898"]
+    "\u8BED\u6587": ["\u73B0\u4EE3\u6587\u9605\u8BFB", "\u53E4\u8BD7\u6587\u9605\u8BFB", "\u6587\u8A00\u6587\u7FFB\u8BD1", "\u8BED\u8A00\u6587\u5B57\u8FD0\u7528", "\u540D\u53E5\u9ED8\u5199", "\u4F5C\u6587"],
+    "\u6570\u5B66": ["\u9009\u62E9\u9898", "\u586B\u7A7A\u9898", "\u89E3\u7B54\u9898", "\u8BC1\u660E\u9898", "\u5E94\u7528\u9898"],
+    "\u82F1\u8BED": ["\u9605\u8BFB\u7406\u89E3", "\u5B8C\u5F62\u586B\u7A7A", "\u8BED\u6CD5\u586B\u7A7A", "\u77ED\u6587\u6539\u9519", "\u7FFB\u8BD1", "\u4F5C\u6587"],
+    "\u7269\u7406": ["\u9009\u62E9\u9898", "\u586B\u7A7A\u9898", "\u5B9E\u9A8C\u9898", "\u8BA1\u7B97\u9898", "\u7B80\u7B54\u9898"],
+    "\u5316\u5B66": ["\u9009\u62E9\u9898", "\u586B\u7A7A\u9898", "\u5B9E\u9A8C\u9898", "\u8BA1\u7B97\u9898", "\u65B9\u7A0B\u5F0F\u4E66\u5199", "\u7B80\u7B54\u9898"],
+    "\u751F\u7269": ["\u9009\u62E9\u9898", "\u586B\u7A7A\u9898", "\u5B9E\u9A8C\u9898", "\u8BC6\u56FE\u9898", "\u9057\u4F20\u63A8\u65AD\u9898", "\u7B80\u7B54\u9898"],
+    "\u5386\u53F2": ["\u9009\u62E9\u9898", "\u586B\u7A7A\u9898", "\u6750\u6599\u5206\u6790\u9898", "\u7B80\u7B54\u9898", "\u8BBA\u8FF0\u9898"],
+    "\u653F\u6CBB": ["\u9009\u62E9\u9898", "\u586B\u7A7A\u9898", "\u6750\u6599\u5206\u6790\u9898", "\u8FA8\u6790\u9898", "\u7B80\u7B54\u9898", "\u8BBA\u8FF0\u9898"],
+    "\u5730\u7406": ["\u9009\u62E9\u9898", "\u586B\u7A7A\u9898", "\u8BFB\u56FE\u9898", "\u7EFC\u5408\u9898", "\u6750\u6599\u5206\u6790\u9898", "\u7B80\u7B54\u9898"]
   };
 
   var RUBRIC_TYPE_HINTS = {
     "\u4F5C\u6587": "\u6309\u5185\u5BB9\u3001\u7ED3\u6784\u3001\u8BED\u8A00\u3001\u4E66\u5199\u7B49\u7EF4\u5EA6\u5212\u5206\u6863\u6B21\uFF0C\u6BCF\u6863\u7ED9\u51FA\u5206\u6570\u533A\u95F4\u4E0E\u53EF\u89C2\u5BDF\u7684\u7279\u5F81\u3002",
-    "\u89E3\u7B54\u9898": "\u6309\u6B65\u9AA4\u7ED9\u5206\uFF1A\u516C\u5F0F\u6B63\u786E\u3001\u4EE3\u5165\u8FC7\u7A0B\u3001\u8BA1\u7B97\u7ED3\u679C\u3001\u5355\u4F4D\u4E0E\u7B54\u8BED\u5206\u522B\u8BBE\u5206\u70B9\u3002",
-    "\u8BC1\u660E\u9898": "\u6309\u5173\u952E\u8BBA\u636E\u3001\u63A8\u7406\u94FE\u3001\u7ED3\u8BBA\u9010\u6B65\u7ED9\u5206\uFF0C\u6BCF\u4E00\u5FC5\u8981\u7B49\u5F0F\u6216\u5B9A\u7406\u4F5C\u4E3A\u72EC\u7ACB\u5F97\u5206\u70B9\u3002",
-    "\u5B9E\u9A8C\u9898": "\u5206\u522B\u5BF9\u5B9E\u9A8C\u539F\u7406\u3001\u64CD\u4F5C\u6B65\u9AA4\u3001\u73B0\u8C61\u8BB0\u5F55\u3001\u7ED3\u8BBA\u3001\u8BEF\u5DEE\u5206\u6790\u8BBE\u5F97\u5206\u70B9\u3002",
-    "\u6750\u6599\u5206\u6790\u9898": "\u6309\u70B9\u7ED9\u5206\uFF1A\u4ECE\u6807\u51C6\u7B54\u6848\u4E2D\u62BD\u51FA\u6BCF\u4E00\u4E2A\u53EF\u72EC\u7ACB\u5224\u5B9A\u7684\u5F97\u5206\u70B9\uFF0C\u7B54\u5230\u5373\u7ED9\u8BE5\u70B9\u5206\u503C\uFF0C\u672A\u7B54\u5230\u4E0D\u7ED9\u5206\u3002",
-    "\u7EFC\u5408\u9898": "\u6309\u70B9\u7ED9\u5206\uFF1A\u6BCF\u4E00\u4E2A\u53EF\u5224\u5B9A\u7684\u7B54\u6848\u8981\u70B9\u4F5C\u4E3A\u72EC\u7ACB\u5F97\u5206\u70B9\uFF0C\u7B54\u5230\u5373\u7ED9\u5206\uFF0C\u7B54\u4E0D\u5230\u70B9\u4E0D\u7ED9\u8BE5\u70B9\u5206\u503C\u4E14\u4E0D\u5012\u6263\u3002",
-    "\u8BBA\u8FF0\u9898": "\u6309\u89C2\u70B9\u3001\u8BBA\u636E\u3001\u8BBA\u8BC1\u8FC7\u7A0B\u3001\u7ED3\u8BBA\u5212\u5206\u6863\u6B21\uFF0C\u7ED9\u51FA\u5404\u6863\u5206\u6570\u533A\u95F4\u4E0E\u7279\u5F81\u3002",
-    "\u7FFB\u8BD1": "\u6309\u5173\u952E\u8BCD\u3001\u53E5\u5F0F\u7ED3\u6784\u3001\u8BED\u6C14\u8BF4\u5F97\u5206\u70B9\uFF0C\u5141\u8BB8\u540C\u4E49\u8868\u8FBE\u3002",
-    "\u8BFB\u56FE\u9898": "\u5148\u8003\u5BDF\u56FE\u4E2D\u4FE1\u606F\u63D0\u53D6\u662F\u5426\u5B8C\u6574\uFF0C\u518D\u8003\u5BDF\u63CF\u8FF0\u662F\u5426\u51C6\u786E\uFF0C\u6BCF\u9879\u4FE1\u606F\u5355\u72EC\u8BA1\u5206\u3002",
     "\u9009\u62E9\u9898": "\u7B54\u6848\u552F\u4E00\uFF0C\u53EA\u9700\u7ED9\u51FA\u6B63\u786E\u9009\u9879\u4E0E\u5F97\u5206\u6761\u4EF6\u3002",
-    "\u586B\u7A7A\u9898": "\u9010\u7A7A\u5217\u51FA\u6B63\u786E\u7B54\u6848\u4E0E\u5BB9\u8BB8\u7B49\u4EF7\u5199\u6CD5\uFF0C\u6BCF\u7A7A\u5355\u72EC\u8BA1\u5206\u3002"
+    "\u586B\u7A7A\u9898": "\u9010\u7A7A\u5217\u51FA\u6B63\u786E\u7B54\u6848\u4E0E\u5BB9\u8BB8\u7B49\u4EF7\u5199\u6CD5\uFF0C\u6BCF\u7A7A\u5355\u72EC\u8BA1\u5206\u3002",
+    "\u89E3\u7B54\u9898": "\u6309\u6B65\u9AA4\u7ED9\u5206\uFF1A\u516C\u5F0F\u6B63\u786E\u3001\u4EE3\u5165\u8FC7\u7A0B\u3001\u8BA1\u7B97\u7ED3\u679C、\u5355\u4F4D\u4E0E\u7B54\u8BED\u5206\u522B\u8BBE\u5206\u70B9\u3002",
+    "\u8BC1\u660E\u9898": "\u6309\u5173\u952E\u8BBA\u636E\u3001\u63A8\u7406\u94FE\u3001\u7ED3\u8BBA\u9010\u6B65\u7ED9\u5206\uFF0C\u6BCF\u4E00\u5FC5\u8981\u7B49\u5F0F\u6216\u5B9A\u7406\u4F5C\u4E3A\u72EC\u7ACB\u5F97\u5206\u70B9\u3002",
+    "\u5E94\u7528\u9898": "\u5EFA\u6A21\u3001\u5217\u5F0F\u3001\u6C42\u89E3\u3001\u4F5C\u7B54\u56DB\u6BB5\u5206\u522B\u8BBE\u70B9\uFF0C\u53EA\u7ED9\u7ED3\u679C\u65E0\u8FC7\u7A0B\u4E0D\u7ED9\u6EE1\u5206\u3002",
+    "\u5B9E\u9A8C\u9898": "\u5206\u522B\u5BF9\u5B9E\u9A8C\u539F\u7406\u3001\u64CD\u4F5C\u6B65\u9AA4\u3001\u73B0\u8C61\u8BB0\u5F55\u3001\u7ED3\u8BBA\u3001\u8BEF\u5DEE\u5206\u6790\u8BBE\u5F97\u5206\u70B9\u3002",
+    "\u8BA1\u7B97\u9898": "\u516C\u5F0F\u3001\u4EE3\u5165\u8FC7\u7A0B\u3001\u7ED3\u679C\u6570\u503C\u4E0E\u5355\u4F4D\u5206\u522B\u8BBE\u70B9\uFF0C\u53EA\u5199\u7ED3\u679C\u6700\u591A\u7ED9\u8BE5\u70B9\u4E00\u534A\u3002",
+    "\u7B80\u7B54\u9898": "\u6309\u8981\u70B9\u5206\u70B9\u7ED9\u5206\uFF0C\u6BCF\u70B9\u72EC\u7ACB\u5224\u5B9A\uFF0C\u7B54\u5230\u5373\u5F97\u5206\uFF0C\u7B54\u4E0D\u5230\u4E0D\u5012\u6263\u3002",
+    "\u65B9\u7A0B\u5F0F\u4E66\u5199": "\u5316\u5B66\u5F0F\u3001\u914D\u5E73\u3001\u53CD\u5E94\u6761\u4EF6\u3001\u2191\u2193\u7B26\u53F7\u5206\u522B\u8BBE\u70B9\uFF0C\u7F3A\u4E00\u9879\u6263\u5BF9\u5E94\u70B9\u3002",
+    "\u8BC6\u56FE\u9898": "\u5148\u8003\u67E5\u56FE\u4E2D\u7ED3\u6784\u8BC6\u522B\u662F\u5426\u51C6\u786E\uFF0C\u518D\u8003\u67E5\u529F\u80FD\u63CF\u8FF0\uFF1B\u8BC6\u522B\u9519\u8BEF\u5219\u8BE5\u70B9\u4E0D\u5F97\u5206\u3002",
+    "\u9057\u4F20\u63A8\u65AD\u9898": "\u57FA\u56E0\u578B\u3001\u8868\u73B0\u578B\u3001\u6BD4\u4F8B\u5206\u522B\u8BBE\u70B9\uFF0C\u63A8\u5BFC\u8FC7\u7A0B\u4E0E\u7ED3\u8BBA\u5206\u5F00\u5224\u5206\u3002",
+    "\u6750\u6599\u5206\u6790\u9898": "\u6309\u70B9\u7ED9\u5206\uFF1A\u4ECE\u6807\u51C6\u7B54\u6848\u4E2D\u62BD\u51FA\u6BCF\u4E00\u4E2A\u53EF\u72EC\u7ACB\u5224\u5B9A\u7684\u5F97\u5206\u70B9\uFF0C\u7B54\u5230\u5373\u7ED9\u8BE5\u70B9\u5206\u503C\uFF0C\u672A\u7B54\u5230\u4E0D\u7ED9\u5206\u3002",
+    "\u8FA8\u6790\u9898": "\u5148\u5224\u65AD\u89C2\u70B9\u5BF9\u9519\u518D\u5206\u5C42\u5206\u6790\uFF0C\u5224\u65AD\u4E0E\u5206\u6790\u5206\u522B\u8BBE\u70B9\uFF0C\u53EA\u6709\u5224\u65AD\u6CA1\u5206\u6790\u53EA\u5F97\u5224\u65AD\u5206\u3002",
+    "\u8BBA\u8FF0\u9898": "\u6309\u89C2\u70B9\u3001\u8BBA\u636E\u3001\u8BBA\u8BC1\u8FC7\u7A0B\u3001\u7ED3\u8BBA\u5212\u5206\u6863\u6B21\uFF0C\u7ED9\u51FA\u5404\u6863\u5206\u6570\u533A\u95F4\u4E0E\u7279\u5F81\u3002",
+    "\u7EFC\u5408\u9898": "\u6309\u70B9\u7ED9\u5206\uFF1A\u6BCF\u4E00\u4E2A\u53EF\u5224\u5B9A\u7684\u7B54\u6848\u8981\u70B9\u4F5C\u4E3A\u72EC\u7ACB\u5F97\u5206\u70B9\uFF0C\u7B54\u5230\u5373\u7ED9\u5206\uFF0C\u7B54\u4E0D\u5230\u70B9\u4E0D\u7ED9\u8BE5\u70B9\u5206\u503C\u4E14\u4E0D\u5012\u6263\u3002",
+    "\u8BFB\u56FE\u9898": "\u5148\u8003\u5BDF\u56FE\u4E2D\u4FE1\u606F\u63D0\u53D6\u662F\u5426\u5B8C\u6574\uFF0C\u518D\u8003\u5BDF\u63CF\u8FF0\u662F\u5426\u51C6\u786E\uFF0C\u6BCF\u9879\u4FE1\u606F\u5355\u72EC\u8BA1\u5206\u3002",
+    "\u73B0\u4EE3\u6587\u9605\u8BFB": "\u6309\u8BBE\u95EE\u5206\u70B9\u4F5C\u7B54\uFF0C\u6BCF\u4E2A\u8981\u70B9\u9700\u5BF9\u5E94\u539F\u6587\u4F9D\u636E\uFF1B\u53EA\u6709\u6982\u681C\u6CA1\u6709\u4F9D\u636E\u7684\u6309\u534A\u5206\u3002",
+    "\u53E4\u8BD7\u6587\u9605\u8BFB": "\u5206\u70B9\u4F5C\u7B54\u5E76\u5F15\u7528\u539F\u53E5\u4F50\u8BC1\uFF0C\u7406\u89E3\u6027\u9ED8\u5199\u9519\u5B57\u4E0D\u5F97\u5206\u3002",
+    "\u6587\u8A00\u6587\u7FFB\u8BD1": "\u6309\u91CD\u70B9\u5B9E\u8BCD\u3001\u865A\u8BCD\u3001\u53E5\u5F0F\u3001\u53E5\u610F\u56DB\u9879\u5206\u522B\u8BBE\u70B9\uFF0C\u76F4\u8BD1\u4E3A\u4E3B\uFF0C\u610F\u8BD1\u6309\u70B9\u7ED9\u5206\u3002",
+    "\u8BED\u8A00\u6587\u5B57\u8FD0\u7528": "\u6309\u6BCF\u9898\u7684\u8BBE\u95EE\u6307\u4EE4\u9010\u6761\u5224\u5206\uFF0C\u7B26\u5408\u9898\u5E72\u8981\u6C42\u624D\u5F97\u5206\u3002",
+    "\u540D\u53E5\u9ED8\u5199": "\u4E0A\u4E0B\u53E5\u5B8C\u6574\u3001\u65E0\u9519\u522B\u5B57\u624D\u5F97\u5206\uFF0C\u4E00\u53E5\u9519\u5219\u8BE5\u53E5\u4E0D\u5F97\u5206\u3002",
+    "\u9605\u8BFB\u7406\u89E3": "\u6309\u4FE1\u606F\u5B9A\u4F4D\u3001\u63A8\u65AD\u3001\u4E3B\u65E8\u6982\u681C\u5206\u522B\u8BBE\u70B9\uFF0C\u7B54\u6848\u9700\u80FD\u5728\u539F\u6587\u627E\u5230\u4F9D\u636E\u3002",
+    "\u5B8C\u5F62\u586B\u7A7A": "\u6BCF\u7A7A\u552F\u4E00\u7B54\u6848\uFF0C\u7ED3\u5408\u4E0A\u4E0B\u6587\u8BED\u7BC7\u5224\u65AD\uFF0C\u4E0D\u6309\u8BED\u6CD5\u5B64\u7ACB\u5224\u5206\u3002",
+    "\u8BED\u6CD5\u586B\u7A7A": "\u6BCF\u7A7A\u4E00\u8BCD\uFF0C\u8BCD\u5F62\u53D8\u5316\u4E0E\u5927\u5C0F\u5199\u89C4\u8303\uFF0C\u9519\u8BEF\u4E0D\u5F97\u5206\u3002",
+    "\u77ED\u6587\u6539\u9519": "\u6BCF\u5904\u9519\u8BEF\u5355\u72EC\u8BA1\u5206\uFF0C\u6539\u5BF9\u4F4D\u7F6E\u4F46\u6539\u9519\u5185\u5BB9\u4E0D\u5F97\u5206\u3002",
+    "\u7FFB\u8BD1": "\u6309\u5173\u952E\u8BCD\u3001\u53E5\u5F0F\u7ED3\u6784\u3001\u8BED\u6C14\u8BF4\u5F97\u5206\u70B9\uFF0C\u5141\u8BB8\u540C\u4E49\u8868\u8FBE\u3002"
+  };
+
+  // 同一题型在不同学科里判分重点不同，这条补充要求挂在基础提示后面。
+  var RUBRIC_SUBJECT_TYPE_HINTS = {
+    "\u5730\u7406|\u8BFB\u56FE\u9898": "\u5FC5\u987B\u70B9\u660E\u56FE\u4E2D\u51FA\u73B0\u7684\u65B9\u4F4D\u3001\u56FE\u4F8B\u3001\u7B49\u503C\u7EBF\u6216\u7EDF\u8BA1\u91CF\uFF1B\u53EA\u5199\u7ED3\u8BBA\u4E0D\u5F15\u56FE\u4E0D\u5F97\u5206\u3002",
+    "\u5730\u7406|\u7EFC\u5408\u9898": "\u81EA\u7136\u8981\u7D20\uFF08\u6C14\u5019\u3001\u5730\u5F62\u3001\u6C34\u6587\u3001\u571F\u58E4\uFF09\u4E0E\u4EBA\u6587\u8981\u7D20\uFF08\u5E02\u573A\u3001\u4EA4\u901A\u3001\u52B3\u52A8\u529B\uFF09\u5206\u5F00\u5217\u70B9\uFF0C\u6BCF\u70B9\u5355\u72EC\u8BA1\u5206\u3002",
+    "\u5730\u7406|\u586B\u7A7A\u9898": "\u5730\u540D\u3001\u65B9\u4F4D\u3001\u6570\u503C\u6309\u552F\u4E00\u7B54\u6848\u5224\u5206\uFF0C\u5141\u8BB8\u540C\u4E49\u5199\u6CD5\uFF0C\u9519\u522B\u5B57\u6309\u9519\u7B54\u5904\u7406\u3002",
+    "\u5316\u5B66|\u586B\u7A7A\u9898": "\u5316\u5B66\u5F0F\u3001\u79BB\u5B50\u7B26\u53F7\u3001\u53CD\u5E94\u6761\u4EF6\u6309\u89C4\u8303\u4E66\u5199\u5224\u5206\uFF0C\u914D\u5E73\u9519\u8BEF\u8BE5\u7A7A\u4E0D\u5F97\u5206\u3002",
+    "\u5316\u5B66|\u65B9\u7A0B\u5F0F\u4E66\u5199": "\u5316\u5B66\u5F0F\u6B63\u786E\u3001\u914D\u5E73\u3001\u6761\u4EF6\u4E0E\u2191\u2193\u7B26\u53F7\u9F50\u5168\u624D\u7ED9\u6EE1\u5206\uFF0C\u7F3A\u4E00\u9879\u6309\u70B9\u6263\u3002",
+    "\u751F\u7269|\u9057\u4F20\u63A8\u65AD\u9898": "\u57FA\u56E0\u578B\u3001\u8868\u73B0\u578B\u3001\u6BD4\u4F8B\u5206\u522B\u8BBE\u5206\uFF0C\u63A8\u5BFC\u8FC7\u7A0B\u7F3A\u5931\u4F46\u7ED3\u8BBA\u6B63\u786E\u7684\u6309\u534A\u7ED9\u3002",
+    "\u7269\u7406|\u8BA1\u7B97\u9898": "\u516C\u5F0F\u3001\u4EE3\u5165\u8FC7\u7A0B\u3001\u7ED3\u679C\u4E0E\u5355\u4F4D\u5206\u522B\u8BBE\u70B9\uFF0C\u53EA\u5199\u7ED3\u679C\u6700\u591A\u7ED9\u8BE5\u70B9\u4E00\u534A\u3002",
+    "\u6570\u5B66|\u8BC1\u660E\u9898": "\u6BCF\u4E00\u6B65\u63A8\u7406\u5FC5\u987B\u6709\u4F9D\u636E\uFF08\u5B9A\u7406\u6216\u9898\u8BBE\u6761\u4EF6\uFF09\uFF0C\u8DF3\u6B65\u6309\u7F3A\u5931\u7684\u63A8\u7406\u70B9\u6263\u5206\u3002",
+    "\u8BED\u6587|\u540D\u53E5\u9ED8\u5199": "\u9519\u5B57\u3001\u6F0F\u5B57\u3001\u591A\u5B57\u8BE5\u53E5\u4E0D\u5F97\u5206\uFF0C\u4E0D\u6309\u6BD4\u4F8B\u7ED9\u5206\u3002",
+    "\u82F1\u8BED|\u77ED\u6587\u6539\u9519": "\u6BCF\u5904\u9519\u8BEF\u5355\u72EC\u8BA1\u5206\uFF0C\u6539\u5BF9\u4F4D\u7F6E\u4F46\u6539\u9519\u5185\u5BB9\u4E0D\u5F97\u5206\u3002",
+    "\u82F1\u8BED|\u8BED\u6CD5\u586B\u7A7A": "\u6BCF\u7A7A\u4E00\u8BCD\uFF0C\u8BCD\u5F62\u53D8\u5316\u9519\u8BEF\u4E0D\u5F97\u5206\uFF0C\u5927\u5C0F\u5199\u9519\u8BEF\u6309\u9519\u7B54\u5904\u7406\u3002",
+    "\u653F\u6CBB|\u8FA8\u6790\u9898": "\u5148\u5224\u65AD\u89C2\u70B9\u5BF9\u9519\u518D\u5206\u6790\u7406\u7531\uFF0C\u53EA\u6709\u5224\u65AD\u6CA1\u6709\u5206\u6790\u53EA\u5F97\u5224\u65AD\u5206\u3002"
   };
 
   function rubricScoringMode(type) {
@@ -2211,11 +2649,26 @@ ${subQuestionLines(question)}`,
   }
 
   function rubricTypeHint(subject, type) {
-    if (RUBRIC_TYPE_HINTS[type]) return RUBRIC_TYPE_HINTS[type];
-    if (type.indexOf("\u4F5C\u6587") >= 0 || type.indexOf("\u8BBA\u8FF0") >= 0) return RUBRIC_TYPE_HINTS["\u4F5C\u6587"];
-    if (type.indexOf("\u5B9E\u9A8C") >= 0) return RUBRIC_TYPE_HINTS["\u5B9E\u9A8C\u9898"];
-    if (type.indexOf("\u8BA1\u7B97") >= 0) return RUBRIC_TYPE_HINTS["\u89E3\u7B54\u9898"];
-    return "\u6309\u70B9\u7ED9\u5206\uFF1A\u9010\u6761\u5217\u51FA\u53EF\u5224\u5B9A\u7684\u5F97\u5206\u70B9\uFF0C\u6BCF\u70B9\u6CE8\u660E\u5206\u503C\uFF0C\u672A\u7B54\u5230\u7684\u70B9\u4E0D\u7ED9\u5206\u4E14\u4E0D\u5012\u6263\u3002";
+    const value = String(type || "");
+    let hint = RUBRIC_TYPE_HINTS[value] || "";
+    if (!hint) {
+      // 题型名不完全命中时按关键词归并，保证每类都能落到一条具体口径上。
+      if (value.indexOf("\u4F5C\u6587") >= 0 || value.indexOf("\u8BBA\u8FF0") >= 0) hint = RUBRIC_TYPE_HINTS["\u4F5C\u6587"];
+      else if (value.indexOf("\u5B9E\u9A8C") >= 0) hint = RUBRIC_TYPE_HINTS["\u5B9E\u9A8C\u9898"];
+      else if (value.indexOf("\u8BA1\u7B97") >= 0) hint = RUBRIC_TYPE_HINTS["\u8BA1\u7B97\u9898"];
+      else if (value.indexOf("\u586B\u7A7A") >= 0) hint = RUBRIC_TYPE_HINTS["\u586B\u7A7A\u9898"];
+      else if (value.indexOf("\u9605\u8BFB") >= 0) hint = RUBRIC_TYPE_HINTS["\u9605\u8BFB\u7406\u89E3"];
+      else hint = "\u6309\u70B9\u7ED9\u5206\uFF1A\u9010\u6761\u5217\u51FA\u53EF\u5224\u5B9A\u7684\u5F97\u5206\u70B9\uFF0C\u6BCF\u70B9\u6CE8\u660E\u5206\u503C\uFF0C\u672A\u7B54\u5230\u7684\u70B9\u4E0D\u7ED9\u5206\u4E14\u4E0D\u5012\u6263\u3002";
+    }
+    const extra = RUBRIC_SUBJECT_TYPE_HINTS[`${String(subject || "")}|${value}`];
+    return extra ? `${hint}${extra}` : hint;
+  }
+
+  // 题型到底影响了什么：给界面一句人话摘要，避免「选了题型却不知道有啥用」。
+  function rubricRuleSummary(subject, type) {
+    const mode = rubricScoringMode(type) === "tier" ? "\u6863\u6B21\u7ED9\u5206" : "\u6309\u70B9\u7ED9\u5206";
+    const hint = rubricTypeHint(subject, type).split("\u3002")[0];
+    return `${mode} \xB7 ${hint}\u3002`;
   }
 
   function buildRubricPrompt(payload) {
@@ -2804,9 +3257,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 [data-model-options] { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 [data-model-options] select { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid var(--zygr-line); border-radius: 8px; background: #fff; color: var(--zygr-text); font-size: 13px; }
 .zygr-list { display: grid; gap: 8px; }
-.zygr-item { border: 1px solid var(--zygr-line); border-radius: 12px; padding: 10px 12px; background: rgba(255,255,255,.7); cursor: pointer; transition: .18s; }
+.zygr-item { display: flex; align-items: center; gap: 8px; border: 1px solid var(--zygr-line); border-radius: 12px; padding: 10px 12px; background: rgba(255,255,255,.7); cursor: pointer; transition: .18s; }
 .zygr-item:hover { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(15,23,42,.08); }
 .zygr-item.zygr-selected { border-color: var(--zygr-primary); box-shadow: 0 0 0 2px var(--zygr-glow); }
+.zygr-item-main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zygr-jump { flex: none; border: 1px solid var(--zygr-line); border-radius: 8px; padding: 3px 9px; background: #fff; color: var(--zygr-primary); font-size: 11px; line-height: 1.4; cursor: pointer; }
+.zygr-jump:hover { border-color: var(--zygr-primary); background: var(--zygr-glow); }
 .zygr-detail { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.7; color: var(--zygr-muted); }
 .zygr-empty { text-align: center; color: var(--zygr-muted); padding: 24px; }
 .zygr-history-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 12px; align-items: start; }
@@ -3074,6 +3530,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.setCache(result.cacheHit ? "\u7F13\u5B58\u547D\u4E2D" : "\u65B0\u7ED3\u679C", result.cacheHit ? "ok" : result.needsReview ? "warn" : "idle");
       this.setStage("\u5B8C\u6210");
     }
+    // 换卷/定位后把结果区清空：旧分数留在面板上会诱导老师提交到另一份卷。
+    clearResult() {
+      const container = this.q("#zygr-result");
+      container.replaceChildren();
+      const note = document.createElement("div");
+      note.className = "zygr-reason";
+      note.textContent = "\u6279\u6539\u7ED3\u679C\u5C06\u663E\u793A\u5728\u8FD9\u91CC";
+      container.appendChild(note);
+      this.setStage("\u5C31\u7EEA");
+    }
     getScoreEdits() {
       const total = this.shadow.querySelector(".zygr-score-input[data-score-index=''], .zygr-score-editable .zygr-score-input");
       const subInputs = [...this.shadow.querySelectorAll(".zygr-subscore-input")];
@@ -3095,11 +3561,41 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   };
 
   // src/ui/history.ts
+  // 能否在阅卷页定位：必须有学号（旧记录没存学号就没法在记录列表里对上号）。
+  function canJumpRecord(entry) {
+    const identity = entry?.question?.identity;
+    return Boolean(identity && String(identity.userCode || "").trim());
+  }
   // 复核状态文案：供详情展示，导出用同一套口径。
   function reviewText(entry) {
     const confirmed = entry.confirmedScore === void 0 || entry.confirmedScore === null ? "" : `\uFF08\u786E\u8BA4 ${entry.confirmedScore} \u5206\uFF09`;
     const note = entry.reviewNote ? ` \xB7 ${entry.reviewNote}` : "";
     return entry.reviewedAt ? `\u5DF2\u590D\u6838${confirmed}${note}` : "\u672A\u590D\u6838";
+  }
+  // 历史里可能有坏记录（早期版本写进过 result: null）：补齐成一个可渲染的占位，
+  // 否则 render 里读 entry.result.score 会直接抛错，整个面板打不开。
+  function normalizeHistoryEntries(entries) {
+    return (Array.isArray(entries) ? entries : []).map((entry) => {
+      if (!entry || !entry.question) return null;
+      if (entry.result && typeof entry.result === "object") return entry;
+      return {
+        ...entry,
+        result: {
+          status: "unknown",
+          score: 0,
+          maxScore: Number(entry.question.maxScore) || 0,
+          subScores: [],
+          reason: "\u8FD9\u6761\u8BB0\u5F55\u7684\u5206\u6570\u4E22\u5931\u4E86\uFF0C\u5EFA\u8BAE\u91CD\u65B0\u6279\u6539",
+          needsReview: true,
+          reviewReasons: ["\u5206\u6570\u4E22\u5931"],
+          cacheHit: false,
+          elapsedMs: 0,
+          usage: null,
+          pipeline: "-",
+          model: "-"
+        }
+      };
+    }).filter(Boolean);
   }
   var HistoryPanel = class {
     constructor(callbacks) {
@@ -3131,7 +3627,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         <button class="zygr-btn zygr-ghost" data-act="clear">\u6E05\u7A7A\u5386\u53F2</button>
         <button class="zygr-btn" data-act="csv">\u5BFC\u51FA CSV</button>
         <button class="zygr-btn" data-act="html">\u5BFC\u51FA HTML</button>
-        <button class="zygr-btn zygr-primary" data-act="close">\u5173\u95ED</button>
+        <button class="zygr-btn zygr-primary" data-act="next-review">\u4E0B\u4E00\u6761\u9700\u590D\u6838</button>
+        <button class="zygr-btn zygr-ghost" data-act="close">\u5173\u95ED</button>
       </div>
     </div></div>`;
     }
@@ -3148,6 +3645,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         else if (action === "clear") this.callbacks.onClear();
         else if (action === "csv") this.callbacks.onExport("csv");
         else if (action === "html") this.callbacks.onExport("html");
+        if (action === "next-review") {
+          this.jumpNextReview();
+          return;
+        }
+        if (action === "jump") {
+          const row = target.closest("[data-id]");
+          const entry = this.entries.find((item2) => item2.id === row?.dataset.id);
+          if (entry) this.callbacks.onJump?.(entry);
+          return;
+        }
         const item = target.closest("[data-id]");
         if (item?.dataset.id) {
           this.selectedId = item.dataset.id;
@@ -3185,7 +3692,19 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         item.className = "zygr-item";
         if (entry.id === this.selectedId) item.classList.add("zygr-selected");
         item.dataset.id = entry.id;
-        item.textContent = `${new Date(entry.createdAt).toLocaleString("zh-CN")} \xB7 \u9898\u53F7 ${entry.question.questionId} \xB7 ${entry.result.score}/${entry.result.maxScore} \xB7 ${entry.result.pipeline}${entry.result.needsReview ? " \xB7 \u9700\u590D\u6838" : ""}`;
+        const text = document.createElement("div");
+        text.className = "zygr-item-main";
+        text.textContent = `${new Date(entry.createdAt).toLocaleString("zh-CN")} \xB7 \u9898\u53F7 ${entry.question.questionId} \xB7 ${entry.result.score}/${entry.result.maxScore} \xB7 ${entry.result.pipeline}${entry.result.needsReview ? " \xB7 \u9700\u590D\u6838" : ""}`;
+        item.appendChild(text);
+        // 单条记录上就能直接跳回阅卷页，不必先展开详情。
+        if (canJumpRecord(entry)) {
+          const jump = document.createElement("button");
+          jump.className = "zygr-jump";
+          jump.dataset.act = "jump";
+          jump.textContent = "\u5B9A\u4F4D";
+          jump.title = "\u5728\u9605\u5377\u9875\u56DE\u8BC4\u8FD9\u4E00\u4EFD\u5377\u5B50";
+          item.appendChild(jump);
+        }
         list.appendChild(item);
       }
       this.renderDetail();
@@ -3213,6 +3732,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         `\u4F9D\u636E\uFF1A${entry.result.reason || "\u65E0"}`,
         `\u590D\u6838\uFF1A${entry.result.reviewReasons.join("\uFF1B") || "\u65E0"}`,
         `\u5C0F\u9898\uFF1A${entry.result.subScores.map((item) => `${item.label} ${item.score}/${item.maxScore}`).join("\uFF1B") || "\u65E0"}`,
+        `\u5B9A\u4F4D\uFF1A${entry.question.identity?.userCode ? `\u5B66\u53F7 ${entry.question.identity.userCode} \xB7 \u8BD5\u5377 ${entry.question.identity.markingPaperId ? "\u5DF2\u8BB0\u5F55" : "\u672A\u8BB0\u5F55"}` : "\u4E0D\u652F\u6301\uFF08\u65E7\u8BB0\u5F55\u6CA1\u5B58\u5B66\u53F7\uFF09"}`,
         `\u590D\u6838\u7ED3\u679C\uFF1A${reviewText(entry)}`
       ];
       detail.textContent = lines.join("\n");
@@ -3239,14 +3759,38 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         const max = Number(entry.result.maxScore) || 999;
         this.callbacks.onReview?.(entry.id, { confirmedScore: Math.min(Math.max(value, 0), max) });
       });
-      actions.append(reviewButton, scoreButton);
+      const jumpButton = document.createElement("button");
+      jumpButton.className = "zygr-btn zygr-primary";
+      jumpButton.textContent = "\u5B9A\u4F4D\u5230\u8BE5\u5377";
+      jumpButton.disabled = !canJumpRecord(entry);
+      jumpButton.title = canJumpRecord(entry) ? "\u5728\u9605\u5377\u9875\u56DE\u8BC4\u8FD9\u4E00\u4EFD\u5377\u5B50" : "\u8BE5\u8BB0\u5F55\u6CA1\u6709\u5B66\u53F7\uFF0C\u65E0\u6CD5\u5B9A\u4F4D";
+      jumpButton.addEventListener("click", () => this.callbacks.onJump?.(entry));
+      actions.append(jumpButton, reviewButton, scoreButton);
       container.appendChild(actions);
+    }
+    // 复核队列：把「需复核且还没标记」的记录按当前筛选排成一条队，一条条定位过去。
+    nextReviewEntry() {
+      const pending = this.filtered().filter((entry) => entry.result.needsReview && !entry.reviewedAt && canJumpRecord(entry));
+      if (pending.length === 0) return null;
+      const index = pending.findIndex((entry) => entry.id === this.selectedId);
+      return pending[index + 1] || pending[0];
+    }
+    jumpNextReview() {
+      const next = this.nextReviewEntry();
+      if (!next) {
+        this.callbacks.onEmptyQueue?.();
+        return;
+      }
+      this.selectedId = next.id;
+      this.render();
+      // 第二个参数标记「来自复核队列」：主流程据此在提交后自动跳下一条。
+      this.callbacks.onJump?.(next, true);
     }
     mount() {
       if (!this.host.isConnected) document.body.appendChild(this.host);
     }
     show(entries) {
-      this.entries = entries;
+      this.entries = normalizeHistoryEntries(entries);
       this.mount();
       this.q(".zygr-overlay").hidden = false;
       this.render();
@@ -3255,7 +3799,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.q(".zygr-overlay").hidden = true;
     }
     refresh(entries) {
-      this.entries = entries;
+      this.entries = normalizeHistoryEntries(entries);
       if (!this.q(".zygr-overlay").hidden) this.render();
     }
   };
@@ -3286,6 +3830,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.config = {};
       this.rubricImages = [];
       this.host = document.createElement("div");
+      // 三个面板统一挂同一个标记类：便于排查与外部工具定位（本身不带样式）。
+      this.host.className = "zygr-host";
       this.shadow = this.host.attachShadow({ mode: "open" });
       this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
       guardEnter(this.shadow);
@@ -3322,6 +3868,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
             ${field("\u672C\u65B9\u6848\u6EE1\u5206", "context.maxScore", "number")}
             ${select("\u5B66\u79D1\uFF08\u7528\u4E8E\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF09", "context.subject", [["", "\u4E0D\u6307\u5B9A\uFF08\u6309\u624B\u52A8\u53C2\u6570\uFF09"], ...Object.keys(RUBRIC_SUBJECTS).map((name) => [name, name])])}
           </div>
+          <h3>\u6807\u51C6\u5E93\uFF08\u6309\u9898\u53F7\u5206\u522B\u4FDD\u5B58\uFF09</h3>
+          <div class="zygr-row">
+            <button class="zygr-btn zygr-ghost" data-act="rubric-save">\u4FDD\u5B58\u672C\u9898\u6807\u51C6</button>
+            <button class="zygr-btn zygr-ghost" data-act="rubric-load">\u8F7D\u5165\u672C\u9898\u6807\u51C6</button>
+            <button class="zygr-btn zygr-ghost" data-act="rubric-clear">\u6E05\u7A7A\u672C\u9898\u6807\u51C6</button>
+          </div>
+          <p class="zygr-hint">\u5207\u5230\u5176\u5B83\u9898\u53F7\u65F6\u4F1A\u81EA\u52A8\u5B58\u4E0B\u5F53\u524D\u8FD9\u4EFD\u3001\u5E76\u8F7D\u5165\u90A3\u9053\u9898\u5DF2\u5B58\u7684\u6807\u51C6\uFF1B\u4E0A\u9762\u4E09\u4E2A\u6309\u94AE\u7528\u4E8E\u624B\u52A8\u5B58\u53D6\u3002</p>
         </div>
 
         <div class="zygr-section" data-page="api" hidden>
@@ -3352,6 +3905,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           <div class="zygr-grid">
             <div class="zygr-field"><label>\u5B66\u79D1</label><select data-gen="subject">${Object.keys(RUBRIC_SUBJECTS).map((name) => `<option value="${name}">${name}</option>`).join("")}</select></div>
             <div class="zygr-field"><label>\u9898\u578B</label><select data-gen="type"></select></div>
+            <p class="zygr-hint" data-gen="rule-hint"></p>
             <div class="zygr-field"><label>\u6EE1\u5206\uFF08\u53EF\u9009\uFF09</label><input type="number" data-gen="maxScore" min="0" step="0.5" placeholder="\u7559\u7A7A\u5219\u7531 AI \u5EFA\u8BAE"></div>
           </div>
           <div class="zygr-field" data-gen-field><label>\u9898\u76EE\uFF08\u4F5C\u6587\u7C7B\u5FC5\u586B\uFF0C\u5176\u4ED6\u53EF\u9009\uFF09</label><textarea data-gen="question" rows="3" placeholder="\u53EF\u7C98\u8D34\u9898\u76EE\u6587\u5B57\uFF0C\u6216\u7559\u7A7A\u4EC5\u7528\u56FE\u7247"></textarea></div>
@@ -3451,6 +4005,18 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           this.toast("\u5DF2\u586B\u5165\u8BC4\u5206\u6807\u51C6\u3001\u9898\u76EE\u3001\u53C2\u8003\u7B54\u6848\u4E0E\u6EE1\u5206\uFF0C\u8BF7\u70B9\u300C\u4FDD\u5B58\u914D\u7F6E\u300D\u751F\u6548");
           return;
         }
+        if (action === "rubric-save") {
+          this.callbacks.onRubricSave?.(this.readContextDraft());
+          return;
+        }
+        if (action === "rubric-load") {
+          this.callbacks.onRubricLoad?.();
+          return;
+        }
+        if (action === "rubric-clear") {
+          this.callbacks.onRubricClear?.();
+          return;
+        }
         if (action === "gen-copy") {
           const result = this.shadow.querySelector('[data-gen="result"]')?.value || "";
           if (!result.trim()) return this.toast("\u8BF7\u5148\u751F\u6210\u8BC4\u5206\u6807\u51C6");
@@ -3509,6 +4075,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.shadow.addEventListener("change", (event) => {
         const target = event.target;
         if (target.dataset.gen === "subject") this.populateRubricTypes();
+        else if (target.dataset.gen === "type") this.refreshRuleHint();
         if (target.dataset.gen === "images") {
           void this.loadRubricImages(target.files);
           target.value = "";
@@ -3655,7 +4222,19 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       const typeSelect = this.shadow.querySelector('[data-gen="type"]');
       if (!subjectSelect || !typeSelect) return;
       const types = RUBRIC_SUBJECTS[subjectSelect.value] || [];
+      const previous = typeSelect.value;
       typeSelect.innerHTML = types.map((type) => `<option value="${type}">${type}</option>`).join("");
+      if (types.includes(previous)) typeSelect.value = previous;
+      this.refreshRuleHint();
+    }
+    // 题型到底影响什么：直接显示生成时用的评分方式与判分口径，别让人以为它只是摆设。
+    refreshRuleHint() {
+      const subjectSelect = this.shadow.querySelector('[data-gen="subject"]');
+      const typeSelect = this.shadow.querySelector('[data-gen="type"]');
+      const hint = this.shadow.querySelector('[data-gen="rule-hint"]');
+      if (!subjectSelect || !typeSelect || !hint) return;
+      const summary = typeof rubricRuleSummary === "function" ? rubricRuleSummary(subjectSelect.value, typeSelect.value) : "";
+      hint.textContent = summary ? `\u751F\u6210\u53E3\u5F84\uFF1A${summary}` : "";
     }
     async loadRubricImages(files) {
       if (!files || !files.length) return;
@@ -3769,6 +4348,10 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         if (button) button.disabled = false;
       }
     }
+    // 只取「批改上下文」这一块（题目/答案/标准/满分/学科），给标准库存取用。
+    readContextDraft() {
+      return this.getDraft().context;
+    }
     getDraft() {
       const draft = JSON.parse(JSON.stringify(this.config));
       this.shadow.querySelectorAll("[data-field]").forEach((element) => {
@@ -3838,6 +4421,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     let currentQuestion = null;
     let lastResult = null;
     let lastHistoryId = "";
+    // 从历史定位过来后重新批改：结果写回原条目，避免待复核队列一直指着旧分数打转。
+    let regradeTargetId = "";
     let busy = false;
     // 提交互斥与冷却：连续批阅与手动点击可能同时触发提交，必须串行化。
     let submitting = false;
@@ -3846,8 +4431,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     const forcedNotified = new Set();
     let autoMode = false;
     let autoStopRequested = false;
+    // 复核队列：从「下一条需复核」进入后，提交完自动标记并跳到下一条待复核的卷子。
+    let reviewQueueActive = false;
     let observer = null;
     let observerTimer = 0;
+    let watchTimer = 0;
     const panel = new GraderPanel({
       onGrade: () => {
         void runGrade2();
@@ -3874,7 +4462,42 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         cache = createCache();
         limiter = buildLimiter(config);
         panel.setCache(pipelineLabel(config));
+        // 保存配置时顺手把这套标准存进「本题」槽位，下次切回来直接可用。
+        const slot = rubricSlotKey(currentQuestion);
+        if (slot) putRubricPreset(slot, config.context);
         panel.setSubtitle("\u914D\u7F6E\u5DF2\u66F4\u65B0");
+      },
+      // 标准库的增删都用「当前题号」定位，避免把 A 题的标准存到 B 题上。
+      onRubricSave: (context) => {
+        const slot = rubricSlotKey(currentQuestion);
+        if (!slot) {
+          panel.toast("\u5C1A\u672A\u8BFB\u53D6\u5230\u9898\u53F7\uFF0C\u65E0\u6CD5\u5B58\u5165\u6807\u51C6\u5E93");
+          return;
+        }
+        if (!rubricHasContent(context)) {
+          panel.toast("\u53C2\u8003\u7B54\u6848\u4E0E\u8BC4\u5206\u6807\u51C6\u90FD\u662F\u7A7A\u7684\uFF0C\u6CA1\u5FC5\u8981\u5B58");
+          return;
+        }
+        config = { ...config, context: rubricContextFields(context) };
+        saveConfig(config);
+        putRubricPreset(slot, config.context);
+        panel.toast(`\u5DF2\u5B58\u5165\u6807\u51C6\u5E93\uFF1A\u9898\u53F7 ${rubricSlotLabel(currentQuestion)}`);
+      },
+      onRubricLoad: () => {
+        const slot = rubricSlotKey(currentQuestion);
+        const preset = getRubricPreset(slot);
+        if (!preset) {
+          panel.toast(`\u9898\u53F7 ${rubricSlotLabel(currentQuestion) || "\u672C\u9898"} \u8FD8\u6CA1\u5B58\u8FC7\u6807\u51C6`);
+          return;
+        }
+        config = { ...config, context: rubricContextFields(preset) };
+        saveConfig(config);
+        panel.toast(`\u5DF2\u8F7D\u5165\u9898\u53F7 ${rubricSlotLabel(currentQuestion)} \u7684\u6807\u51C6`);
+      },
+      onRubricClear: () => {
+        const slot = rubricSlotKey(currentQuestion);
+        const removed = removeRubricPreset(slot);
+        panel.toast(removed ? `\u5DF2\u6E05\u7A7A\u9898\u53F7 ${rubricSlotLabel(currentQuestion)} \u7684\u6807\u51C6` : "\u672C\u9898\u8FD8\u6CA1\u5B58\u8FC7\u6807\u51C6");
       },
       onTest: (draft) => testService(draft),
       onFetchModels: (draft) => fetchModels(draft.pipeline.vlm),
@@ -3890,7 +4513,6 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       onImport: (data) => {
         config = merge(DEFAULT_CONFIG, data.config);
         saveConfig(config);
-        if (Array.isArray(data.presets)) saveCustomPresets(data.presets);
         if (isRecord(data.keys)) savePlatformKeys(data.keys);
         if (isRecord(data.models)) savePlatformModels(data.models);
         if (isRecord(data.thinkingModes)) savePlatformThinkingModes(data.thinkingModes);
@@ -3939,7 +4561,14 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         writeJson(STORAGE_KEYS.history, history);
         historyPanel.refresh(history);
         panel.toast("\u590D\u6838\u4FE1\u606F\u5DF2\u4FDD\u5B58");
-      }
+      },
+      // 点历史记录直接回到阅卷页对应那份卷子（复用平台的阅卷记录链路）。
+      onJump: (entry, fromQueue) => {
+        // 手动定位要退出队列模式，免得下一次提交被自动带去别的卷子。
+        if (!fromQueue) reviewQueueActive = false;
+        void jumpToHistory(entry, { fromQueue: Boolean(fromQueue) });
+      },
+      onEmptyQueue: () => panel.toast("\u6CA1\u6709\u5F85\u590D\u6838\u7684\u8BB0\u5F55")
     });
     panel.mount();
     // 观察器拿到新卷后立刻刷新题号与进度：页面 DOM 常比接口先就绪，只靠 MutationObserver 会漏。
@@ -3990,8 +4619,14 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         if (images.length === 0) throw new Error("\u4F5C\u7B54\u56FE\u7247\u5C1A\u672A\u7A33\u5B9A\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
         // 身份只取台账号与题号：跨账号一致，且不含会过期的签名。
         const observedIdentity = currentHookIdentity();
+        // 学号与试卷 ID 是「历史记录定位」的钥匙：记录列表只认学号，接口只认试卷 ID。
         const identity = observedIdentity && observedIdentity.scanRecordId
-          ? { scanRecordId: observedIdentity.scanRecordId, topicNumStr: observedIdentity.topicNumStr || "" }
+          ? {
+            scanRecordId: observedIdentity.scanRecordId,
+            topicNumStr: observedIdentity.topicNumStr || "",
+            userCode: observedIdentity.userCode || "",
+            markingPaperId: observedIdentity.markingPaperId || ""
+          }
           : null;
         currentQuestion = { ...currentQuestion, images, identity };
         panel.setQuestion(currentQuestion);
@@ -4004,15 +4639,36 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         });
         lastResult = result;
         panel.setResult(result);
-        lastHistoryId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        appendHistory({
-          id: lastHistoryId,
-          createdAt: Date.now(),
+        // 从历史定位过来重批时更新原条目，普通批改才新增：否则复核队列会一直指着旧分数打转。
+        const regradeTarget = regradeTargetId && loadHistory().find((entry) => entry.id === regradeTargetId);
+        const historyEntry = {
+          id: regradeTarget?.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          createdAt: regradeTarget?.createdAt || Date.now(),
           question: historyQuestion(currentQuestion),
           result,
           submitted: false
-        }, config.historyLimit);
-        historyPanel.refresh(loadHistory());
+        };
+        lastHistoryId = historyEntry.id;
+        if (regradeTarget) {
+          const history = loadHistory().map((entry) => entry.id === regradeTarget.id
+            ? {
+              ...entry,
+              ...historyEntry,
+              // 新结果要重新复核：清掉上一轮的复核留痕，但保留用户填过的确认分。
+              reviewedAt: void 0,
+              reviewNote: void 0
+            }
+            : entry);
+          writeJson(STORAGE_KEYS.history, history);
+          historyPanel.refresh(history);
+        } else {
+          appendHistory(historyEntry, config.historyLimit);
+          historyPanel.refresh(loadHistory());
+        }
+        if (!identity) {
+          const gradedKeys = (currentQuestion.images || []).map(stableImageKey).join("|");
+          void backfillIdentity(lastHistoryId, gradedKeys);
+        }
         if (result.needsReview) panel.toast("\u6279\u6539\u5B8C\u6210\uFF0C\u5EFA\u8BAE\u4EBA\u5DE5\u590D\u6838");
         // 强制思考的模型只提示一次，避免每份卷子都弹。
         if (result.thinkingForced && !forcedNotified.has(config.pipeline.vlm.model)) {
@@ -4026,6 +4682,40 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       } finally {
         busy = false;
         panel.setBusy(false);
+      }
+    }
+    // 观察器晚于首份卷加载时（刷新后立刻批改、脚本刚注入），identity 是空的；
+    // 等接口数据到了再回填，否则这条历史永远点不了「定位」。
+    async function backfillIdentity(historyId, imageKeys) {
+      const deadline = Date.now() + 8e3;
+      while (Date.now() < deadline) {
+        const observed = currentHookIdentity();
+        if (observed && observed.scanRecordId) {
+          // 卷子已经换了就别回填，否则会把上一位学生的身份贴到这条记录上。
+          const nowKeys = (currentQuestion?.images || []).map(stableImageKey).join("|");
+          if (nowKeys !== imageKeys) return;
+          const history = loadHistory().map((entry) => entry.id === historyId
+            ? {
+              ...entry,
+              question: {
+                ...entry.question,
+                // 顺带把题号修正成接口口径（DOM 的 "43(1)" 查记录列表查不到），
+                // 只改「原本就是 DOM 口径」的那种，接口口径原样保留。
+                topicNumStr: observed.topicNumStr || entry.question.topicNumStr,
+                identity: {
+                  scanRecordId: observed.scanRecordId,
+                  topicNumStr: observed.topicNumStr || "",
+                  userCode: observed.userCode || "",
+                  markingPaperId: observed.markingPaperId || ""
+                }
+              }
+            }
+            : entry);
+          writeJson(STORAGE_KEYS.history, history);
+          historyPanel.refresh(history);
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 300));
       }
     }
     // 历史只留定位字段与归一化后的图片键：签名 URL / data URI 会过期并迅速撑爆存储。
@@ -4075,8 +4765,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       }
     }
     async function submitResult(options = {}) {
-      if (!lastResult || !markingDoc) {
-        panel.showError("\u8BF7\u5148\u5B8C\u6210\u6279\u6539\u5E76\u8FDB\u5165\u9605\u5377\u9875\u9762");
+      // 两种失败原因分开说：「没进阅卷页」和「还没批改」是两件事。
+      if (!markingDoc) {
+        panel.showError("\u672A\u68C0\u6D4B\u5230\u9605\u5377\u63A7\u4EF6\uFF0C\u8BF7\u5148\u6253\u5F00\u9605\u5377\u9875");
+        return { ok: false, oldIdentity: null };
+      }
+      if (!lastResult) {
+        panel.showError("\u8FD8\u6CA1\u6709\u6279\u6539\u7ED3\u679C\uFF0C\u8BF7\u5148\u70B9\u300C\u5F00\u59CB\u6279\u6539\u300D");
         return { ok: false, oldIdentity: null };
       }
       // 互斥 + 冷却：连点会把同一份卷提交两次，也会让提交回执错位到下一次点击上。
@@ -4088,8 +4783,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       submitting = true;
       try {
         applyScoreEdits();
+        // 提交要等回执、最多几秒，这期间页面可能已经换卷，applyQuestion 会把 lastResult 清空。
+        // 先用局部变量抓住这份结果，后面写历史、回缓存都只认它。
+        const submittedResult = lastResult;
         const inputs = getScoreInputs(markingDoc);
-        const scores = inputs.length > 1 && lastResult.subScores.length === inputs.length ? lastResult.subScores.map((item) => item.score) : [Math.round(lastResult.score * 10) / 10];
+        // 打分框比小题分多时，硬填只会把第一个框写上、后面留空，必须拦住说清楚。
+        if (inputs.length > 1 && submittedResult.subScores.length !== inputs.length) {
+          panel.showError(`小题分未回全（${submittedResult.subScores.length}/${inputs.length}），请先补齐再提交`);
+          return { ok: false, oldIdentity: null };
+        }
+        const scores = inputs.length > 1 ? submittedResult.subScores.map((item) => item.score) : [Math.round(submittedResult.score * 10) / 10];
         const label = scores.length > 1 ? `\u5404\u5C0F\u9898\u5206\u6570 ${scores.join("\u3001")}` : `${scores[0]} \u5206`;
         if (!options.silent && !options.skipConfirm && !window.confirm(`\u786E\u8BA4\u5199\u5165${label}\u5E76\u63D0\u4EA4\uFF1F`)) {
           return { ok: false, oldIdentity: null };
@@ -4114,32 +4817,199 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         // 有接口观察器就以平台回执为准（最多等 2.5 秒）；没有观察器时保持旧行为。
         const observed = hookActive();
         const signal = observed ? await waitCommitSignal(2500) : null;
-        const verdict = judgeSubmit(observed, signal);
+        // 回执丢了不代表没提交：再看一眼卷子有没有真的换，避免误报失败后老师重复提交。
+        const changed = observed && !signal ? await waitPaperChanged(oldIdentity, oldScan, 3e3) : false;
+        const verdict = judgeSubmit(observed, signal, changed);
         if (!verdict.ok) {
           panel.showError(verdict.reason);
           return { ok: false, oldIdentity };
         }
-        const history = loadHistory().map((entry) => entry.id === lastHistoryId ? { ...entry, result: lastResult, submitted: true, submitConfirmed: verdict.confirmed } : entry);
+        // 提交即人工确认：需复核的条目顺手标记已复核，复核队列不会越积越长。
+        const history = loadHistory().map((entry) => {
+          if (entry.id !== lastHistoryId) return entry;
+          const patch = { ...entry, result: submittedResult, submitted: true, submitConfirmed: verdict.confirmed };
+          if (submittedResult?.needsReview && !entry.reviewedAt) {
+            patch.reviewedAt = Date.now();
+            patch.reviewNote = entry.reviewNote || "\u63D0\u4EA4\u65F6\u81EA\u52A8\u6807\u8BB0";
+          }
+          return patch;
+        });
         writeJson(STORAGE_KEYS.history, history);
         historyPanel.refresh(history);
+        // 顺手把「阅卷记录」里的记录 id 解析出来存进历史：下次点定位不用再翻列表。
+        const submittedHistoryId = lastHistoryId;
+        // 题号/试卷 ID 以刚写进历史的那条为准：此刻 currentQuestion 可能已经换成下一份了。
+        const submittedEntry = loadHistory().find((entry) => entry.id === submittedHistoryId);
+        const submittedIdentity = submittedEntry?.question?.identity || null;
+        if (submittedHistoryId) {
+          const fallbackIdentity = submittedIdentity || {
+            scanRecordId: "",
+            topicNumStr: submittedEntry?.question?.topicNumStr || "",
+            userCode: "",
+            markingPaperId: hookCurrentField("markingPaperId") || ""
+          };
+          void resolveMarkedRecordId(markingDoc, fallbackIdentity, submittedResult?.score).then((record) => {
+            if (!record || !record.id) return;
+            const patched = loadHistory().map((entry) => {
+              if (entry.id !== submittedHistoryId) return entry;
+              const identity = entry.question.identity || { scanRecordId: "", topicNumStr: "", userCode: "", markingPaperId: "" };
+              return {
+                ...entry,
+                question: {
+                  ...entry.question,
+                  recordId: record.id,
+                  // 学号是定位的钥匙：观察器漏了首份卷时靠这里补上。
+                  identity: {
+                    ...identity,
+                    userCode: identity.userCode || record.userCode,
+                    markingPaperId: identity.markingPaperId || fallbackIdentity.markingPaperId,
+                    // 身份里的题号统一存接口口径（43,1），DOM 口径留着只用于显示
+                    topicNumStr: identity.topicNumStr || jumpApiTopicNum(fallbackIdentity.topicNumStr)
+                  }
+                }
+              };
+            });
+            writeJson(STORAGE_KEYS.history, patched);
+            historyPanel.refresh(patched);
+          }).catch(() => { /* 解析失败不影响提交结果 */ });
+        }
         // 把人工改过的分数回写缓存：双评换第二个账号时命中缓存拿到的是最终分，而不是模型原始分。
-        if (cache && lastResult.cacheKey) cache.set(lastResult.cacheKey, lastResult);
+        if (cache && submittedResult?.cacheKey) cache.set(submittedResult.cacheKey, submittedResult);
         lastResult = null;
+        // 这份已提交，重批归属到此结束；下一份若来自队列，jumpToHistory 会重新设置。
+        regradeTargetId = "";
         updateProgress();
         panel.setSubtitle(options.silent ? "\u8FDE\u7EED\u6279\u9605\u4E2D" : "\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u4E0B\u4E00\u4EFD");
         if (options.silent) {
           panel.setStage("\u5DF2\u63D0\u4EA4\uFF0C\u7B49\u5F85\u6362\u5377");
         } else {
-          panel.toast(verdict.confirmed ? "\u5DF2\u63D0\u4EA4\uFF08\u5E73\u53F0\u5DF2\u786E\u8BA4\uFF09" : "\u5DF2\u63D0\u4EA4");
+          panel.toast(
+            verdict.confirmed
+              ? "\u5DF2\u63D0\u4EA4\uFF08\u5E73\u53F0\u5DF2\u786E\u8BA4\uFF09"
+              : verdict.inferred
+                ? "\u5DF2\u63D0\u4EA4\uFF08\u672A\u62FF\u5230\u56DE\u6267\uFF0C\u4F46\u9875\u9762\u5DF2\u6362\u5377\uFF09"
+                : "\u5DF2\u63D0\u4EA4"
+          );
           void waitForNextPaper(oldIdentity, oldScan).then((changed) => {
             if (changed) void detect();
             else panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u6362\u5377\uFF0C\u53EF\u7EE7\u7EED\u4EBA\u5DE5\u64CD\u4F5C");
           });
         }
+        // 复核队列模式下，这一份已经提交（需复核的条目会被自动标记已复核），直接推进下一条。
+        if (!options.silent && reviewQueueActive) scheduleReviewAdvance();
         return { ok: true, oldIdentity, oldScan };
       } finally {
         submitting = false;
       }
+    }
+    // 历史记录定位：切题号 → 学号换记录 id → 调页面自己的回评方法 → 重新读题号与满分。
+    async function jumpToHistory(entry, options = {}) {
+      if (autoMode) {
+        panel.toast("\u8FDE\u7EED\u6279\u9605\u4E2D\u4E0D\u80FD\u5B9A\u4F4D\uFF0C\u8BF7\u5148\u505C\u6B62");
+        return;
+      }
+      if (busy || submitting) {
+        panel.toast("\u6B63\u5728\u5904\u7406\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5");
+        return;
+      }
+      const doc = markingDoc || await waitForMarkingDocument(6e3);
+      if (!doc) {
+        panel.showError("\u672A\u68C0\u6D4B\u5230\u9605\u5377\u63A7\u4EF6\uFF0C\u8BF7\u5148\u6253\u5F00\u9605\u5377\u9875");
+        return;
+      }
+      markingDoc = doc;
+      ensureZhixueHook(doc);
+      // 跳转前先记下当前打分框的值，跳完要等它换成目标卷的分数再对账。
+      const scoresBefore = readFilledScores(doc);
+      busy = true;
+      panel.setBusy(true);
+      panel.clearError();
+      panel.setStage("\u5B9A\u4F4D\u5386\u53F2\u8BB0\u5F55");
+      try {
+        const result = await jumpToMarkedRecord(entry, {
+          doc,
+          onPage: (page, total) => panel.setStage("\u5B9A\u4F4D\u5386\u53F2\u8BB0\u5F55", `\u7FFB\u8BB0\u5F55 ${page}/${total} \u9875`)
+        });
+        if (!result.ok) {
+          panel.showError(result.error);
+          // 定位失败就退出队列模式，避免下一次提交被带去别的卷子。
+          reviewQueueActive = false;
+          regradeTargetId = "";
+          return;
+        }
+        // 没换卷时只有「当前学号就是目标学号」才算定位成功：否则队列会把眼前这份卷写到别人的历史记录上。
+        const expectedUser = String(entry?.question?.identity?.userCode || "").trim();
+        const observedUser = String(currentHookIdentity()?.userCode || (answerSnapshot(doc)?.identity || {}).userCode || "").trim();
+        if (!result.changed && (!expectedUser || observedUser !== expectedUser)) {
+          panel.showError("\u56DE\u8BC4\u540E\u6CA1\u770B\u5230\u76EE\u6807\u5377\uFF0C\u5DF2\u505C\u6B62\u5B9A\u4F4D\uFF1B\u8BF7\u4EBA\u5DE5\u786E\u8BA4\u5F53\u524D\u5377\u540E\u91CD\u8BD5");
+          reviewQueueActive = false;
+          regradeTargetId = "";
+          return;
+        }
+        if (!result.changed) panel.toast("\u5DF2\u53D1\u9001\u56DE\u8BC4\uFF0C\u4F46\u6CA1\u770B\u5230\u6362\u5377\uFF0C\u8BF7\u4EBA\u5DE5\u786E\u8BA4");
+        // 定位成功后才进入队列模式：失败时不能让下一次提交被带去别的卷子。
+        if (options.fromQueue) reviewQueueActive = true;
+        // 换卷后旧结果必须作废：面板上留着上一份的分数会诱导提交到这份卷上。
+        lastResult = null;
+        currentQuestion = null;
+        panel.clearResult();
+        if (result.record?.id && entry?.id) {
+          const patched = loadHistory().map((item) => item.id === entry.id
+            ? { ...item, question: { ...item.question, recordId: result.record.id } }
+            : item);
+          writeJson(STORAGE_KEYS.history, patched);
+          historyPanel.refresh(patched);
+        }
+        applyQuestion(readQuestion(doc));
+        // 记录这次批改归属：后面「开始批改」要覆盖这条，而不是再插一条重复历史。
+        regradeTargetId = entry?.id || "";
+        updateProgress();
+        // 平台回填的是「这条记录当时的分数」，和本地历史对不上说明中途有人改过分。
+        // 顺带用它给一句明确的定位反馈：换卷后副标题会被观察器改回「已读取题号」。
+        const filled = await waitScoresSettled(doc, scoresBefore, 1500);
+        const actual = filled.length > 1 ? filled.reduce((sum, value) => sum + value, 0) : filled[0];
+        const expected = Number(entry?.result?.score);
+        const mismatch = Number.isFinite(actual) && Number.isFinite(expected) && Math.abs(actual - expected) > 0.05;
+        panel.toast(
+          mismatch
+            ? `\u8BE5\u5377\u5F53\u524D ${actual} \u5206\uFF0C\u5386\u53F2\u8BB0\u5F55\u662F ${expected} \u5206\uFF0C\u53EF\u80FD\u5DF2\u88AB\u4ED6\u4EBA\u6539\u5206`
+            : `\u5DF2\u5B9A\u4F4D\u5230\u5B66\u53F7 ${result.userCode}${Number.isFinite(actual) ? `\uFF0C\u5F53\u524D ${actual} \u5206` : ""}`
+        );
+        historyPanel.hide();
+        panel.setSubtitle(`\u5DF2\u5B9A\u4F4D\u5230\u5B66\u53F7 ${result.userCode}`);
+        if (reviewQueueActive) {
+          const remain = pendingReviewEntries().length;
+          panel.setSubtitle(`\u590D\u6838\u961F\u5217 \xB7 \u5269\u4F59 ${remain} \u6761`);
+        }
+      } catch (error) {
+        panel.showError(error instanceof Error ? error.message : "\u5B9A\u4F4D\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u5728\u9605\u5377\u8BB0\u5F55\u91CC\u627E\u8FD9\u4E00\u4EFD");
+        reviewQueueActive = false;
+        regradeTargetId = "";
+      } finally {
+        busy = false;
+        panel.setBusy(false);
+      }
+    }
+    // 队列里还剩哪些：需复核 + 未标记已复核 + 能定位。
+    function pendingReviewEntries() {
+      return loadHistory().filter((entry) => entry.result?.needsReview && !entry.reviewedAt && canJumpRecord(entry));
+    }
+    // 提交成功后自动跳下一条，把「复核」做成一路走到底的流程；队列空了就收尾。
+    function scheduleReviewAdvance() {
+      window.setTimeout(() => {
+        void advanceReviewQueue();
+      }, 900);
+    }
+    async function advanceReviewQueue() {
+      if (!reviewQueueActive || autoMode) return;
+      const pending = pendingReviewEntries();
+      if (pending.length === 0) {
+        reviewQueueActive = false;
+        panel.toast("\u590D\u6838\u961F\u5217\u5DF2\u5B8C\u6210");
+        panel.setSubtitle("\u590D\u6838\u961F\u5217\u5DF2\u5B8C\u6210");
+        return;
+      }
+      await jumpToHistory(pending[0], { fromQueue: true });
     }
     async function toggleContinuous() {
       if (autoMode) {
@@ -4202,33 +5072,99 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       updateProgress();
       watchDocument(doc);
     }
+    // 判「还是同一份卷」：题号 + 作答图（去签名）+ 接口身份三者都对得上才算没换。
+    // 刚换卷时观察器比 DOM 慢，scanRecordId 可能一边为空——这时不能据此判换卷，
+    // 否则老师刚批完就被清空结果，点提交只会得到「请先完成批改」。
+    function samePaper(a, b) {
+      if (!a || !b) return false;
+      // 题号口径会从 DOM 的 43(1) 变成接口的 43,1，归一后再比，别把同一道题判成换卷。
+      const topicOf = (value) => (typeof rubricTopicKey === "function" ? rubricTopicKey(value) : String(value || ""));
+      if (topicOf(a.questionId) !== topicOf(b.questionId)) return false;
+      if ((a.images || []).length !== (b.images || []).length) return false;
+      if (a.scanRecordId && b.scanRecordId && a.scanRecordId !== b.scanRecordId) return false;
+      const key = (url) => resourceKey(url) || url;
+      const left = (a.images || []).map(key).sort().join("|");
+      const right = (b.images || []).map(key).sort().join("|");
+      return left === right;
+    }
     function applyQuestion(question) {
       if (!question) return;
-      if (currentQuestion?.questionId === question.questionId
-        && currentQuestion.scanRecordId === question.scanRecordId
-        && currentQuestion.images.length === question.images.length) return;
+      if (samePaper(currentQuestion, question)) return;
+      // 自然换卷后不再属于刚才定位的历史条目，重批目标随之失效。
+      regradeTargetId = "";
+      const previousSlot = rubricSlotKey(currentQuestion);
       currentQuestion = question;
       lastResult = null;
       panel.setQuestion(question);
       panel.setSubtitle(`\u5DF2\u8BFB\u53D6\u9898\u53F7 ${question.questionId}`);
       panel.clearError();
+      syncRubricForQuestion(previousSlot, question);
+    }
+    // 切题时把上一题的标准存回它的槽位，再载入新题号已存的那份。
+    // 新题号没存过就清空答案/标准（上一题已自动保存）：拿错答案键批改比多填一次危险得多。
+    function syncRubricForQuestion(previousSlot, question) {
+      const nextSlot = rubricSlotKey(question);
+      const switched = Boolean(previousSlot) && previousSlot !== nextSlot;
+      const saved = switched ? putRubricPreset(previousSlot, config.context) : false;
+      if (!nextSlot) return;
+      const preset = getRubricPreset(nextSlot);
+      if (preset && rubricHasContent(preset)) {
+        if (sameRubricContext(config.context, preset)) return;
+        config = { ...config, context: rubricContextFields(preset) };
+        saveConfig(config);
+        panel.toast(`\u5DF2\u8F7D\u5165\u9898\u53F7 ${rubricSlotLabel(question)} \u7684\u8BC4\u5206\u6807\u51C6`);
+        return;
+      }
+      if (!switched || !saved || !rubricHasContent(config.context)) return;
+      config = { ...config, context: { ...config.context, question: "", answer: "", rubric: "", maxScore: 0 } };
+      saveConfig(config);
+      panel.toast(`\u9898\u53F7 ${rubricSlotLabel(question)} \u8FD8\u6CA1\u5B58\u8FC7\u6807\u51C6\uFF0C\u4E0A\u4E00\u9898\u7684\u5DF2\u81EA\u52A8\u4FDD\u5B58`);
     }
     // 进度条：页面文本「初评已阅量/任务量」优先，接口计数兜底。
     function updateProgress() {
       const progress = readProgress(markingDoc);
       panel.setProgress(progress ? `\u5DF2\u6279 ${progress.marked} / \u4EFB\u52A1 ${progress.todo}` : "");
     }
+    // 只盯题号/作答图/进度这几个容器：监听整个 body 会让「阅卷记录」这种大列表
+    // 每敲一个字、每翻一页都触发一次全量快照。节点被路由整段替换时靠 2 秒复检重新挂。
     function watchDocument(doc) {
       observer?.disconnect();
+      window.clearTimeout(observerTimer);
+      window.clearInterval(watchTimer);
       if (!doc.body) return;
-      observer = new MutationObserver(() => {
+      const refresh = () => {
+        applyQuestion(readQuestion(doc));
+        updateProgress();
+      };
+      const schedule = () => {
         window.clearTimeout(observerTimer);
-        observerTimer = window.setTimeout(() => {
-          applyQuestion(readQuestion(doc));
-          updateProgress();
-        }, 600);
-      });
-      observer.observe(doc.body, { childList: true, subtree: true, characterData: true });
+        observerTimer = window.setTimeout(refresh, 600);
+      };
+      const targets = () => Array.from(doc.querySelectorAll("#topicImgContent, #currentTopicIndex, #containter_topicTxt, .progress"));
+      const quickKey = () => {
+        const first = doc.querySelector('div[name="topicImg"] img');
+        return `${doc.querySelector(SELECTORS.topicIndex)?.textContent?.trim() || ""}|${(first?.currentSrc || first?.src || "").slice(-80)}`;
+      };
+      let bound = [];
+      let lastKey = quickKey();
+      const bind = () => {
+        const list = targets();
+        const alive = list.length > 0 && list.every((node) => node.isConnected);
+        if (alive && bound.length === list.length && bound.every((node, index) => node === list[index])) return;
+        observer?.disconnect();
+        bound = list.length > 0 ? list : [doc.body];
+        observer = new MutationObserver(schedule);
+        for (const node of bound) observer.observe(node, { childList: true, subtree: true, characterData: true });
+      };
+      bind();
+      // 兜底：接口和 DOM 事件都没反应时，题号或首图变了也补一次刷新。
+      watchTimer = window.setInterval(() => {
+        bind();
+        const key = quickKey();
+        if (key === lastKey) return;
+        lastKey = key;
+        schedule();
+      }, 2000);
     }
     GM_registerMenuCommand("\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u6253\u5F00\u9762\u677F", () => panel.show());
     GM_registerMenuCommand("\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u8FDE\u7EED\u6279\u9605", () => {

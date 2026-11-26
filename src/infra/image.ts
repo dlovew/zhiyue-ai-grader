@@ -97,21 +97,16 @@
     const image = await loadImage(dataUrl);
     const sourceWidth = image.naturalWidth || image.width;
     const sourceHeight = image.naturalHeight || image.height;
-    const work = document.createElement("canvas");
-    work.width = sourceWidth;
-    work.height = sourceHeight;
-    const workCtx = work.getContext("2d", { willReadFrequently: true });
-    if (!workCtx) throw new Error("\u65E0\u6CD5\u521B\u5EFA\u753B\u5E03\u4E0A\u4E0B\u6587");
-    workCtx.drawImage(image, 0, 0);
-    const ratio = blankRatio(workCtx, sourceWidth, sourceHeight);
     // 只做等比缩小，绝不放大：放大不会带来新信息，只会被服务商的短边归一化规则再插值一次。
     const scale = Math.min(1, config.maxEdge / Math.max(sourceWidth, sourceHeight));
     const output = document.createElement("canvas");
     output.width = Math.max(1, Math.round(sourceWidth * scale));
     output.height = Math.max(1, Math.round(sourceHeight * scale));
-    const outputCtx = output.getContext("2d");
+    const outputCtx = output.getContext("2d", { willReadFrequently: true });
     if (!outputCtx) throw new Error("\u65E0\u6CD5\u521B\u5EFA\u753B\u5E03\u4E0A\u4E0B\u6587");
-    outputCtx.drawImage(work, 0, 0, output.width, output.height);
+    outputCtx.drawImage(image, 0, 0, output.width, output.height);
+    // 空白率在缩放后的画布上采样：整幅扫描图直接 getImageData 一次就是几十 MB，且结果没有区别。
+    const ratio = blankRatio(outputCtx, output.width, output.height);
     const encoded = output.toDataURL("image/jpeg", Math.min(1, Math.max(0.5, config.quality)));
     return {
       dataUrl: encoded,

@@ -169,9 +169,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 [data-model-options] { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 [data-model-options] select { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid var(--zygr-line); border-radius: 8px; background: #fff; color: var(--zygr-text); font-size: 13px; }
 .zygr-list { display: grid; gap: 8px; }
-.zygr-item { border: 1px solid var(--zygr-line); border-radius: 12px; padding: 10px 12px; background: rgba(255,255,255,.7); cursor: pointer; transition: .18s; }
+.zygr-item { display: flex; align-items: center; gap: 8px; border: 1px solid var(--zygr-line); border-radius: 12px; padding: 10px 12px; background: rgba(255,255,255,.7); cursor: pointer; transition: .18s; }
 .zygr-item:hover { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(15,23,42,.08); }
 .zygr-item.zygr-selected { border-color: var(--zygr-primary); box-shadow: 0 0 0 2px var(--zygr-glow); }
+.zygr-item-main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zygr-jump { flex: none; border: 1px solid var(--zygr-line); border-radius: 8px; padding: 3px 9px; background: #fff; color: var(--zygr-primary); font-size: 11px; line-height: 1.4; cursor: pointer; }
+.zygr-jump:hover { border-color: var(--zygr-primary); background: var(--zygr-glow); }
 .zygr-detail { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.7; color: var(--zygr-muted); }
 .zygr-empty { text-align: center; color: var(--zygr-muted); padding: 24px; }
 .zygr-history-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 12px; align-items: start; }

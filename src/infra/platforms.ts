@@ -1,4 +1,5 @@
   // src/infra/platforms.ts
+  // 历史遗留：自定义预设的 UI 已下线，这个键只留给「清空数据」擦除老版本残留。
   var PRESET_STORAGE_KEY = "zygr.presets.v1";
   var PLATFORM_KEYS_KEY = "zygr.platform.keys.v1";
   var PLATFORM_MODELS_KEY = "zygr.platform.models.v1";
@@ -205,66 +206,12 @@
     return result;
   }
 
-  function loadCustomPresets() {
-    const raw = readJson(PRESET_STORAGE_KEY, []);
-    if (!Array.isArray(raw)) return [];
-    return raw.filter((item) => isRecord(item) && typeof item.id === "string" && item.id.trim()).map((item) => ({
-      id: item.id,
-      label: String(item.label || item.id),
-      endpoint: String(item.endpoint || ""),
-      models: Array.isArray(item.models) ? item.models.filter((m) => typeof m === "string" && m.trim()) : [],
-      authHeader: ["bearer", "api-key", "none"].includes(item.authHeader) ? item.authHeader : "bearer",
-      disableThinkingKey: typeof item.disableThinkingKey === "string" && item.disableThinkingKey ? item.disableThinkingKey : null,
-      thinkingValues: normalizeThinkingValues(item.thinkingValues),
-      thinkingFields: normalizeThinkingValues(item.thinkingFields),
-      jsonModeKey: item.jsonModeKey === null ? null : "response_format",
-      stream: Boolean(item.stream)
-    }));
-  }
-
-  function saveCustomPresets(list) {
-    return writeJson(PRESET_STORAGE_KEY, Array.isArray(list) ? list : []);
-  }
-
   function listPlatformPresets() {
     return BUILTIN_PLATFORM_PRESETS.slice();
   }
 
   function getPlatformPreset(id) {
     return listPlatformPresets().find((preset) => preset.id === id) || null;
-  }
-
-  function isBuiltinPreset(id) {
-    return BUILTIN_PLATFORM_PRESETS.some((preset) => preset.id === id);
-  }
-
-  function upsertPlatformPreset(preset) {
-    if (!isRecord(preset) || typeof preset.id !== "string" || !preset.id.trim() || isBuiltinPreset(preset.id)) return false;
-    const list = loadCustomPresets();
-    const normalized = {
-      id: preset.id.trim(),
-      label: String(preset.label || preset.id).trim(),
-      endpoint: String(preset.endpoint || "").trim(),
-      models: Array.isArray(preset.models) ? preset.models.filter((m) => String(m).trim()) : [],
-      authHeader: ["bearer", "api-key", "none"].includes(preset.authHeader) ? preset.authHeader : "bearer",
-      disableThinkingKey: typeof preset.disableThinkingKey === "string" && preset.disableThinkingKey.trim() ? preset.disableThinkingKey.trim() : null,
-      thinkingValues: normalizeThinkingValues(preset.thinkingValues),
-      thinkingFields: normalizeThinkingValues(preset.thinkingFields),
-      jsonModeKey: preset.jsonModeKey === null ? null : "response_format",
-      stream: Boolean(preset.stream)
-    };
-    const index = list.findIndex((item) => item.id === normalized.id);
-    if (index >= 0) list[index] = normalized;
-    else list.push(normalized);
-    return saveCustomPresets(list);
-  }
-
-  function deletePlatformPreset(id) {
-    if (isBuiltinPreset(id)) return false;
-    const list = loadCustomPresets();
-    const next = list.filter((item) => item.id !== id);
-    if (next.length === list.length) return false;
-    return saveCustomPresets(next);
   }
 
   function loadPlatformKeys() {
@@ -377,22 +324,6 @@
     const mode = String(pipeline.thinkingMode || "off");
     if (getPlatformThinkingMode(service.platform) === mode) return true;
     return setPlatformThinkingMode(service.platform, mode);
-  }
-
-  // 从某个服务的当前配置生成一个可复用预设（用于"存为预设"）。
-  function presetFromService(service, id, label) {
-    return {
-      id: String(id || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-"),
-      label: String(label || id || "自定义预设").trim(),
-      endpoint: String(service?.endpoint || "").trim(),
-      models: String(service?.model || "").trim() ? [String(service.model).trim()] : [],
-      authHeader: "bearer",
-      disableThinkingKey: null,
-      thinkingValues: {},
-      thinkingFields: {},
-      jsonModeKey: "response_format",
-      stream: false
-    };
   }
 
   // 已下线的内置平台：预设条目已删除，这里只保留鉴权方式，避免历史配置静默退回 bearer 而失效。

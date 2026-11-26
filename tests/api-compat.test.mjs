@@ -4,8 +4,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import vm from 'node:vm';
+import { MODULES, VERSION } from '../build.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+// 断言打在源文件上：改一个模块不该牵连一堆「打包产物里有没有这句话」的脆弱用例。
+function readSource(rel) {
+  return readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n');
+}
 
 function loadModules(queue = []) {
   const store = new Map();
@@ -30,7 +35,7 @@ function loadModules(queue = []) {
   const files = ['src/infra/storage.ts', 'src/config.ts', 'src/infra/platforms.ts', 'src/infra/api.ts', 'src/infra/rate-limit.ts', 'src/core/prompt.ts', 'src/core/parse.ts', 'src/core/pipeline.ts'];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, upsertPlatformPreset, deletePlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG, getPlatformThinkingLevels, thinkingLevelLabel, clampThinkingLevel, THINKING_LEVEL_LABELS, isForcedThinkingModel, markForcedThinking, loadForcedThinking, runGrade, RateLimiter };`, context);
+  vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG, getPlatformThinkingLevels, thinkingLevelLabel, clampThinkingLevel, THINKING_LEVEL_LABELS, isForcedThinkingModel, markForcedThinking, loadForcedThinking, runGrade, RateLimiter };`, context);
   return { api: context.__exposed, calls, store };
 }
 
@@ -128,7 +133,9 @@ test('批改结果分数可编辑且提交前应用手动改分', () => {
   assert.match(built, /zygr-score-input/);
   assert.match(built, /getScoreEdits\(\)/);
   assert.match(built, /applyScoreEdits\(\)/);
-  assert.match(built, /result: lastResult, submitted: true/);
+  // 提交等待回执期间页面可能换卷、lastResult 会被清空，写历史必须用先抓下来的局部快照
+  assert.match(built, /const submittedResult = lastResult;/);
+  assert.match(built, /result: submittedResult, submitted: true/);
 });
 
 test('双评第二遍先查缓存再取图，命中后不再下载图片', () => {
@@ -144,7 +151,7 @@ test('双评第二遍先查缓存再取图，命中后不再下载图片', () =>
 
 test('提交后把人工改过的分数回写缓存，供双评第二账号命中', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
-  assert.match(built, /if \(cache && lastResult\.cacheKey\) cache\.set\(lastResult\.cacheKey, lastResult\)/);
+  assert.match(built, /if \(cache && submittedResult\?\.cacheKey\) cache\.set\(submittedResult\.cacheKey, submittedResult\)/);
 });
 
 test('面板按钮为紧凑自适应布局', () => {
@@ -202,14 +209,19 @@ test('地理综合题按点给分，提示词禁止倒扣并纳入满分', () =>
 test('构建产物包含全部模块边界且顺序正确', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
   const markers = [...built.matchAll(/^\s*\/\/ (src\/[^\r\n]+\.ts)$/gm)].map((m) => m[1]);
-  assert.equal(markers.length, 20);
+  // 期望值直接取构建清单：新增模块只需要改 build.mjs 一处，不会再因为「20 变 21」而挂。
+  assert.deepEqual(markers, MODULES);
   assert.equal(markers[0], 'src/adapters/zhixue.ts');
-  assert.equal(markers[1], 'src/adapters/zhixue-hook.ts');
-  assert.equal(markers[5], 'src/core/submit.ts');
-  assert.equal(markers[7], 'src/infra/platforms.ts');
-  assert.equal(markers[8], 'src/infra/api.ts');
-  assert.ok(markers.includes('src/core/rubric-generator.ts'));
   assert.equal(markers[markers.length - 1], 'src/main.ts');
+});
+
+test('版本号只有 version.json 一个来源', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  const banner = built.match(/\/\/ @version\s+(\S+)/);
+  assert.ok(banner, 'banner 里必须有 @version');
+  assert.equal(banner[1], VERSION);
+  const readme = readSource('README.md');
+  assert.match(readme, new RegExp(`- 版本：\`${VERSION.replace(/\./g, '\\.')}\``));
 });
 
 function loadZhixue({ visibility = 'visible', imageSrc = 'https://img.example/a.png', imageReady = true } = {}) {
@@ -257,7 +269,7 @@ function loadHook() {
     .map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n'))
     .join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__hook = { handleHookResponse, hookField, hookIdentity, hookUrlsFrom, hookIdentityKey, freshAnswerImages, currentHookIdentity, nextHookIdentity, hookState, hookActive, commitFeed, pushCommitSignal, resetCommitSignal, waitCommitSignal, resolveMaxScore, checkMaxScore, currentScanRecordId, hookProgress, readProgress };`, context);
+  vm.runInContext(`${code}\n;globalThis.__hook = { handleHookResponse, hookField, hookIdentity, hookUrlsFrom, freshAnswerImages, currentHookIdentity, nextHookIdentity, hookState, hookActive, commitFeed, pushCommitSignal, resetCommitSignal, waitCommitSignal, resolveMaxScore, checkMaxScore, currentScanRecordId, hookProgress, readProgress };`, context);
   return context.__hook;
 }
 
@@ -680,7 +692,9 @@ test('回评接口与钩子回调已接线，题号靠 scanRecordId 判重', () 
   assert.match(built, /function onHookUpdate/);
   assert.match(built, /onHookUpdate\(\(\) => \{/);
   assert.match(built, /scanRecordId: String\(hookCurrentField\("scanRecordId"\)/);
-  assert.match(built, /currentQuestion\.scanRecordId === question\.scanRecordId/);
+  // 判重从「三个字段必须相等」改成 samePaper：scanRecordId 一边为空（观察器还没跟上）时不算换卷
+  assert.match(built, /function samePaper\(a, b\)/);
+  assert.match(built, /a\.scanRecordId !== b\.scanRecordId/);
 });
 
 test('进度显示与复核留痕已接线', () => {
@@ -1001,6 +1015,14 @@ test('提交结果判定：有回执看回执，没观察器退回旧行为', ()
   const rejected = core.judgeSubmit(true, { ok: false, result: 'topicLocked' });
   assert.equal(rejected.ok, false);
   assert.match(rejected.reason, /topicLocked/);
+  // 回执丢了但卷子确实换了：按「已提交、未确认」记，避免老师重复提交
+  const inferred = core.judgeSubmit(true, null, true);
+  assert.equal(inferred.ok, true);
+  assert.equal(inferred.confirmed, false);
+  assert.equal(inferred.inferred, true);
+  // 平台明确拒绝时不能被换卷掩盖（换卷可能是老师自己点的回评）
+  const rejectedWithChange = core.judgeSubmit(true, { ok: false, result: 'topicLocked' }, true);
+  assert.equal(rejectedWithChange.ok, false);
 });
 
 test('提交链路有互斥、冷却与填分回读', () => {
@@ -1013,12 +1035,88 @@ test('提交链路有互斥、冷却与填分回读', () => {
   // 回读不一致时带出输入框序号与期望值（dist 里是 \uXXXX 转义原文）
   assert.match(built, /\\u56DE\\u8BFB\\u4E0D\\u4E00\\u81F4/);
   assert.match(built, /\$\{filled\.error\}/);
-  // 提交回执：重置 → 等待 → 判定
+  // 提交回执：重置 → 等待 → 没回执再看换卷 → 判定
   assert.match(built, /resetCommitSignal\(\)/);
   assert.match(built, /await waitCommitSignal\(2500\)/);
-  assert.match(built, /judgeSubmit\(observed, signal\)/);
+  assert.match(built, /await waitPaperChanged\(oldIdentity, oldScan, 3e3\)/);
+  assert.match(built, /judgeSubmit\(observed, signal, changed\)/);
   // 永不点击判满分/零分/问题卷/休卷
   assert.match(built, /FORBIDDEN_BUTTON/);
+});
+
+test('阅卷控件按打分框+提交按钮选帧，不认第一个 iframe', () => {
+  const source = readSource('src/adapters/zhixue.ts');
+  assert.doesNotMatch(source, /const iframe = mainDoc\(\)\.querySelector\("iframe"\)/);
+  assert.match(source, /mainDoc\(\)\.querySelectorAll\("iframe"\)/);
+  assert.match(source, /if \(hasScoreInput\(doc\) && hasSubmitButton\(doc\)\)/);
+  assert.match(source, /frameAlive\(lastMarkingDoc\)/);
+  // 没有指定文档时优先用阅卷控件快照，避免拿到别的 frame 里的旧卷
+  assert.match(source, /const primary = getIframeDoc\(\);/);
+});
+
+test('空白率在缩放后的画布上采样，不整幅读像素', () => {
+  const source = readSource('src/infra/image.ts');
+  assert.match(source, /blankRatio\(outputCtx, output\.width, output\.height\)/);
+  assert.doesNotMatch(source, /blankRatio\(workCtx/);
+});
+
+test('DOM 监听收窄到题号/作答图/进度容器', () => {
+  const source = readSource('src/main.ts');
+  assert.doesNotMatch(source, /observer\.observe\(doc\.body, \{/);
+  assert.match(source, /#topicImgContent, #currentTopicIndex, #containter_topicTxt, \.progress/);
+  // 路由整段替换后要能重新挂上
+  assert.match(source, /watchTimer = window\.setInterval\(/);
+});
+
+test('换卷判定容忍 scanRecordId 晚到', () => {
+  const main = readSource('src/main.ts');
+  // 一边为空时不能判换卷，否则批改结果会被后补的接口身份清掉
+  assert.match(main, /if \(a\.scanRecordId && b\.scanRecordId && a\.scanRecordId !== b\.scanRecordId\) return false;/);
+  // 作答图按去签名后的 key 比对，不靠张数
+  assert.match(main, /const key = \(url\) => resourceKey\(url\) \|\| url;/);
+  assert.match(main, /if \(samePaper\(currentQuestion, question\)\) return;/);
+  // 提交失败原因分开说
+  assert.match(main, /\\u8FD8\\u6CA1\\u6709\\u6279\\u6539\\u7ED3\\u679C/);
+  // 观察器晚到时要回填身份，否则首份卷的历史永远定位不了
+  assert.match(main, /void backfillIdentity\(lastHistoryId, gradedKeys\)/);
+  assert.match(main, /if \(nowKeys !== imageKeys\) return;/);
+});
+
+test('不存在 currentHookField 这种手误引用', () => {
+  // 这个手误只会被 catch 吞掉，真机上表现为「提交后没有提示、定位不可用」，很难查
+  for (const rel of ['src/main.ts', 'src/adapters/zhixue-jump.ts', 'src/adapters/zhixue.ts']) {
+    assert.doesNotMatch(readSource(rel), /[^\w.]currentHookField\(/, rel);
+  }
+});
+
+test('题号口径双向可转：DOM 的 43(1) 与接口的 43,1', () => {
+  const source = readSource('src/adapters/zhixue-jump.ts');
+  assert.match(source, /function jumpApiTopicNum\(value\)/);
+  assert.match(source, /const match = text\.match\(\/\^\(\\d\+\)\\s\*\[（\(\]\\s\*\(\\d\+\)\\s\*\[\)）\]\$\//);
+  // 检索接口与记录 id 解析都必须用接口口径
+  assert.match(source, /const topicNumStr = jumpApiTopicNum\(identity\.topicNumStr \|\| question\.topicNumStr \|\| ""\)/);
+  assert.match(source, /const topicNumStr = jumpApiTopicNum\(identity\?\.topicNumStr \|\| ""\)/);
+  // 观察器没抓到 origin 时问平台路由，别逼用户刷新页面
+  assert.match(source, /async function jumpResolveOrigin\(win, markingPaperId\)/);
+  assert.match(source, /getHostByBusinessId\?businessType=markingPaper/);
+  assert.match(source, /const origin = await jumpResolveOrigin\(win, markingPaperId\)/);
+  // 别把 hookCurrentField 写成 currentHookField：这个手误会被 catch 吞掉，真机上表现为「定位没反应」
+  assert.match(source, /hookCurrentField\("markingPaperId"\)/);
+  assert.doesNotMatch(source, /[^\w.]currentHookField\(/);
+});
+
+test('复核闭环：提交即标记已复核 + 定位后对账分数', () => {
+  const main = readSource('src/main.ts');
+  assert.match(main, /patch\.reviewedAt = Date\.now\(\);/);
+  assert.match(main, /readFilledScores\(doc\)/);
+  // 源文件里中文是 \uXXXX 转义，按转义形式断言
+  assert.match(main, /\\u53EF\\u80FD\\u5DF2\\u88AB\\u4ED6\\u4EBA\\u6539\\u5206/);
+  const history = readSource('src/ui/history.ts');
+  assert.match(history, /data-act="next-review"/);
+  assert.match(history, /nextReviewEntry\(\)/);
+  // 填分数量对不上时给人话，而不是「第 N 个分数不是有效数字」
+  const adapter = readSource('src/adapters/zhixue.ts');
+  assert.match(adapter, /\\u8BF7\\u5148\\u8865\\u9F50\\u5C0F\\u9898\\u5206/);
 });
 
 test('面板输入框统一拦截 Enter，且填分不用键盘事件', () => {
@@ -1050,7 +1148,6 @@ test('接口观察器按真机结构解析 scanrecorddetail / preLoad / commitTo
   // 满分取 cutBlock.subTopicScore（当前小题），不是大题 standardScore
   assert.equal(current.subTopicScore, 2);
   assert.equal(hook.resolveMaxScore(null), 2);
-  assert.equal(hook.hookIdentityKey(), '91118d7a-ef5d-4d15-9a1e-e03cd5df23f7|43,1');
   assert.equal(hook.freshAnswerImages().length, 1);
   assert.match(hook.freshAnswerImages()[0], /zhixue-sc\.oss/);
   // 进度来自 teacherMarked / teacherTodo
@@ -1418,4 +1515,162 @@ test('响应里的 usage 会被回传，且不产生额外请求', async () => {
   assert.equal(usage.prompt, 1200);
   assert.equal(usage.completion, 180);
   assert.equal(usage.cached, 900);
+});
+
+test('历史记录定位复用平台阅卷记录链路', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  // 观察器必须把「阅卷记录里跳卷」也算当前卷，否则跳转后 scanRecordId 不刷新，缓存与换卷判定全部错位
+  assert.match(built, /var HOOK_LOAD = \/loadMarked\/i;/);
+  assert.match(built, /HOOK_CURRENT\.test\(url\) \|\| HOOK_NAV\.test\(url\) \|\| HOOK_LOAD\.test\(url\)/);
+  // 历史面板把「定位」接到主流程
+  assert.match(built, /onJump: \(entry, fromQueue\) => \{/);
+  assert.match(built, /jumpToMarkedRecord\(entry, \{/);
+  // 回评走页面自己的组件方法，不自己拼接口
+  assert.match(built, /returnMarkingPushToCherkItem\(record\.id, void 0, item\)/);
+  // 学号是定位的钥匙，必须写进历史身份
+  assert.match(built, /userCode: observedIdentity\.userCode \|\| ""/);
+  assert.match(built, /markingPaperId: observedIdentity\.markingPaperId \|\| ""/);
+});
+
+test('历史里的坏记录不会让面板打不开', () => {
+  const code = readSource('src/ui/history.ts');
+  const context = { console: { log() {}, warn() {}, error() {} } };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(`${code}\n;globalThis.__normalize = normalizeHistoryEntries;`, context);
+  const normalize = context.__normalize;
+  const entries = [
+    null,
+    { id: 'a', question: { maxScore: 5 } },
+    { id: 'b', question: { maxScore: 2 }, result: null },
+    { id: 'c', question: { maxScore: 3 }, result: { score: 1, needsReview: false } }
+  ];
+  const fixed = normalize(entries);
+  assert.equal(fixed.length, 3);
+  assert.equal(fixed[0].id, 'a');
+  assert.equal(fixed[0].result.needsReview, true);
+  assert.equal(fixed[0].result.maxScore, 5);
+  assert.equal(fixed[1].result.reviewReasons[0], '\u5206\u6570\u4E22\u5931');
+  assert.equal(fixed[2].result.score, 1);
+  assert.equal(fixed[2].result.needsReview, false);
+  assert.equal(normalize(null).length, 0);
+});
+
+test('学科题型矩阵：每个题型都有专门口径，地理补上填空题', () => {
+  const code = readFileSync(join(root, 'src/core/rubric-generator.ts'), 'utf8');
+  const context = { console: { log() {}, warn() {}, error() {} } };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(`${code}\n;globalThis.__g = { RUBRIC_SUBJECTS, RUBRIC_TYPE_HINTS, rubricTypeHint, rubricRuleSummary };`, context);
+  const gen = context.__g;
+  const genericPrefix = '按点给分：逐条列出可判定的得分点';
+  // 每个学科 × 题型都必须命中专门提示，不能悄悄退回通用那句（否则切换题型等于没切）
+  for (const [subject, types] of Object.entries(gen.RUBRIC_SUBJECTS)) {
+    for (const type of types) {
+      assert.ok(gen.RUBRIC_TYPE_HINTS[type], `${subject}/${type} 缺少专门判分口径`);
+      assert.ok(!gen.rubricTypeHint(subject, type).startsWith(genericPrefix), `${subject}/${type} 退回了通用提示`);
+    }
+  }
+  assert.ok(gen.RUBRIC_SUBJECTS['地理'].includes('填空题'));
+  assert.ok(gen.RUBRIC_SUBJECTS['数学'].includes('填空题'));
+  // 同学科不同题型要写出不同口径，同题型跨学科也要有差异
+  assert.match(gen.rubricTypeHint('地理', '读图题'), /图例/);
+  assert.notEqual(gen.rubricTypeHint('地理', '读图题'), gen.rubricTypeHint('地理', '综合题'));
+  assert.match(gen.rubricTypeHint('化学', '填空题'), /化学式/);
+  assert.notEqual(gen.rubricTypeHint('化学', '填空题'), gen.rubricTypeHint('地理', '填空题'));
+  assert.match(gen.rubricRuleSummary('地理', '填空题'), /^按点给分/);
+  assert.match(gen.rubricRuleSummary('语文', '作文'), /^档次给分/);
+});
+
+test('评分标准库按「试卷 + 题号」存取，空内容不入库', () => {
+  const files = ['src/infra/storage.ts', 'src/config.ts', 'src/core/rubric-library.ts'];
+  const saved = new Map();
+  let hookPaperId = '';
+  const context = {
+    console: { log() {}, warn() {}, error() {} },
+    hookCurrentField: (key) => (key === 'markingPaperId' ? hookPaperId : ''),
+    // 真实产物里这个函数在 zhixue-jump.ts，测试单独装载库模块时补一个同口径的桩。
+    jumpApiTopicNum: (value) => {
+      const text = String(value || '').trim();
+      const match = text.match(/^(\d+)\s*[（(]\s*(\d+)\s*[)）]$/);
+      return match ? `${match[1]},${match[2]}` : text;
+    },
+    GM_getValue: (key) => (saved.has(key) ? saved.get(key) : ''),
+    GM_setValue: (key, value) => { saved.set(key, value); }
+  };
+  context.globalThis = context;
+  vm.createContext(context);
+  const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
+  vm.runInContext(`${code}\n;globalThis.__lib = { rubricSlotKey, putRubricPreset, getRubricPreset, removeRubricPreset, countRubricPresets, rubricHasContent, sameRubricContext, rubricContextFields, loadRubricLibrary, normalizeRubricSlot };`, context);
+  const lib = context.__lib;
+
+  const question = { topicNumStr: '43,1', identity: { markingPaperId: 'paper-1' } };
+  assert.equal(lib.rubricSlotKey(question), 'paper-1|43,1');
+  // 没有试卷 ID 时退回纯题号，旧记录也能用
+  assert.equal(lib.rubricSlotKey({ topicNumStr: '44', identity: {} }), 'paper|44');
+  assert.equal(lib.rubricSlotKey(null), '');
+  assert.equal(lib.normalizeRubricSlot('paper-1|43(1)'), 'paper-1|43,1');
+  // 接口身份到位后，通用槽与真实试卷槽必须归一到同一个键。
+  hookPaperId = 'paper-live';
+  assert.equal(lib.rubricSlotKey({ topicNumStr: '43(1)', identity: {} }), 'paper-live|43,1');
+  assert.equal(lib.normalizeRubricSlot('paper|43(1)'), 'paper-live|43,1');
+  hookPaperId = '';
+
+  // 老版本存过 DOM 口径：读取时合并到接口口径，重复槽取更新的那份。
+  saved.set('zygr.rubrics.v1', JSON.stringify({
+    'paper-1|43(1)': { answer: 'OLD', updatedAt: 10 },
+    'paper-1|43,1': { answer: 'NEW', updatedAt: 20 }
+  }));
+  assert.equal(lib.getRubricPreset('paper-1|43(1)').answer, 'NEW');
+  assert.equal(lib.countRubricPresets(), 1);
+  assert.deepEqual(Object.keys(JSON.parse(saved.get('zygr.rubrics.v1'))), ['paper-1|43,1']);
+
+  assert.equal(lib.putRubricPreset('paper-1|43,1', { answer: 'A', rubric: 'B', maxScore: 2, subject: '地理' }), true);
+  const preset = lib.getRubricPreset('paper-1|43,1');
+  assert.equal(preset.answer, 'A');
+  assert.equal(preset.maxScore, 2);
+  assert.equal(lib.countRubricPresets(), 1);
+
+  // 全空的上下文不占位
+  assert.equal(lib.putRubricPreset('paper-1|43,2', { answer: '  ', rubric: '', question: '' }), false);
+  assert.equal(lib.getRubricPreset('paper-1|43,2'), null);
+
+  assert.equal(lib.rubricHasContent({ answer: 'x' }), true);
+  assert.equal(lib.rubricHasContent({ maxScore: 5 }), false);
+  assert.equal(lib.sameRubricContext({ answer: 'A', rubric: 'B', maxScore: 2 }, { answer: 'A', rubric: 'B', maxScore: 2 }), true);
+  assert.equal(lib.sameRubricContext({ answer: 'A' }, { answer: 'C' }), false);
+  // 书签字段不能混进配置
+  assert.deepEqual(Object.keys(lib.rubricContextFields({ answer: 'A', updatedAt: 1 })), ['question', 'answer', 'rubric', 'maxScore', 'subject']);
+
+  assert.equal(lib.removeRubricPreset('paper-1|43,1'), true);
+  assert.equal(lib.getRubricPreset('paper-1|43,1'), null);
+  assert.equal(lib.removeRubricPreset('paper-1|43,1'), false);
+});
+
+test('复核队列：提交后自动推进下一条待复核', () => {
+  const main = readSource('src/main.ts');
+  assert.match(main, /let reviewQueueActive = false;/);
+  assert.match(main, /function pendingReviewEntries\(\)/);
+  assert.match(main, /entry\.result\?\.needsReview && !entry\.reviewedAt && canJumpRecord\(entry\)/);
+  assert.match(main, /if \(!options\.silent && reviewQueueActive\) scheduleReviewAdvance\(\);/);
+  assert.match(main, /await jumpToHistory\(pending\[0\], \{ fromQueue: true \}\)/);
+  assert.match(main, /if \(options\.fromQueue\) reviewQueueActive = true;/);
+  assert.match(main, /!result\.changed && \(!expectedUser \|\| observedUser !== expectedUser\)/);
+  assert.match(main, /\\u56DE\\u8BC4\\u540E\\u6CA1\\u770B\\u5230\\u76EE\\u6807\\u5377/);
+  assert.match(main, /定位失败就退出队列模式/);
+  assert.match(main, /if \(!fromQueue\) reviewQueueActive = false;/);
+  const history = readSource('src/ui/history.ts');
+  assert.match(history, /this\.callbacks\.onJump\?\.\(next, true\)/);
+});
+
+test('复核队列：定位后重批更新原记录、换卷与提交后退出重批归属', () => {
+  const main = readSource('src/main.ts');
+  assert.match(main, /let regradeTargetId = "";/);
+  assert.match(main, /regradeTargetId = "";\s*\n\s*const previousSlot = rubricSlotKey/);
+  assert.match(main, /regradeTargetId = entry\?\.id \|\| "";/);
+  assert.match(main, /const regradeTarget = regradeTargetId && loadHistory\(\)\.find/);
+  assert.match(main, /regradeTarget\?\.id \|\| `\$\{Date\.now\(\)\}-\$\{Math\.random\(\)/);
+  assert.match(main, /reviewedAt: void 0,\s*\n\s*reviewNote: void 0/);
+  assert.match(main, /lastResult = null;\s*\n\s*\/\/ 这份已提交，重批归属到此结束；下一份若来自队列，jumpToHistory 会重新设置。\s*\n\s*regradeTargetId = "";/);
+  assert.match(main, /if \(!fromQueue\) reviewQueueActive = false;/);
 });

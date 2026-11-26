@@ -11,9 +11,7 @@
     submitText: "\u63D0\u4EA4\u5206\u6570",
     topicIndex: "#currentTopicIndex",
     scoreTotal: "#containter_topicTxt #totalScore",
-    progress: ".progress",
-    reviewPrev: ".pre",
-    reviewNext: ".unnext"
+    progress: ".progress"
   };
   function mainDoc() {
     return typeof unsafeWindow !== "undefined" ? unsafeWindow.document : document;
@@ -38,14 +36,38 @@
     if (element.getClientRects && !element.getClientRects().length) return false;
     return true;
   }
-  function getIframeDoc() {
-    const iframe = mainDoc().querySelector("iframe");
-    if (!iframe || !visible(iframe)) return null;
+  // 上一个命中的阅卷控件；容器页可能有多个 iframe（任务列表、图表、广告位），
+  // 只认「打分框 + 提交按钮」都在的那个，否则填分和提交会打到别的 frame 上。
+  var lastMarkingDoc = null;
+  function frameAlive(doc) {
     try {
-      return iframe.contentDocument ?? iframe.contentWindow?.document ?? null;
+      const frame = doc?.defaultView?.frameElement;
+      return Boolean(frame && frame.isConnected);
     } catch {
-      return null;
+      return false;
     }
+  }
+  function getIframeDoc() {
+    if (lastMarkingDoc && frameAlive(lastMarkingDoc)) return lastMarkingDoc;
+    lastMarkingDoc = null;
+    let fallback = null;
+    for (const frame of Array.from(mainDoc().querySelectorAll("iframe"))) {
+      if (!visible(frame)) continue;
+      let doc = null;
+      try {
+        doc = frame.contentDocument ?? frame.contentWindow?.document ?? null;
+      } catch {
+        continue;
+      }
+      if (!doc) continue;
+      if (hasScoreInput(doc) && hasSubmitButton(doc)) {
+        lastMarkingDoc = doc;
+        return doc;
+      }
+      // 只有打分框、提交按钮还没渲染出来时先记着，等下一轮再确认。
+      if (!fallback && hasScoreInput(doc)) fallback = doc;
+    }
+    return fallback;
   }
   function accessibleDocs() {
     const docs = [];
@@ -136,6 +158,12 @@
   }
   function answerSnapshot(doc) {
     if (doc) return snapshotFrom(doc);
+    // 没有指定文档时先认阅卷控件：路由切换的瞬间别的 frame 里可能还挂着上一份卷子的图。
+    const primary = getIframeDoc();
+    if (primary) {
+      const snapshot = snapshotFrom(primary);
+      if (snapshot.urls.length > 0) return snapshot;
+    }
     for (const root of accessibleDocs()) {
       const snapshot = snapshotFrom(root);
       if (snapshot.urls.length > 0) return snapshot;
@@ -274,7 +302,14 @@
   // 填分 + 回读：页面上的输入框可能被框架改回原值，写不进去就不能假装提交成功。
   function fillScores(scores, doc) {
     const inputs = getScoreInputs(doc);
-    if (inputs.length === 0 || scores.length > inputs.length) return { ok: false, error: "\u672A\u627E\u5230\u6253\u5206\u8F93\u5165\u6846" };
+    if (inputs.length === 0) return { ok: false, error: "\u672A\u627E\u5230\u6253\u5206\u8F93\u5165\u6846" };
+    // 数量对不上就说清楚是哪边少：报「第 2 个分数不是有效数字」没人看得懂。
+    if (scores.length < inputs.length) {
+      return { ok: false, error: `\u8FD9\u4EFD\u5377\u5B50\u6709 ${inputs.length} \u4E2A\u6253\u5206\u6846\uFF0C\u5F53\u524D\u7ED3\u679C\u53EA\u6709 ${scores.length} \u4E2A\u5206\u6570\uFF0C\u8BF7\u5148\u8865\u9F50\u5C0F\u9898\u5206` };
+    }
+    if (scores.length > inputs.length) {
+      return { ok: false, error: `\u7ED3\u679C\u6709 ${scores.length} \u4E2A\u5206\u6570\uFF0C\u9875\u9762\u53EA\u6709 ${inputs.length} \u4E2A\u6253\u5206\u6846\uFF0C\u8BF7\u6838\u5BF9\u5C0F\u9898\u6570` };
+    }
     for (let i = 0; i < inputs.length; i += 1) {
       const score = scores[i];
       if (score === void 0 || score === null || !Number.isFinite(Number(score))) {
@@ -315,6 +350,38 @@
   }
   function getPaperIdentity() {
     return answerSnapshot().identity;
+  }
+  // 打分框里当前的分数：定位到历史那一条后用它和记录分对账，识别「已被他人改分」。
+  function readFilledScores(doc) {
+    return getScoreInputs(doc)
+      .map((input) => Number(input.element.value))
+      .filter((value) => Number.isFinite(value));
+  }
+  // 换卷后打分框会先清空、再回填记录分。给平台一点时间落值，否则会读到空值或上一份的残留值。
+  async function waitScoresSettled(doc, before, timeout = 1500) {
+    const unchanged = (list) => list.length === before.length && list.every((value, index) => Math.abs(value - before[index]) < 0.05);
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const current = readFilledScores(doc);
+      if (current.length > 0 && !unchanged(current)) return current;
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+    return readFilledScores(doc);
+  }
+  // 短时换卷探测：提交回执丢失时用它兜底判定，纯墙钟计时，不受标签页是否可见影响。
+  async function waitPaperChanged(oldIdentity, oldScan = "", timeout = 3e3) {
+    if (!oldIdentity && !oldScan) return false;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeout) {
+      const scan = currentScanRecordId();
+      if (oldScan && scan && scan !== oldScan) return true;
+      if (oldIdentity) {
+        const snapshot = answerSnapshot();
+        if (snapshot.identity && snapshot.identity !== oldIdentity) return true;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 200));
+    }
+    return false;
   }
   async function waitForNextPaper(oldIdentity, oldScan = "", timeout = 25e3) {
     if (!oldIdentity && !oldScan) return false;

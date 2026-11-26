@@ -24,6 +24,8 @@
       this.config = {};
       this.rubricImages = [];
       this.host = document.createElement("div");
+      // 三个面板统一挂同一个标记类：便于排查与外部工具定位（本身不带样式）。
+      this.host.className = "zygr-host";
       this.shadow = this.host.attachShadow({ mode: "open" });
       this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
       guardEnter(this.shadow);
@@ -60,6 +62,13 @@
             ${field("\u672C\u65B9\u6848\u6EE1\u5206", "context.maxScore", "number")}
             ${select("\u5B66\u79D1\uFF08\u7528\u4E8E\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF09", "context.subject", [["", "\u4E0D\u6307\u5B9A\uFF08\u6309\u624B\u52A8\u53C2\u6570\uFF09"], ...Object.keys(RUBRIC_SUBJECTS).map((name) => [name, name])])}
           </div>
+          <h3>\u6807\u51C6\u5E93\uFF08\u6309\u9898\u53F7\u5206\u522B\u4FDD\u5B58\uFF09</h3>
+          <div class="zygr-row">
+            <button class="zygr-btn zygr-ghost" data-act="rubric-save">\u4FDD\u5B58\u672C\u9898\u6807\u51C6</button>
+            <button class="zygr-btn zygr-ghost" data-act="rubric-load">\u8F7D\u5165\u672C\u9898\u6807\u51C6</button>
+            <button class="zygr-btn zygr-ghost" data-act="rubric-clear">\u6E05\u7A7A\u672C\u9898\u6807\u51C6</button>
+          </div>
+          <p class="zygr-hint">\u5207\u5230\u5176\u5B83\u9898\u53F7\u65F6\u4F1A\u81EA\u52A8\u5B58\u4E0B\u5F53\u524D\u8FD9\u4EFD\u3001\u5E76\u8F7D\u5165\u90A3\u9053\u9898\u5DF2\u5B58\u7684\u6807\u51C6\uFF1B\u4E0A\u9762\u4E09\u4E2A\u6309\u94AE\u7528\u4E8E\u624B\u52A8\u5B58\u53D6\u3002</p>
         </div>
 
         <div class="zygr-section" data-page="api" hidden>
@@ -90,6 +99,7 @@
           <div class="zygr-grid">
             <div class="zygr-field"><label>\u5B66\u79D1</label><select data-gen="subject">${Object.keys(RUBRIC_SUBJECTS).map((name) => `<option value="${name}">${name}</option>`).join("")}</select></div>
             <div class="zygr-field"><label>\u9898\u578B</label><select data-gen="type"></select></div>
+            <p class="zygr-hint" data-gen="rule-hint"></p>
             <div class="zygr-field"><label>\u6EE1\u5206\uFF08\u53EF\u9009\uFF09</label><input type="number" data-gen="maxScore" min="0" step="0.5" placeholder="\u7559\u7A7A\u5219\u7531 AI \u5EFA\u8BAE"></div>
           </div>
           <div class="zygr-field" data-gen-field><label>\u9898\u76EE\uFF08\u4F5C\u6587\u7C7B\u5FC5\u586B\uFF0C\u5176\u4ED6\u53EF\u9009\uFF09</label><textarea data-gen="question" rows="3" placeholder="\u53EF\u7C98\u8D34\u9898\u76EE\u6587\u5B57\uFF0C\u6216\u7559\u7A7A\u4EC5\u7528\u56FE\u7247"></textarea></div>
@@ -189,6 +199,18 @@
           this.toast("\u5DF2\u586B\u5165\u8BC4\u5206\u6807\u51C6\u3001\u9898\u76EE\u3001\u53C2\u8003\u7B54\u6848\u4E0E\u6EE1\u5206\uFF0C\u8BF7\u70B9\u300C\u4FDD\u5B58\u914D\u7F6E\u300D\u751F\u6548");
           return;
         }
+        if (action === "rubric-save") {
+          this.callbacks.onRubricSave?.(this.readContextDraft());
+          return;
+        }
+        if (action === "rubric-load") {
+          this.callbacks.onRubricLoad?.();
+          return;
+        }
+        if (action === "rubric-clear") {
+          this.callbacks.onRubricClear?.();
+          return;
+        }
         if (action === "gen-copy") {
           const result = this.shadow.querySelector('[data-gen="result"]')?.value || "";
           if (!result.trim()) return this.toast("\u8BF7\u5148\u751F\u6210\u8BC4\u5206\u6807\u51C6");
@@ -247,6 +269,7 @@
       this.shadow.addEventListener("change", (event) => {
         const target = event.target;
         if (target.dataset.gen === "subject") this.populateRubricTypes();
+        else if (target.dataset.gen === "type") this.refreshRuleHint();
         if (target.dataset.gen === "images") {
           void this.loadRubricImages(target.files);
           target.value = "";
@@ -393,7 +416,19 @@
       const typeSelect = this.shadow.querySelector('[data-gen="type"]');
       if (!subjectSelect || !typeSelect) return;
       const types = RUBRIC_SUBJECTS[subjectSelect.value] || [];
+      const previous = typeSelect.value;
       typeSelect.innerHTML = types.map((type) => `<option value="${type}">${type}</option>`).join("");
+      if (types.includes(previous)) typeSelect.value = previous;
+      this.refreshRuleHint();
+    }
+    // 题型到底影响什么：直接显示生成时用的评分方式与判分口径，别让人以为它只是摆设。
+    refreshRuleHint() {
+      const subjectSelect = this.shadow.querySelector('[data-gen="subject"]');
+      const typeSelect = this.shadow.querySelector('[data-gen="type"]');
+      const hint = this.shadow.querySelector('[data-gen="rule-hint"]');
+      if (!subjectSelect || !typeSelect || !hint) return;
+      const summary = typeof rubricRuleSummary === "function" ? rubricRuleSummary(subjectSelect.value, typeSelect.value) : "";
+      hint.textContent = summary ? `\u751F\u6210\u53E3\u5F84\uFF1A${summary}` : "";
     }
     async loadRubricImages(files) {
       if (!files || !files.length) return;
@@ -506,6 +541,10 @@
       } finally {
         if (button) button.disabled = false;
       }
+    }
+    // 只取「批改上下文」这一块（题目/答案/标准/满分/学科），给标准库存取用。
+    readContextDraft() {
+      return this.getDraft().context;
     }
     getDraft() {
       const draft = JSON.parse(JSON.stringify(this.config));
