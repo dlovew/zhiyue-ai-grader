@@ -215,6 +215,14 @@
       try {
         const response = options.rateLimiter ? await options.rateLimiter.run(execute, options.estimatedTokens ?? 0) : await execute();
         const body = parseJsonResponse(response.responseText);
+        // 有些网关用 HTTP 200 返回错误体，必须显式识别，否则会被误报成「缺少文本内容」。
+        if (body?.error && !extractContent(body)) {
+          const detail = parseProviderError(response.responseText) || body.error?.message || "\u672A\u77E5\u9519\u8BEF";
+          const error = new Error(`\u63A5\u53E3\u8FD4\u56DE HTTP 200 \u4F46\u5E26\u9519\u8BEF\uFF1A${detail}`);
+          error.status = 200;
+          error.providerMessage = String(detail);
+          throw error;
+        }
         // 思考占满输出预算时正文会被截断：这种结果不能用，整次作废，别把空正文当零分。
         if (body?.choices?.[0]?.finish_reason === "length") {
           const truncated = new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u8C03\u9AD8\u8F93\u51FA\u6863\u4F4D\u3001\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");

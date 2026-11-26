@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.0.5
+// @version      1.0.6
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -585,6 +585,8 @@ function freshAnswerImages() {
     },
     promptVersion: "zygr-prompt-v2",
     historyLimit: 500,
+    // 连续批阅份数上限：无人看管时也不至于一路跑到底。
+    continuousLimit: 20,
     cacheTtlDays: 30,
     cacheMaxEntries: 2000
   };
@@ -938,10 +940,22 @@ function judgeSubmit(hookActive2, signal) {
     const reasoning = summary.reasoning ? `\uFF08\u542B\u601D\u8003 ${summary.reasoning}\uFF09` : "";
     return `\u5171 ${summary.total} \u6761 \xB7 \u672C\u5730\u547D\u4E2D ${summary.hits} \u6B21\uFF08${summary.hitRate}\uFF09 \xB7 \u8F93\u5165 ${summary.prompt} token\uFF08\u524D\u7F00\u547D\u4E2D ${summary.cached}\uFF0C${summary.cacheRate}\uFF09 \xB7 \u8F93\u51FA ${summary.completion} token${reasoning}`;
   }
+  // 平台定位字段：旧记录可能没有 identity，这里统一兜底为空串。
+  function entryIdentity(entry) {
+    const identity = entry?.question?.identity || {};
+    return {
+      topicNumStr: entry?.question?.topicNumStr || identity.topicNumStr || entry?.question?.questionId || "",
+      scanRecordId: identity.scanRecordId || "",
+      userCode: identity.userCode || ""
+    };
+  }
   function toCsv(entries) {
     const header = [
       "\u65F6\u95F4",
       "\u9898\u53F7",
+      "\u63A5\u53E3\u9898\u53F7",
+      "\u626B\u63CF\u8BB0\u5F55ID",
+      "\u5B66\u53F7",
       "\u94FE\u8DEF",
       "\u6A21\u578B",
       "\u72B6\u6001",
@@ -961,9 +975,13 @@ function judgeSubmit(hookActive2, signal) {
     ];
     const rows = entries.map((entry) => {
       const usage = entryUsage(entry);
+      const id = entryIdentity(entry);
       return [
         new Date(entry.createdAt).toLocaleString("zh-CN"),
         entry.question.questionId,
+        id.topicNumStr,
+        id.scanRecordId,
+        id.userCode,
         entry.result.pipeline,
         entry.result.model,
         entry.result.status,
@@ -983,12 +1001,12 @@ function judgeSubmit(hookActive2, signal) {
       ];
     });
     const summary = summarizeEntries(entries);
-    // 末尾追加一行汇总：第 3～12 列是逐条字段，留空避免与逐条数据混读；只填合计列。
+    // 末尾追加一行汇总：第 3～15 列是逐条字段，留空避免与逐条数据混读；只填合计列。
     const summaryRow = [
       "\u6C47\u603B",
       `\u5171 ${summary.total} \u6761`,
-      // 时间到已提交共 10 列留空（第 3～12 列）
-      "", "", "", "", "", "", "", "", "", "",
+      // 接口题号到已提交共 13 列留空（第 3～15 列）
+      "", "", "", "", "", "", "", "", "", "", "", "", "",
       summary.prompt,
       summary.cached,
       summary.completion,
@@ -1004,10 +1022,14 @@ function judgeSubmit(hookActive2, signal) {
   function toHtml(entries) {
     const rows = entries.map((entry) => {
       const usage = entryUsage(entry);
+      const identity = entryIdentity(entry);
       return `
      <tr>
        <td>${escapeHtml(new Date(entry.createdAt).toLocaleString("zh-CN"))}</td>
        <td>${escapeHtml(entry.question.questionId)}</td>
+       <td>${escapeHtml(identity.topicNumStr)}</td>
+       <td>${escapeHtml(identity.scanRecordId)}</td>
+       <td>${escapeHtml(identity.userCode)}</td>
        <td>${escapeHtml(entry.result.pipeline)}</td>
        <td>${escapeHtml(entry.result.model)}</td>
        <td>${escapeHtml(entry.result.status)}</td>
@@ -1033,7 +1055,7 @@ function judgeSubmit(hookActive2, signal) {
   .zygr-summary{margin:0 0 14px;padding:10px 12px;border-radius:10px;background:#eef2ff;color:#3730a3;font-size:13px}
   </style></head><body><h1>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u5386\u53F2\u5BFC\u51FA</h1>
   <p class="zygr-summary">${escapeHtml(summaryText(entries))}</p>
-  <table><thead><tr><th>\u65F6\u95F4</th><th>\u9898\u53F7</th><th>\u94FE\u8DEF</th><th>\u6A21\u578B</th><th>\u72B6\u6001</th><th>\u5F97\u5206</th><th>\u5C0F\u9898\u5206</th><th>\u4F9D\u636E</th><th>\u8F93\u5165 Token</th><th>\u524D\u7F00\u547D\u4E2D</th><th>\u8F93\u51FA Token</th><th>\u601D\u8003 Token</th><th>\u547D\u4E2D</th><th>\u8017\u65F6\uFF08\u79D2\uFF09</th><th>\u6807\u8BB0</th></tr></thead><tbody>${rows}</tbody></table>
+  <table><thead><tr><th>\u65F6\u95F4</th><th>\u9898\u53F7</th><th>\u63A5\u53E3\u9898\u53F7</th><th>\u626B\u63CF\u8BB0\u5F55ID</th><th>\u5B66\u53F7</th><th>\u94FE\u8DEF</th><th>\u6A21\u578B</th><th>\u72B6\u6001</th><th>\u5F97\u5206</th><th>\u5C0F\u9898\u5206</th><th>\u4F9D\u636E</th><th>\u8F93\u5165 Token</th><th>\u524D\u7F00\u547D\u4E2D</th><th>\u8F93\u51FA Token</th><th>\u601D\u8003 Token</th><th>\u547D\u4E2D</th><th>\u8017\u65F6\uFF08\u79D2\uFF09</th><th>\u6807\u8BB0</th></tr></thead><tbody>${rows}</tbody></table>
   </body></html>`;
   }
   function downloadText(filename, content, mime) {
@@ -1699,6 +1721,14 @@ function judgeSubmit(hookActive2, signal) {
       try {
         const response = options.rateLimiter ? await options.rateLimiter.run(execute, options.estimatedTokens ?? 0) : await execute();
         const body = parseJsonResponse(response.responseText);
+        // 有些网关用 HTTP 200 返回错误体，必须显式识别，否则会被误报成「缺少文本内容」。
+        if (body?.error && !extractContent(body)) {
+          const detail = parseProviderError(response.responseText) || body.error?.message || "\u672A\u77E5\u9519\u8BEF";
+          const error = new Error(`\u63A5\u53E3\u8FD4\u56DE HTTP 200 \u4F46\u5E26\u9519\u8BEF\uFF1A${detail}`);
+          error.status = 200;
+          error.providerMessage = String(detail);
+          throw error;
+        }
         // 思考占满输出预算时正文会被截断：这种结果不能用，整次作废，别把空正文当零分。
         if (body?.choices?.[0]?.finish_reason === "length") {
           const truncated = new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u8C03\u9AD8\u8F93\u51FA\u6863\u4F4D\u3001\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");
@@ -3238,6 +3268,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
             ${field("\u56FE\u7247\u957F\u8FB9\u4E0A\u9650\uFF08px\uFF09", "image.maxEdge", "number")}
             ${field("JPEG \u8D28\u91CF\uFF080.5-1\uFF09", "image.quality", "number")}
             ${field("\u5386\u53F2\u4FDD\u7559\u6761\u6570", "historyLimit", "number")}
+            ${field("\u8FDE\u7EED\u6279\u9605\u4EFD\u6570\u4E0A\u9650", "continuousLimit", "number")}
             ${field("\u7F13\u5B58\u6709\u6548\u671F\uFF08\u5929\uFF09", "cacheTtlDays", "number")}
             ${field("\u7F13\u5B58\u6761\u6570\u4E0A\u9650", "cacheMaxEntries", "number")}
           </div>
@@ -3408,10 +3439,17 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     }
     refreshPlatformSelects() {
       const presets = listPlatformPresets();
-      const options = presets.map((preset) => `<option value="${preset.id}">${preset.label}</option>`).join("");
       this.shadow.querySelectorAll("[data-platform-select]").forEach((element) => {
         const current = getPath(this.config, element.dataset.field || "") || element.value;
-        element.innerHTML = options;
+        // 用 DOM 构造 option：预设名可能来自用户，拼进 innerHTML 会有注入风险。
+        const fragment = document.createDocumentFragment();
+        for (const preset of presets) {
+          const option = document.createElement("option");
+          option.value = preset.id;
+          option.textContent = preset.label;
+          fragment.appendChild(option);
+        }
+        element.replaceChildren(fragment);
         element.value = presets.some((preset) => preset.id === current) ? current : "custom";
       });
     }
@@ -4003,7 +4041,14 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       panel.setAutoMode(true);
       panel.clearError();
       let count = 0;
+      // 份数上限：无人看管时也不会一路跑到没配额。
+      const limit = Math.max(1, Math.min(200, Number(config.continuousLimit) || 20));
       while (autoMode && !autoStopRequested) {
+        if (count >= limit) {
+          panel.setSubtitle(`\u5DF2\u8FBE\u8FDE\u7EED\u6279\u9605\u4E0A\u9650 ${limit} \u4EFD\uFF0C\u5DF2\u505C\u6B62`);
+          panel.toast(`\u5DF2\u8FBE\u5230 ${limit} \u4EFD\u4E0A\u9650`);
+          break;
+        }
         count += 1;
         panel.setSubtitle(`\u8FDE\u7EED\u6279\u9605\u4E2D \xB7 \u7B2C ${count} \u4EFD`);
         const graded = await runGrade2();

@@ -326,7 +326,14 @@
       panel.setAutoMode(true);
       panel.clearError();
       let count = 0;
+      // 份数上限：无人看管时也不会一路跑到没配额。
+      const limit = Math.max(1, Math.min(200, Number(config.continuousLimit) || 20));
       while (autoMode && !autoStopRequested) {
+        if (count >= limit) {
+          panel.setSubtitle(`\u5DF2\u8FBE\u8FDE\u7EED\u6279\u9605\u4E0A\u9650 ${limit} \u4EFD\uFF0C\u5DF2\u505C\u6B62`);
+          panel.toast(`\u5DF2\u8FBE\u5230 ${limit} \u4EFD\u4E0A\u9650`);
+          break;
+        }
         count += 1;
         panel.setSubtitle(`\u8FDE\u7EED\u6279\u9605\u4E2D \xB7 \u7B2C ${count} \u4EFD`);
         const graded = await runGrade2();

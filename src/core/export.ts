@@ -65,10 +65,22 @@
     const reasoning = summary.reasoning ? `\uFF08\u542B\u601D\u8003 ${summary.reasoning}\uFF09` : "";
     return `\u5171 ${summary.total} \u6761 \xB7 \u672C\u5730\u547D\u4E2D ${summary.hits} \u6B21\uFF08${summary.hitRate}\uFF09 \xB7 \u8F93\u5165 ${summary.prompt} token\uFF08\u524D\u7F00\u547D\u4E2D ${summary.cached}\uFF0C${summary.cacheRate}\uFF09 \xB7 \u8F93\u51FA ${summary.completion} token${reasoning}`;
   }
+  // 平台定位字段：旧记录可能没有 identity，这里统一兜底为空串。
+  function entryIdentity(entry) {
+    const identity = entry?.question?.identity || {};
+    return {
+      topicNumStr: entry?.question?.topicNumStr || identity.topicNumStr || entry?.question?.questionId || "",
+      scanRecordId: identity.scanRecordId || "",
+      userCode: identity.userCode || ""
+    };
+  }
   function toCsv(entries) {
     const header = [
       "\u65F6\u95F4",
       "\u9898\u53F7",
+      "\u63A5\u53E3\u9898\u53F7",
+      "\u626B\u63CF\u8BB0\u5F55ID",
+      "\u5B66\u53F7",
       "\u94FE\u8DEF",
       "\u6A21\u578B",
       "\u72B6\u6001",
@@ -88,9 +100,13 @@
     ];
     const rows = entries.map((entry) => {
       const usage = entryUsage(entry);
+      const id = entryIdentity(entry);
       return [
         new Date(entry.createdAt).toLocaleString("zh-CN"),
         entry.question.questionId,
+        id.topicNumStr,
+        id.scanRecordId,
+        id.userCode,
         entry.result.pipeline,
         entry.result.model,
         entry.result.status,
@@ -110,12 +126,12 @@
       ];
     });
     const summary = summarizeEntries(entries);
-    // 末尾追加一行汇总：第 3～12 列是逐条字段，留空避免与逐条数据混读；只填合计列。
+    // 末尾追加一行汇总：第 3～15 列是逐条字段，留空避免与逐条数据混读；只填合计列。
     const summaryRow = [
       "\u6C47\u603B",
       `\u5171 ${summary.total} \u6761`,
-      // 时间到已提交共 10 列留空（第 3～12 列）
-      "", "", "", "", "", "", "", "", "", "",
+      // 接口题号到已提交共 13 列留空（第 3～15 列）
+      "", "", "", "", "", "", "", "", "", "", "", "", "",
       summary.prompt,
       summary.cached,
       summary.completion,
@@ -131,10 +147,14 @@
   function toHtml(entries) {
     const rows = entries.map((entry) => {
       const usage = entryUsage(entry);
+      const identity = entryIdentity(entry);
       return `
      <tr>
        <td>${escapeHtml(new Date(entry.createdAt).toLocaleString("zh-CN"))}</td>
        <td>${escapeHtml(entry.question.questionId)}</td>
+       <td>${escapeHtml(identity.topicNumStr)}</td>
+       <td>${escapeHtml(identity.scanRecordId)}</td>
+       <td>${escapeHtml(identity.userCode)}</td>
        <td>${escapeHtml(entry.result.pipeline)}</td>
        <td>${escapeHtml(entry.result.model)}</td>
        <td>${escapeHtml(entry.result.status)}</td>
@@ -160,7 +180,7 @@
   .zygr-summary{margin:0 0 14px;padding:10px 12px;border-radius:10px;background:#eef2ff;color:#3730a3;font-size:13px}
   </style></head><body><h1>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u5386\u53F2\u5BFC\u51FA</h1>
   <p class="zygr-summary">${escapeHtml(summaryText(entries))}</p>
-  <table><thead><tr><th>\u65F6\u95F4</th><th>\u9898\u53F7</th><th>\u94FE\u8DEF</th><th>\u6A21\u578B</th><th>\u72B6\u6001</th><th>\u5F97\u5206</th><th>\u5C0F\u9898\u5206</th><th>\u4F9D\u636E</th><th>\u8F93\u5165 Token</th><th>\u524D\u7F00\u547D\u4E2D</th><th>\u8F93\u51FA Token</th><th>\u601D\u8003 Token</th><th>\u547D\u4E2D</th><th>\u8017\u65F6\uFF08\u79D2\uFF09</th><th>\u6807\u8BB0</th></tr></thead><tbody>${rows}</tbody></table>
+  <table><thead><tr><th>\u65F6\u95F4</th><th>\u9898\u53F7</th><th>\u63A5\u53E3\u9898\u53F7</th><th>\u626B\u63CF\u8BB0\u5F55ID</th><th>\u5B66\u53F7</th><th>\u94FE\u8DEF</th><th>\u6A21\u578B</th><th>\u72B6\u6001</th><th>\u5F97\u5206</th><th>\u5C0F\u9898\u5206</th><th>\u4F9D\u636E</th><th>\u8F93\u5165 Token</th><th>\u524D\u7F00\u547D\u4E2D</th><th>\u8F93\u51FA Token</th><th>\u601D\u8003 Token</th><th>\u547D\u4E2D</th><th>\u8017\u65F6\uFF08\u79D2\uFF09</th><th>\u6807\u8BB0</th></tr></thead><tbody>${rows}</tbody></table>
   </body></html>`;
   }
   function downloadText(filename, content, mime) {

@@ -26,6 +26,8 @@
     },
     promptVersion: "zygr-prompt-v2",
     historyLimit: 500,
+    // 连续批阅份数上限：无人看管时也不至于一路跑到底。
+    continuousLimit: 20,
     cacheTtlDays: 30,
     cacheMaxEntries: 2000
   };

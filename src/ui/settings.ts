@@ -108,6 +108,7 @@
             ${field("\u56FE\u7247\u957F\u8FB9\u4E0A\u9650\uFF08px\uFF09", "image.maxEdge", "number")}
             ${field("JPEG \u8D28\u91CF\uFF080.5-1\uFF09", "image.quality", "number")}
             ${field("\u5386\u53F2\u4FDD\u7559\u6761\u6570", "historyLimit", "number")}
+            ${field("\u8FDE\u7EED\u6279\u9605\u4EFD\u6570\u4E0A\u9650", "continuousLimit", "number")}
             ${field("\u7F13\u5B58\u6709\u6548\u671F\uFF08\u5929\uFF09", "cacheTtlDays", "number")}
             ${field("\u7F13\u5B58\u6761\u6570\u4E0A\u9650", "cacheMaxEntries", "number")}
           </div>
@@ -278,10 +279,17 @@
     }
     refreshPlatformSelects() {
       const presets = listPlatformPresets();
-      const options = presets.map((preset) => `<option value="${preset.id}">${preset.label}</option>`).join("");
       this.shadow.querySelectorAll("[data-platform-select]").forEach((element) => {
         const current = getPath(this.config, element.dataset.field || "") || element.value;
-        element.innerHTML = options;
+        // 用 DOM 构造 option：预设名可能来自用户，拼进 innerHTML 会有注入风险。
+        const fragment = document.createDocumentFragment();
+        for (const preset of presets) {
+          const option = document.createElement("option");
+          option.value = preset.id;
+          option.textContent = preset.label;
+          fragment.appendChild(option);
+        }
+        element.replaceChildren(fragment);
         element.value = presets.some((preset) => preset.id === current) ? current : "custom";
       });
     }

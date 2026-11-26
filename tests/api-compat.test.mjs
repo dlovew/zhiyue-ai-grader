@@ -91,7 +91,12 @@ function exportSample() {
       id: 'h2',
       createdAt: Date.UTC(2026, 0, 2, 3, 5, 6),
       submitted: false,
-      question: { questionId: 'Q2,含逗号"引号', subQuestions: [{ label: '第1问', maxScore: 2 }] },
+      question: {
+        questionId: 'Q2,含逗号"引号',
+        topicNumStr: '43,1',
+        subQuestions: [{ label: '第1问', maxScore: 2 }],
+        identity: { scanRecordId: 'S1', userCode: 'U100', topicNumStr: '43,1' }
+      },
       result: {
         pipeline: 'vlm',
         model: 'qwen-vl-max',
@@ -621,6 +626,38 @@ test('finish_reason=length 整次作废，不把空正文当零分', async () =>
   );
 });
 
+test('连续批阅有份数上限，避免无人看管跑到没配额', () => {
+  const { core } = loadCore();
+  assert.equal(core.loadConfig().continuousLimit, 20);
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /Number\(config\.continuousLimit\) \|\| 20/);
+  assert.match(built, /count >= limit/);
+  // 高级页字段：markup 里是 field(...) 调用，运行时才生成 data-field
+  assert.match(built, /field\([^)]*"continuousLimit"/);
+});
+
+test('HTTP 200 但响应体是 error 时显式报错', async () => {
+  const { api } = loadModules([{
+    status: 200,
+    responseText: JSON.stringify({ error: { message: 'invalid api key' } })
+  }]);
+  await assert.rejects(
+    () => api.chatCompletion(
+      { platform: 'custom', endpoint: 'https://example.com/v1/chat/completions', model: 'm', apiKey: 'k' },
+      [{ role: 'user', content: 'hi' }],
+      {}
+    ),
+    /HTTP 200 但带错误.*invalid api key/
+  );
+});
+
+test('预设下拉用 DOM 构造 option，不再拼 innerHTML', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.doesNotMatch(built, /element\.innerHTML = options/);
+  assert.match(built, /document\.createDocumentFragment\(\)/);
+  assert.match(built, /option\.textContent = preset\.label/);
+});
+
 test('P1 判分质量接线：满分同步、换卷主判据、截断作废', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
   assert.match(built, /checkMaxScore\(config\.context\.maxScore, markingDoc\)/);
@@ -1031,28 +1068,33 @@ test('CSV 导出每行列数与表头一致，汇总行只填合计列', () => {
   const { core } = loadCore();
   const lines = core.toCsv(exportSample()).replace(/^\uFEFF/, '').split('\r\n');
   const header = splitCsvLine(lines[0]);
-  assert.equal(header.length, 18);
-  assert.equal(header[12], '"输入 Token"');
+  assert.equal(header.length, 21);
+  assert.equal(header[15], '"输入 Token"');
   // 表头、每条数据、汇总行都必须同宽，否则 Excel 里会错列
   for (const line of lines) assert.equal(splitCsvLine(line).length, header.length, line);
+  const csv = lines.join('\n');
+  // 平台定位字段随记录导出
+  assert.match(csv, /"43,1"/);
+  assert.match(csv, /"S1"/);
+  assert.match(csv, /"U100"/);
   const summary = splitCsvLine(lines[lines.length - 1]);
   assert.equal(summary[0], '"汇总"');
   assert.equal(summary[1], '"共 2 条"');
-  assert.equal(summary[12], '"1000"');
-  assert.equal(summary[13], '"800"');
-  assert.equal(summary[14], '"180"');
-  assert.equal(summary[15], '"60"');
-  assert.match(summary[16], /本地命中 1 次（50%）/);
+  assert.equal(summary[15], '"1000"');
+  assert.equal(summary[16], '"800"');
+  assert.equal(summary[17], '"180"');
+  assert.equal(summary[18], '"60"');
+  assert.match(summary[19], /本地命中 1 次（50%）/);
 });
 
 test('HTML 导出列数与表头一致，并带用量汇总条', () => {
   const { core } = loadCore();
   const html = core.toHtml(exportSample());
-  assert.equal((html.match(/<th>/g) || []).length, 15);
+  assert.equal((html.match(/<th>/g) || []).length, 18);
   const body = html.split('<tbody>')[1].split('</tbody>')[0];
   const rows = body.split('</tr>').filter((row) => row.includes('<td>'));
   assert.equal(rows.length, 2);
-  for (const row of rows) assert.equal((row.match(/<td>/g) || []).length, 15);
+  for (const row of rows) assert.equal((row.match(/<td>/g) || []).length, 18);
   assert.match(html, /class="zygr-summary"/);
   assert.match(html, /思考 Token/);
   assert.match(html, /耗时（秒）/);
