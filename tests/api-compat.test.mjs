@@ -836,6 +836,37 @@ test('请求不再附带 prompt_cache_key；自定义平台填火山地址时按
   assert.deepEqual(customVolcPayload.thinking, { type: 'disabled' });
 });
 
+test('七牛云自定义地址按模型注入关闭思考字段', () => {
+  const { api } = loadModules();
+  const deepseek = api.resolveProfile({
+    platform: 'custom',
+    endpoint: 'https://api.qnaigc.com/v1/chat/completions',
+    model: 'deepseek/deepseek-v4.1-flash-1017',
+    apiKey: 'k'
+  });
+  assert.equal(deepseek.disableThinkingKey, 'thinking');
+  assert.equal(deepseek.thinkingFields.off.thinking.type, 'disabled');
+  const payload = {};
+  api.thinkingControl(payload, deepseek, 'off');
+  assert.equal(payload.thinking.type, 'disabled');
+
+  // 同一网关的 Qwen 模型用 enable_thinking，不能一律套 thinking.type
+  const qwen = api.resolveProfile({
+    platform: 'custom',
+    endpoint: 'https://api.qnaigc.com/v1/chat/completions',
+    model: 'qwen3-max-2026-01-23',
+    apiKey: 'k'
+  });
+  assert.equal(qwen.disableThinkingKey, 'enable_thinking');
+  assert.equal(qwen.thinkingFields.off.enable_thinking, false);
+  const qwenPayload = {};
+  api.thinkingControl(qwenPayload, qwen, 'off');
+  assert.equal(qwenPayload.enable_thinking, false);
+
+  assert.ok(api.getPlatformPreset('qiniu'));
+  assert.equal(api.getPlatformPreset('qiniu').disableThinkingKey, 'thinking');
+});
+
 test('缓存命中数为 0 时也明确显示，避免用户误以为没读到字段', () => {
   const panel = readSource('src/ui/panel.ts');
   const history = readSource('src/ui/history.ts');

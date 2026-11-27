@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.3.5
+// @version      1.3.6
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -18,7 +18,7 @@
 // ==/UserScript==
 "use strict";
 (() => {
-var ZYGR_VERSION = "1.3.5";
+var ZYGR_VERSION = "1.3.6";
   // src/adapters/zhixue.ts
   var SELECTORS = {
     answerImage: 'div[name="topicImg"] img',
@@ -1897,6 +1897,19 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
       jsonModeKey: "response_format",
       stream: false
     },
+    {
+      id: "qiniu",
+      label: "七牛云 AI（Qiniu）",
+      endpoint: "https://api.qnaigc.com/v1/chat/completions",
+      models: ["deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v3.2-251201"],
+      authHeader: "bearer",
+      // 七牛文档：DeepSeek / Claude 用 thinking.type 开关，Qwen 系用 enable_thinking。
+      // 这里按 DeepSeek 配置；Qwen 模型由 resolveProfile 按域名 + 模型名兜底。
+      thinkingFields: { off: { thinking: { type: "disabled" } } },
+      disableThinkingKey: "thinking",
+      jsonModeKey: "response_format",
+      stream: false
+    },
   ];
 
   // 同一平台的不同模型支持的强度档位并不一致，因此界面统一只给「关闭」与「模型默认」两档；
@@ -2089,6 +2102,17 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
   // 已下线的内置平台：预设条目已删除，这里只保留鉴权方式，避免历史配置静默退回 bearer 而失效。
   var LEGACY_PLATFORM_AUTH = { "azure-openai": "api-key" };
 
+  // 七牛云网关（国内 api.qnaigc.com / 海外 api.modelink.ai）下不同模型关闭思考的字段不同：
+  // DeepSeek / Claude 用 thinking.type，Qwen 系用 enable_thinking。用户常把七牛地址填在
+  // 「自定义」里，所以按域名兜底，不要求先切换平台预设。
+  function qiniuThinkingCompat(endpoint, model) {
+    if (!/\/\/(?:api\.qnaigc\.com|api\.modelink\.ai)\//i.test(String(endpoint || ""))) return null;
+    if (/qwen/i.test(String(model || ""))) {
+      return { disableThinkingKey: "enable_thinking", thinkingValues: {}, thinkingFields: { off: { enable_thinking: false } } };
+    }
+    return { disableThinkingKey: "thinking", thinkingValues: {}, thinkingFields: { off: { thinking: { type: "disabled" } } } };
+  }
+
   // 把平台预设与服务上的手动覆盖合并成统一的请求档案。
   // 显式字段（service.endpoint / service.model）优先，预设只在其为空时提供建议值。
   function resolveProfile(service) {
@@ -2098,9 +2122,11 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
     const legacyAuth = LEGACY_PLATFORM_AUTH[String(src.platform || "")];
     const authHeader = ["bearer", "api-key", "none"].includes(compat.authHeader) ? compat.authHeader : (legacyAuth || preset.authHeader || "bearer");
     const endpoint = normalizeEndpoint(String(src.endpoint || preset.endpoint || ""));
-    // 用户也可能用「自定义」手填火山地址；按域名兜底，按火山预设处理思考字段。
+    // 用户也可能用「自定义」手填火山 / 七牛地址；按域名兜底，套用对应平台的思考字段。
     const volcEndpoint = /\/\/ark\.[^/]*\.volces\.com\//i.test(endpoint);
     const behaviorPreset = volcEndpoint ? (getPlatformPreset("volcengine-chat") || preset) : preset;
+    const qiniuCompat = qiniuThinkingCompat(endpoint, src.model);
+    const thinkingPreset = qiniuCompat ? { ...behaviorPreset, ...qiniuCompat } : behaviorPreset;
     return {
       id: preset.id || "custom",
       label: preset.label || "自定义",
@@ -2113,9 +2139,9 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
       apiKey: String(src.apiKey || ""),
       authHeader,
       authHeaderName: authHeader === "api-key" ? "api-key" : "Authorization",
-      disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (behaviorPreset.disableThinkingKey ?? null),
-      thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(behaviorPreset.thinkingValues),
-      thinkingFields: Object.prototype.hasOwnProperty.call(compat, "thinkingFields") ? normalizeThinkingValues(compat.thinkingFields) : normalizeThinkingValues(behaviorPreset.thinkingFields),
+      disableThinkingKey: Object.prototype.hasOwnProperty.call(compat, "disableThinkingKey") ? compat.disableThinkingKey : (thinkingPreset.disableThinkingKey ?? null),
+      thinkingValues: Object.prototype.hasOwnProperty.call(compat, "thinkingValues") ? normalizeThinkingValues(compat.thinkingValues) : normalizeThinkingValues(thinkingPreset.thinkingValues),
+      thinkingFields: Object.prototype.hasOwnProperty.call(compat, "thinkingFields") ? normalizeThinkingValues(compat.thinkingFields) : normalizeThinkingValues(thinkingPreset.thinkingFields),
       jsonModeKey: Object.prototype.hasOwnProperty.call(compat, "jsonModeKey")
         ? compat.jsonModeKey
         : (Object.prototype.hasOwnProperty.call(behaviorPreset, "jsonModeKey") ? behaviorPreset.jsonModeKey : "response_format"),
