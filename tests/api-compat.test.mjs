@@ -846,9 +846,21 @@ test('七牛云自定义地址按模型注入关闭思考字段', () => {
   });
   assert.equal(deepseek.disableThinkingKey, 'thinking');
   assert.equal(deepseek.thinkingFields.off.thinking.type, 'disabled');
+  assert.equal(deepseek.thinkingFields.off.reasoning_effort, 'none');
   const payload = {};
   api.thinkingControl(payload, deepseek, 'off');
   assert.equal(payload.thinking.type, 'disabled');
+  assert.equal(payload.reasoning_effort, 'none');
+
+  // Conatus 是融合模型：同样用 thinking + reasoning_effort 双字段兜底
+  const conatus = api.resolveProfile({
+    platform: 'custom',
+    endpoint: 'https://api.qnaigc.com/v1/chat/completions',
+    model: 'qiniu/conatus-free',
+    apiKey: 'k'
+  });
+  assert.equal(conatus.thinkingFields.off.thinking.type, 'disabled');
+  assert.equal(conatus.thinkingFields.off.reasoning_effort, 'none');
 
   // 同一网关的 Qwen 模型用 enable_thinking，不能一律套 thinking.type
   const qwen = api.resolveProfile({

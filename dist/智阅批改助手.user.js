@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.3.6
+// @version      1.3.7
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -18,7 +18,7 @@
 // ==/UserScript==
 "use strict";
 (() => {
-var ZYGR_VERSION = "1.3.6";
+var ZYGR_VERSION = "1.3.7";
   // src/adapters/zhixue.ts
   var SELECTORS = {
     answerImage: 'div[name="topicImg"] img',
@@ -1904,8 +1904,9 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
       models: ["deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v3.2-251201"],
       authHeader: "bearer",
       // 七牛文档：DeepSeek / Claude 用 thinking.type 开关，Qwen 系用 enable_thinking。
-      // 这里按 DeepSeek 配置；Qwen 模型由 resolveProfile 按域名 + 模型名兜底。
-      thinkingFields: { off: { thinking: { type: "disabled" } } },
+      // Conatus 是融合模型，底层路由不固定；DeepSeek/Conatus 同时带上 reasoning_effort=none
+      // 做双保险，能覆盖更多底层模型的关闭口径（仍不保证强制思考的路由）。
+      thinkingFields: { off: { thinking: { type: "disabled" }, reasoning_effort: "none" } },
       disableThinkingKey: "thinking",
       jsonModeKey: "response_format",
       stream: false
@@ -2107,10 +2108,16 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
   // 「自定义」里，所以按域名兜底，不要求先切换平台预设。
   function qiniuThinkingCompat(endpoint, model) {
     if (!/\/\/(?:api\.qnaigc\.com|api\.modelink\.ai)\//i.test(String(endpoint || ""))) return null;
-    if (/qwen/i.test(String(model || ""))) {
+    const name = String(model || "");
+    if (/qwen/i.test(name)) {
       return { disableThinkingKey: "enable_thinking", thinkingValues: {}, thinkingFields: { off: { enable_thinking: false } } };
     }
-    return { disableThinkingKey: "thinking", thinkingValues: {}, thinkingFields: { off: { thinking: { type: "disabled" } } } };
+    // DeepSeek / Conatus：thinking.type 为主，reasoning_effort=none 兜底；
+    // Claude 等其他模型只发 thinking.type，避免把不认识的字段塞给上游。
+    const off = /deepseek|conatus/i.test(name)
+      ? { thinking: { type: "disabled" }, reasoning_effort: "none" }
+      : { thinking: { type: "disabled" } };
+    return { disableThinkingKey: "thinking", thinkingValues: {}, thinkingFields: { off } };
   }
 
   // 把平台预设与服务上的手动覆盖合并成统一的请求档案。
