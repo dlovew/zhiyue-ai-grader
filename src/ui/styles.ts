@@ -224,6 +224,23 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .zygr-history-list { max-height: 30vh; }
   .zygr-history-detail { position: static; max-height: none; }
 }
+.zygr-cache-hint {
+  display: block; width: 100%; margin-top: 8px; padding: 5px 9px;
+  border-radius: 8px; border: 1px dashed rgba(180,83,9,.45);
+  background: rgba(251,191,36,.14); color: #b45309;
+  font-size: 11px; line-height: 1.5; text-align: left;
+}
+.zygr-cache-hint:hover { background: rgba(251,191,36,.24); }
+.zygr-dialog.zygr-cache-dialog { width: min(520px, 100%); }
+.zygr-dialog-body.zygr-cache-help-body { gap: 12px; font-size: 12px; line-height: 1.7; color: var(--zygr-muted); }
+.zygr-cache-help-summary { margin: 0; color: var(--zygr-ink); }
+.zygr-cache-help-impact {
+  margin: 0; padding: 8px 10px; border-radius: 9px; line-height: 1.6;
+  background: rgba(22,163,74,.10); border: 1px solid rgba(22,163,74,.22); color: #15803d;
+}
+.zygr-cache-help-section { display: grid; gap: 5px; }
+.zygr-cache-help-section h3 { margin: 0; font-size: 13px; color: #3730a3; }
+.zygr-cache-help-section ul { margin: 0; padding-left: 18px; display: grid; gap: 5px; }
 @keyframes zygr-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes zygr-float { 0%,100% { transform: translate(0,0); } 50% { transform: translate(-18px,18px); } }
 @media (max-width: 520px) {

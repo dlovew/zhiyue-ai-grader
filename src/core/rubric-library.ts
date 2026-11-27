@@ -104,8 +104,15 @@
   function getRubricPreset(slot) {
     const key = normalizeRubricSlot(slot);
     if (!key) return null;
-    const entry = loadRubricLibrary()[key];
-    return isRecord(entry) ? entry : null;
+    const library = loadRubricLibrary();
+    if (isRecord(library[key])) return library[key];
+    // 当前还没拿到试卷 ID 时键会退化成 "paper|43,2"；库里若只有一条同题号记录，
+    // 说明就是同一场考试，直接复用，避免切回来时看起来「标准没了」。
+    const split = key.indexOf("|");
+    if (split < 0 || key.slice(0, split) !== "paper") return null;
+    const topic = key.slice(split + 1);
+    const matches = Object.keys(library).filter((item) => item.endsWith(`|${topic}`));
+    return matches.length === 1 ? library[matches[0]] : null;
   }
   function putRubricPreset(slot, context) {
     const key = normalizeRubricSlot(slot);

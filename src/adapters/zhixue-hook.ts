@@ -130,7 +130,7 @@ function handleHookResponse(url, payload) {
 function installZhixueHook(doc) {
   let win = null;
   try {
-    win = doc?.defaultView || null;
+    win = rootWindow(doc);
   } catch {
     return false;
   }
@@ -182,7 +182,7 @@ function installZhixueHook(doc) {
 function ensureZhixueHook(doc) {
   if (!doc) return false;
   try {
-    if (hookState.installed && hookState.doc === doc && doc.defaultView?.XMLHttpRequest?.prototype?.[ZHIXUE_HOOK_FLAG]) return true;
+    if (hookState.installed && hookState.doc === doc && rootWindow(doc)?.XMLHttpRequest?.prototype?.[ZHIXUE_HOOK_FLAG]) return true;
   } catch { /* 跨域访问失败则重新装 */ }
   return installZhixueHook(doc);
 }

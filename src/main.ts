@@ -36,6 +36,11 @@
     let observer = null;
     let observerTimer = 0;
     let watchTimer = 0;
+    // 阅卷 iframe 被路由整段换掉时，旧 doc 已不在文档里，需要重新 detect 而不是继续观察它。
+    let redetecting = false;
+    // 容器页是 SPA：阅卷页往往在点「阅卷」之后才在 iframe 里加载，没找到时按 1.5 秒轮询。
+    let detectTimer = 0;
+    let detecting = false;
     const panel = new GraderPanel({
       onGrade: () => {
         void runGrade2();
@@ -131,6 +136,14 @@
         if (isRecord(data.keys)) savePlatformKeys(data.keys);
         if (isRecord(data.models)) savePlatformModels(data.models);
         if (isRecord(data.thinkingModes)) savePlatformThinkingModes(data.thinkingModes);
+        // 评分标准库只补不覆盖：导入配置不该抹掉本机已有的其它题目标准。
+        if (isRecord(data.rubrics)) {
+          const local = loadRubricLibrary();
+          for (const [key, value] of Object.entries(data.rubrics)) {
+            if (isRecord(value)) local[key] = value;
+          }
+          saveRubricLibrary(local);
+        }
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
         syncThinkingModesFromConfig(config);
@@ -676,22 +689,35 @@
       panel.setAutoMode(false);
       panel.setSubtitle(`\u8FDE\u7EED\u6279\u9605\u5DF2\u505C\u6B62 \xB7 \u5171 ${count} \u4EFD`);
     }
-    async function detect() {
-      if (!isZhixueHost()) {
-        panel.setSubtitle("\u5F53\u524D\u975E\u9605\u5377\u9875\u9762");
-        return;
+    async function detect(waitMs) {
+      if (detecting) return;
+      detecting = true;
+      window.clearTimeout(detectTimer);
+      try {
+        if (!isZhixueHost()) {
+          panel.setSubtitle("\u5F53\u524D\u975E\u9605\u5377\u9875\u9762");
+          return;
+        }
+        const doc = await waitForMarkingDocument(waitMs === void 0 ? 1e4 : waitMs);
+        if (!doc) {
+          panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u9605\u5377\u63A7\u4EF6");
+          // 智学网是「容器 + iframe」的 SPA：启动时 iframe 还停在试卷列表，
+          // 点「阅卷」后同一个 iframe 才导航到阅卷页。只探测一次会永远错过，
+          // 这里退到 1.5 秒一轮的轻量轮询，找到阅卷页后自动停止。
+          detectTimer = window.setTimeout(() => {
+            void detect(0).catch(() => {});
+          }, 1500);
+          return;
+        }
+        markingDoc = doc;
+        // 每次拿到阅卷文档都校验一次：平台路由切换会换掉 iframe，旧 hook 随之失效。
+        ensureZhixueHook(doc);
+        applyQuestion(readQuestion(doc));
+        updateProgress();
+        watchDocument(doc);
+      } finally {
+        detecting = false;
       }
-      const doc = await waitForMarkingDocument();
-      if (!doc) {
-        panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u9605\u5377\u63A7\u4EF6");
-        return;
-      }
-      markingDoc = doc;
-      // 每次拿到阅卷文档都校验一次：平台路由切换会换掉 iframe，旧 hook 随之失效。
-      ensureZhixueHook(doc);
-      applyQuestion(readQuestion(doc));
-      updateProgress();
-      watchDocument(doc);
     }
     // 判「还是同一份卷」：题号 + 作答图（去签名）+ 接口身份三者都对得上才算没换。
     // 刚换卷时观察器比 DOM 慢，scanRecordId 可能一边为空——这时不能据此判换卷，
@@ -752,7 +778,9 @@
       observer?.disconnect();
       window.clearTimeout(observerTimer);
       window.clearInterval(watchTimer);
-      if (!doc.body) return;
+      // doc 可能是 iframe 文档，也可能是 wujie 的 shadow root（没有 body）。
+      const scope = doc.body || doc;
+      if (!scope) return;
       const refresh = () => {
         applyQuestion(readQuestion(doc));
         updateProgress();
@@ -773,13 +801,24 @@
         const alive = list.length > 0 && list.every((node) => node.isConnected);
         if (alive && bound.length === list.length && bound.every((node, index) => node === list[index])) return;
         observer?.disconnect();
-        bound = list.length > 0 ? list : [doc.body];
+        bound = list.length > 0 ? list : [scope];
         observer = new MutationObserver(schedule);
         for (const node of bound) observer.observe(node, { childList: true, subtree: true, characterData: true });
       };
       bind();
       // 兜底：接口和 DOM 事件都没反应时，题号或首图变了也补一次刷新。
       watchTimer = window.setInterval(() => {
+        // 首次打开时 iframe/微前端容器可能先给一个只有打分框的中间页，随后整段换掉。
+        // 旧 doc 脱离页面后继续观察它永远等不到图，这里重新探测一次。
+        if (!rootAlive(doc)) {
+          if (!redetecting) {
+            redetecting = true;
+            void detect().finally(() => {
+              redetecting = false;
+            });
+          }
+          return;
+        }
         bind();
         const key = quickKey();
         if (key === lastKey) return;

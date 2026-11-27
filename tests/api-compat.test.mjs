@@ -32,7 +32,7 @@ function loadModules(queue = []) {
     }
   };
   context.globalThis = context;
-  const files = ['src/infra/storage.ts', 'src/config.ts', 'src/infra/platforms.ts', 'src/infra/api.ts', 'src/infra/rate-limit.ts', 'src/core/prompt.ts', 'src/core/parse.ts', 'src/core/pipeline.ts'];
+  const files = ['src/infra/storage.ts', 'src/config.ts', 'src/core/cache.ts', 'src/infra/platforms.ts', 'src/infra/api.ts', 'src/infra/rate-limit.ts', 'src/core/prompt.ts', 'src/core/parse.ts', 'src/core/pipeline.ts'];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
   vm.runInContext(`${code}\n;globalThis.__exposed = { normalizeEndpoint, modelsEndpoint, fetchModels, detectReasoning, probeThinking, resolveProfile, createApiError, parseProviderError, statusHint, isRetryableError, chatCompletion, normalizeThinkingMode, thinkingControl, listPlatformPresets, getPlatformPreset, getPlatformKey, setPlatformKey, syncKeysFromConfig, getPlatformModel, setPlatformModel, syncModelsFromConfig, getPlatformThinkingMode, setPlatformThinkingMode, syncThinkingModesFromConfig, loadPlatformThinkingModes, savePlatformThinkingModes, parseConfigBackup, DEFAULT_CONFIG, getPlatformThinkingLevels, thinkingLevelLabel, clampThinkingLevel, THINKING_LEVEL_LABELS, isForcedThinkingModel, markForcedThinking, loadForcedThinking, runGrade, RateLimiter };`, context);
@@ -204,6 +204,13 @@ test('地理综合题按点给分，提示词禁止倒扣并纳入满分', () =>
   assert.match(prompt, /不得写成倒扣、扣分或负分/);
   assert.match(prompt, /各得分点分值之和必须等于满分 16 分/);
   assert.match(prompt, /按得分点累计给分，不设档次/);
+  // 地理专项口径：区域定位、因果链、等价表述、“任答几点”上限、常见失分
+  assert.match(prompt, /区域与材料/);
+  assert.match(prompt, /只写结论不写依据/);
+  assert.match(prompt, /任答两点/);
+  assert.match(prompt, /等价表述/);
+  assert.match(prompt, /因果倒置/);
+  assert.match(prompt, /总字数控制在 1000 字以内/);
 });
 
 test('构建产物包含全部模块边界且顺序正确', () => {
@@ -1172,10 +1179,28 @@ test('阅卷控件按打分框+提交按钮选帧，不认第一个 iframe', () 
   const source = readSource('src/adapters/zhixue.ts');
   assert.doesNotMatch(source, /const iframe = mainDoc\(\)\.querySelector\("iframe"\)/);
   assert.match(source, /mainDoc\(\)\.querySelectorAll\("iframe"\)/);
-  assert.match(source, /if \(hasScoreInput\(doc\) && hasSubmitButton\(doc\)\)/);
-  assert.match(source, /frameAlive\(lastMarkingDoc\)/);
-  // 没有指定文档时优先用阅卷控件快照，避免拿到别的 frame 里的旧卷
-  assert.match(source, /const primary = getIframeDoc\(\);/);
+  assert.match(source, /if \(hasScoreInput\(root\) && hasSubmitButton\(root\)\)/);
+  assert.match(source, /rootAlive\(lastMarkingRoot\)/);
+  // 没有指定文档、或指定文档里没图时，优先用阅卷控件快照，避免拿到别的 frame 里的旧卷
+  assert.match(source, /const marking = getMarkingRoot\(\);/);
+  assert.match(source, /if \(primary && primary\.urls\.length > 0\) return primary;/);
+});
+
+test('支持 wujie 微前端的 shadow root 阅卷页', () => {
+  const source = readSource('src/adapters/zhixue.ts');
+  assert.match(source, /wujie-app/);
+  assert.match(source, /shadowRootsOf/);
+  assert.match(source, /rootWindow/);
+  assert.match(source, /attachShadow/);
+  const hook = readSource('src/adapters/zhixue-hook.ts');
+  assert.match(hook, /rootWindow\(doc\)/);
+});
+
+test('容器页首开错过阅卷 iframe 后会继续轮询探测', () => {
+  const source = readSource('src/main.ts');
+  assert.match(source, /detectTimer = window\.setTimeout/);
+  assert.match(source, /waitForMarkingDocument\(waitMs === void 0 \? 1e4 : waitMs\)/);
+  assert.match(source, /void detect\(0\)\.catch/);
 });
 
 test('空白率在缩放后的画布上采样，不整幅读像素', () => {
@@ -1749,6 +1774,17 @@ test('评分标准库按「试卷 + 题号」存取，空内容不入库', () =>
   assert.equal(lib.countRubricPresets(), 1);
   assert.deepEqual(Object.keys(JSON.parse(saved.get('zygr.rubrics.v1'))), ['paper-1|43,1']);
 
+  // 当前拿不到试卷 ID 时键会退化成 paper|43,1：库里只有一条同题号记录就复用它。
+  assert.equal(lib.getRubricPreset('paper|43,1').answer, 'NEW');
+  saved.set('zygr.rubrics.v1', JSON.stringify({
+    'paper-1|43,1': { answer: 'NEW', updatedAt: 20 },
+    'paper-2|43,1': { answer: 'OTHER', updatedAt: 30 }
+  }));
+  assert.equal(lib.getRubricPreset('paper|43,1'), null);
+  saved.set('zygr.rubrics.v1', JSON.stringify({
+    'paper-1|43,1': { answer: 'NEW', updatedAt: 20 }
+  }));
+
   assert.equal(lib.putRubricPreset('paper-1|43,1', { answer: 'A', rubric: 'B', maxScore: 2, subject: '地理' }), true);
   const preset = lib.getRubricPreset('paper-1|43,1');
   assert.equal(preset.answer, 'A');
@@ -1769,6 +1805,17 @@ test('评分标准库按「试卷 + 题号」存取，空内容不入库', () =>
   assert.equal(lib.removeRubricPreset('paper-1|43,1'), true);
   assert.equal(lib.getRubricPreset('paper-1|43,1'), null);
   assert.equal(lib.removeRubricPreset('paper-1|43,1'), false);
+});
+
+test('评分标准可随配置导出导入，关闭设置时提醒未保存', () => {
+  const settings = readSource('src/ui/settings.ts');
+  assert.match(settings, /rubrics: loadRubricLibrary\(\)/);
+  assert.match(settings, /confirmDiscard/);
+  assert.match(settings, /window\.confirm/);
+  const main = readSource('src/main.ts');
+  assert.match(main, /saveRubricLibrary\(local\)/);
+  const config = readSource('src/config.ts');
+  assert.match(config, /rubrics: isRecord\(data\.rubrics\)/);
 });
 
 test('复核队列：提交后自动推进下一条待复核', () => {

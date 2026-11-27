@@ -95,6 +95,21 @@
     return Math.ceil(text.length / 2) + imageCount * 1e3;
   }
 
+  // 纯文本 token 估算：中日韩汉字、全角标点按 1 token，其余按 4 字符 1 token。
+  // 只给「缓存门槛」提示用，不参与限流预算，避免改变既有发送节奏。
+  function estimateTextTokens(text) {
+    const value = String(text || "");
+    let wide = 0;
+    let narrow = 0;
+    for (let i = 0; i < value.length; i += 1) {
+      const code = value.charCodeAt(i);
+      const isWide = (code >= 0x3000 && code <= 0x303f) || (code >= 0x3400 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff) || (code >= 0xff00 && code <= 0xffef);
+      if (isWide) wide += 1;
+      else narrow += 1;
+    }
+    return Math.ceil(wide + narrow / 4);
+  }
+
   // OpenAI 兼容服务：基础地址自动补全为 chat/completions；带查询串的完整地址原样保留。
   function normalizeEndpoint(endpoint) {
     const value = String(endpoint || "").trim().replace(/\/+$/, "");

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.3.3
+// @version      1.3.4
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -18,7 +18,7 @@
 // ==/UserScript==
 "use strict";
 (() => {
-var ZYGR_VERSION = "1.3.3";
+var ZYGR_VERSION = "1.3.4";
   // src/adapters/zhixue.ts
   var SELECTORS = {
     answerImage: 'div[name="topicImg"] img',
@@ -59,51 +59,103 @@ var ZYGR_VERSION = "1.3.3";
   }
   // 上一个命中的阅卷控件；容器页可能有多个 iframe（任务列表、图表、广告位），
   // 只认「打分框 + 提交按钮」都在的那个，否则填分和提交会打到别的 frame 上。
-  var lastMarkingDoc = null;
-  function frameAlive(doc) {
+  // 新版智学网用 wujie 微前端把阅卷页渲染在 <wujie-app> 的 shadow root 里，
+  // 所以这里找的是「根」：Document 或 ShadowRoot。
+  var lastMarkingRoot = null;
+  var capturedShadowRoots = [];
+  // closed shadow root 拿不到 host.shadowRoot，只能在启动时包一层 attachShadow 记下来。
+  function captureShadowRoots() {
     try {
-      const frame = doc?.defaultView?.frameElement;
-      return Boolean(frame && frame.isConnected);
+      const win = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+      const proto = win?.Element?.prototype;
+      if (!proto || typeof proto.attachShadow !== "function" || proto.attachShadow.__zygrCapture) return;
+      const original = proto.attachShadow;
+      const patched = function (init) {
+        const root = original.call(this, init);
+        try {
+          if (String(this.tagName || "").toLowerCase() === "wujie-app") {
+            capturedShadowRoots.push(root);
+            if (capturedShadowRoots.length > 40) capturedShadowRoots.shift();
+          }
+        } catch { /* 记录失败不影响页面 */ }
+        return root;
+      };
+      patched.__zygrCapture = true;
+      proto.attachShadow = patched;
+    } catch { /* 页面禁用或跨域时忽略 */ }
+  }
+  function shadowRootsOf(root) {
+    const out = [];
+    let hosts = [];
+    try { hosts = Array.from(root.querySelectorAll("wujie-app")); } catch { return out; }
+    for (const host of hosts) {
+      const shadow = host.shadowRoot;
+      if (!shadow || out.includes(shadow)) continue;
+      out.push(shadow);
+      for (const nested of shadowRootsOf(shadow)) out.push(nested);
+    }
+    return out;
+  }
+  function rootAlive(root) {
+    if (!root) return false;
+    try {
+      if (root.nodeType === 11) return Boolean(root.host && root.host.isConnected);
+      const win = root.defaultView;
+      // iframe 整页导航后旧 document 会被换掉，win.document 不再指向它。
+      if (!win || win.closed || win.document !== root) return false;
+      const frame = win.frameElement;
+      return !frame || frame.isConnected;
     } catch {
       return false;
     }
   }
-  function getIframeDoc() {
-    if (lastMarkingDoc && frameAlive(lastMarkingDoc)) return lastMarkingDoc;
-    lastMarkingDoc = null;
-    let fallback = null;
-    for (const frame of Array.from(mainDoc().querySelectorAll("iframe"))) {
-      if (!visible(frame)) continue;
-      let doc = null;
+  function rootWindow(root) {
+    if (!root) return null;
+    try {
+      if (root.nodeType === 11) return root.ownerDocument?.defaultView || null;
+      return root.defaultView || null;
+    } catch {
+      return null;
+    }
+  }
+  function accessibleRoots() {
+    const roots = [];
+    const add = (root) => {
+      if (root && !roots.includes(root)) roots.push(root);
+    };
+    const main = mainDoc();
+    add(main);
+    for (const shadow of shadowRootsOf(main)) add(shadow);
+    for (const shadow of capturedShadowRoots) {
       try {
-        doc = frame.contentDocument ?? frame.contentWindow?.document ?? null;
-      } catch {
-        continue;
-      }
-      if (!doc) continue;
-      if (hasScoreInput(doc) && hasSubmitButton(doc)) {
-        lastMarkingDoc = doc;
-        return doc;
+        if (shadow.host?.isConnected) add(shadow);
+      } catch { /* 已失效的 root 跳过 */ }
+    }
+    for (const frame of Array.from(mainDoc().querySelectorAll("iframe"))) {
+      try {
+        const doc = frame.contentDocument ?? frame.contentWindow?.document ?? null;
+        if (!doc) continue;
+        add(doc);
+        for (const shadow of shadowRootsOf(doc)) add(shadow);
+      } catch { /* 跨域 frame 跳过 */ }
+    }
+    return roots;
+  }
+  function getMarkingRoot() {
+    if (lastMarkingRoot && rootAlive(lastMarkingRoot)) return lastMarkingRoot;
+    lastMarkingRoot = null;
+    let fallback = null;
+    for (const root of accessibleRoots()) {
+      if (hasScoreInput(root) && hasSubmitButton(root)) {
+        lastMarkingRoot = root;
+        return root;
       }
       // 只有打分框、提交按钮还没渲染出来时先记着，等下一轮再确认。
-      if (!fallback && hasScoreInput(doc)) fallback = doc;
+      if (!fallback && hasScoreInput(root)) fallback = root;
     }
     return fallback;
   }
-  function accessibleDocs() {
-    const docs = [];
-    for (const iframe of Array.from(mainDoc().querySelectorAll("iframe"))) {
-      try {
-        const doc = iframe.contentDocument ?? iframe.contentWindow?.document ?? null;
-        if (doc && !docs.includes(doc)) docs.push(doc);
-      } catch {
-        continue;
-      }
-    }
-    const main = mainDoc();
-    if (!docs.includes(main)) docs.push(main);
-    return docs;
-  }
+  captureShadowRoots();
   function textOf(doc, selector) {
     return doc.querySelector(selector)?.textContent?.trim() ?? "";
   }
@@ -151,24 +203,34 @@ var ZYGR_VERSION = "1.3.3";
   async function waitForMarkingDocument(timeout = 1e4) {
     const deadline = Date.now() + timeout;
     let candidate = null;
-    while (Date.now() < deadline) {
-      for (const doc of accessibleDocs()) {
+    // do-while：timeout 为 0 时也要先扫一遍，供「没找到就轻量轮询」的调用方复用。
+    do {
+      for (const doc of accessibleRoots()) {
         if (hasScoreInput(doc) && hasSubmitButton(doc)) return doc;
         if (hasScoreInput(doc)) candidate = doc;
       }
+      if (Date.now() >= deadline) break;
       await new Promise((resolve) => window.setTimeout(resolve, 200));
-    }
+    } while (true);
     return candidate;
   }
   function snapshotFrom(root) {
     let images = [];
+    let fallback = [];
     for (const selector of [SELECTORS.answerImage, SELECTORS.answerImageNew]) {
-      const found = Array.from(root.querySelectorAll(selector)).filter((image) => image.src && visible(image));
-      if (found.length > 0) {
-        images = found;
+      const found = Array.from(root.querySelectorAll(selector)).filter((image) => image.src);
+      if (found.length === 0) continue;
+      const shown = found.filter(visible);
+      if (shown.length > 0) {
+        images = shown;
         break;
       }
+      // 首次打开时图片常常还没完成布局，getClientRects() 为空会被误判成隐藏。
+      // 只要这个容器里一张可见的都没有，就退回未过滤的集合先把 URL 抓到，
+      // 等图片 load 完成后由观察器再刷新一次。
+      if (fallback.length === 0) fallback = found;
     }
+    if (images.length === 0) images = fallback;
     if (images.length === 0) return { urls: [], keys: [], identity: null, ready: false };
     const urls = [...new Set(images.map((image) => image.currentSrc || image.src))];
     const rawKeys = images.map((image) => resourceKey(image.currentSrc || image.src));
@@ -178,18 +240,20 @@ var ZYGR_VERSION = "1.3.3";
     return { urls, keys, identity, ready: Boolean(identity) && ready };
   }
   function answerSnapshot(doc) {
-    if (doc) return snapshotFrom(doc);
-    // 没有指定文档时先认阅卷控件：路由切换的瞬间别的 frame 里可能还挂着上一份卷子的图。
-    const primary = getIframeDoc();
-    if (primary) {
-      const snapshot = snapshotFrom(primary);
+    const primary = doc ? snapshotFrom(doc) : null;
+    if (primary && primary.urls.length > 0) return primary;
+    // 没有指定文档时先认阅卷控件；指定了但该文档里没图（图在别的 frame/shadow root）时也补扫一遍。
+    const marking = getMarkingRoot();
+    if (marking && marking !== doc) {
+      const snapshot = snapshotFrom(marking);
       if (snapshot.urls.length > 0) return snapshot;
     }
-    for (const root of accessibleDocs()) {
+    for (const root of accessibleRoots()) {
+      if (root === doc) continue;
       const snapshot = snapshotFrom(root);
       if (snapshot.urls.length > 0) return snapshot;
     }
-    return { urls: [], keys: [], identity: null, ready: false };
+    return primary || { urls: [], keys: [], identity: null, ready: false };
   }
   async function gatherAnswerImages(timeout = 25e3) {
     const deadline = Date.now() + timeout;
@@ -211,7 +275,7 @@ var ZYGR_VERSION = "1.3.3";
     return values.find((value) => Number.isFinite(value) && value > 0) ?? 0;
   }
   function getScoreInputs(doc) {
-    const root = doc ?? getIframeDoc() ?? mainDoc();
+    const root = doc ?? getMarkingRoot() ?? mainDoc();
     const oldSubs = Array.from(root.querySelectorAll(SELECTORS.topicInputs)).filter(visible);
     if (oldSubs.length > 0) {
       return oldSubs.map((element, index) => ({
@@ -278,7 +342,7 @@ var ZYGR_VERSION = "1.3.3";
   }
   // 进度：页面文本「初评已阅量/任务量： 532/147」优先，接口 teacherMarked/teacherTodo 兜底。
   function readProgress(doc) {
-    const root = doc ?? getIframeDoc() ?? mainDoc();
+    const root = doc ?? getMarkingRoot() ?? mainDoc();
     const text = root.querySelector(SELECTORS.progress)?.textContent || "";
     const match = text.match(/已阅量\s*\/\s*任务量\s*[：:]\s*(\d+)\s*\/\s*(\d+)/) || text.match(/(\d+)\s*\/\s*(\d+)/);
     if (match) return { marked: Number(match[1]), todo: Number(match[2]) };
@@ -354,7 +418,7 @@ var ZYGR_VERSION = "1.3.3";
     return { ok: true, error: "" };
   }
   function submitGrade(doc) {
-    const iframe = getIframeDoc();
+    const iframe = getMarkingRoot();
     const candidates = [iframe, doc, mainDoc()].filter((item, index, all) => Boolean(item) && all.indexOf(item) === index);
     for (const root of candidates) {
       const byText = Array.from(root.querySelectorAll("button")).find((button2) => {
@@ -574,7 +638,7 @@ function handleHookResponse(url, payload) {
 function installZhixueHook(doc) {
   let win = null;
   try {
-    win = doc?.defaultView || null;
+    win = rootWindow(doc);
   } catch {
     return false;
   }
@@ -626,7 +690,7 @@ function installZhixueHook(doc) {
 function ensureZhixueHook(doc) {
   if (!doc) return false;
   try {
-    if (hookState.installed && hookState.doc === doc && doc.defaultView?.XMLHttpRequest?.prototype?.[ZHIXUE_HOOK_FLAG]) return true;
+    if (hookState.installed && hookState.doc === doc && rootWindow(doc)?.XMLHttpRequest?.prototype?.[ZHIXUE_HOOK_FLAG]) return true;
   } catch { /* 跨域访问失败则重新装 */ }
   return installZhixueHook(doc);
 }
@@ -691,7 +755,7 @@ function jumpApiTopicNum(value) {
   return match ? `${match[1]},${match[2]}` : text;
 }
 function jumpCurrentTopicLabel(doc) {
-  const root = doc || getIframeDoc() || mainDoc();
+  const root = doc || getMarkingRoot() || mainDoc();
   const text = (root.querySelector(SELECTORS.topicIndex)?.textContent || "").replace(/\s/g, "");
   return text.replace(/^第/, "").replace(/题$/, "");
 }
@@ -729,7 +793,7 @@ function jumpVueOf(element) {
 }
 // 回评方法：页面组件是 returnMarkingPushToCherkItem，记录面板组件是 toCherkItem。
 function jumpFindVue(doc) {
-  const root = doc || getIframeDoc() || mainDoc();
+  const root = doc || getMarkingRoot() || mainDoc();
   for (const selector of [".personal_box", "#app", "#remarking_box", "body"]) {
     const element = root.querySelector(selector);
     if (!element) continue;
@@ -742,7 +806,7 @@ function jumpFindVue(doc) {
 }
 // 切题号：和老师手点题号列表一样，点完等标题真的变过去。
 async function jumpSwitchTopic(doc, label, timeout = 1e4) {
-  const root = doc || getIframeDoc() || mainDoc();
+  const root = doc || getMarkingRoot() || mainDoc();
   if (!label || jumpCurrentTopicLabel(root) === label) return true;
   const links = Array.from(root.querySelectorAll("#topicList .topiclist-content a"));
   const target = links.find((item) => (item.textContent || "").trim() === label);
@@ -851,9 +915,9 @@ async function jumpApplyRecord(doc, record) {
 async function jumpToMarkedRecord(entry, options = {}) {
   const question = entry?.question || {};
   const identity = question.identity || {};
-  const doc = options.doc || getIframeDoc() || mainDoc();
+  const doc = options.doc || getMarkingRoot() || mainDoc();
   if (!doc) return { ok: false, error: "未检测到阅卷控件，请先打开阅卷页" };
-  const win = doc.defaultView || null;
+  const win = rootWindow(doc);
   const userCode = String(identity.userCode || "").trim();
   const markingPaperId = String(identity.markingPaperId || hookCurrentField("markingPaperId") || "").trim();
   const origin = await jumpResolveOrigin(win, markingPaperId);
@@ -897,7 +961,7 @@ async function resolveMarkedRecordId(doc, identity, expectedScore) {
     }
   }
   if (!markingPaperId) return null;
-  const win = doc.defaultView || null;
+  const win = rootWindow(doc);
   const origin = await jumpResolveOrigin(win, markingPaperId);
   if (!origin) return null;
   try {
@@ -927,6 +991,7 @@ async function resolveMarkedRecordId(doc, identity, expectedScore) {
     history: "zygr.history.v1",
     cache: "zygr.cache.v1",
     stats: "zygr.stats.v1",
+    cacheProbe: "zygr.cache-probe.v1",
     thinkingForced: "zygr.thinking-forced.v1"
   };
   function readJson(key, fallback) {
@@ -1013,7 +1078,8 @@ async function resolveMarkedRecordId(doc, identity, expectedScore) {
         config: data.config,
         keys: isRecord(data.keys) ? data.keys : {},
         models: isRecord(data.models) ? data.models : {},
-        thinkingModes: isRecord(data.thinkingModes) ? data.thinkingModes : {}
+        thinkingModes: isRecord(data.thinkingModes) ? data.thinkingModes : {},
+        rubrics: isRecord(data.rubrics) ? data.rubrics : {}
       };
     } catch {
       return null;
@@ -1058,6 +1124,7 @@ async function resolveMarkedRecordId(doc, identity, expectedScore) {
     removeKey(STORAGE_KEYS.history);
     removeKey(STORAGE_KEYS.cache);
     removeKey(STORAGE_KEYS.stats);
+    removeKey(STORAGE_KEYS.cacheProbe);
     removeKey(STORAGE_KEYS.thinkingForced);
     removeKey(PRESET_STORAGE_KEY);
     removeKey(RUBRIC_LIBRARY_KEY);
@@ -1173,8 +1240,15 @@ async function resolveMarkedRecordId(doc, identity, expectedScore) {
   function getRubricPreset(slot) {
     const key = normalizeRubricSlot(slot);
     if (!key) return null;
-    const entry = loadRubricLibrary()[key];
-    return isRecord(entry) ? entry : null;
+    const library = loadRubricLibrary();
+    if (isRecord(library[key])) return library[key];
+    // 当前还没拿到试卷 ID 时键会退化成 "paper|43,2"；库里若只有一条同题号记录，
+    // 说明就是同一场考试，直接复用，避免切回来时看起来「标准没了」。
+    const split = key.indexOf("|");
+    if (split < 0 || key.slice(0, split) !== "paper") return null;
+    const topic = key.slice(split + 1);
+    const matches = Object.keys(library).filter((item) => item.endsWith(`|${topic}`));
+    return matches.length === 1 ? library[matches[0]] : null;
   }
   function putRubricPreset(slot, context) {
     const key = normalizeRubricSlot(slot);
@@ -1303,6 +1377,54 @@ function recordUsage(entry) {
   return next;
 }
 var CACHE_WRITE_DELAY = 1200;
+// 前缀缓存诊断：同一段固定文本在同一模型上连续 0 命中，多半是该模型不支持缓存、
+// 或文本没达到最小缓存长度。这里只累计响应自带的 usage，不产生任何额外请求。
+var CACHE_PROBE_LIMIT = 40;
+var CACHE_PROBE_TTL = 12 * 36e5;
+function loadCacheProbe() {
+  const raw = readJson(STORAGE_KEYS.cacheProbe, {});
+  return isRecord(raw) ? raw : {};
+}
+function pruneCacheProbe(map) {
+  const now = Date.now();
+  const kept = {};
+  const entries = Object.keys(map)
+    .map((key) => [key, map[key]])
+    .filter(([, item]) => isRecord(item) && now - Number(item.at || 0) < CACHE_PROBE_TTL)
+    .sort((a, b) => Number(b[1].at || 0) - Number(a[1].at || 0))
+    .slice(0, CACHE_PROBE_LIMIT);
+  for (const [key, item] of entries) kept[key] = item;
+  return kept;
+}
+// 命中一次就把连续计数清零；everHit 用来区分「模型不支持」和「前缀这次才变」。
+// 分组键用「题目」而不是前缀哈希：这样即便前缀每份都在变，也能累计出连续未命中，
+// 同时 prefixHash 的变化次数能反过来指出「是这道题的前缀不稳」。
+function noteCacheProbe(input) {
+  const key = `${input.platform || "custom"}|${input.model || ""}|${input.questionKey || "当前题目"}`;
+  const map = pruneCacheProbe(loadCacheProbe());
+  const prev = isRecord(map[key]) ? map[key] : {};
+  const hit = Number(input.cached) > 0;
+  const drifted = Boolean(prev.prefixHash) && prev.prefixHash !== String(input.prefixHash || "");
+  const record = {
+    at: Date.now(),
+    prefixHash: String(input.prefixHash || ""),
+    streak: hit ? 0 : Number(prev.streak || 0) + 1,
+    everHit: Boolean(prev.everHit) || hit,
+    driftCount: hit ? 0 : Number(prev.driftCount || 0) + (drifted ? 1 : 0),
+    textTokens: Number(input.textTokens) || Number(prev.textTokens) || 0,
+    promptTokens: Number(input.promptTokens) || 0
+  };
+  map[key] = record;
+  writeJson(STORAGE_KEYS.cacheProbe, map);
+  return record;
+}
+// 同一模型在其它题上命中过，说明模型本身支持缓存，本次更可能是文本太短或前缀被改动。
+function modelCacheEverHit(platform, model) {
+  const prefix = `${platform || "custom"}|${model || ""}|`;
+  const map = loadCacheProbe();
+  return Object.keys(map).some((key) => key.startsWith(prefix) && Boolean(map[key]?.everHit));
+}
+
 var CacheStore = class {
   constructor(ttlDays, maxEntries = 2000, options = {}) {
     this.ttlDays = ttlDays;
@@ -1835,6 +1957,23 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
     return listPlatformPresets().find((preset) => preset.id === id) || null;
   }
 
+  // 各平台最小缓存长度的参考文案：只用于「未命中」解释弹窗，不参与请求构造。
+  // 数值来自各家文档（2026-11），平台调门槛不影响批改链路。
+  var CACHE_MIN_NOTES = {
+    deepseek: "DeepSeek 官方最小缓存单元约 64 token",
+    sensenova: "商汤未公开缓存门槛，只能按返回字段判断",
+    siliconflow: "硅基流动仅部分模型支持缓存，门槛未公开",
+    moonshot: "Kimi 按块缓存，最小块长未公开；kimi-k3 命中价约为输入价 1/10",
+    dashscope: "通义千问最小 1024 token（隐式约 0.2x，显式约 0.1x）",
+    zhipu: "智谱建议 500 token 以上，实测约 128 token 起就有命中",
+    "volcengine-chat": "火山默认 1024 token（部分模型 2048；deepseek-v4.1-flash 约 128–256）",
+    "opencode-ai": "取决于它背后的模型，门槛以底层平台为准",
+    custom: "多数平台 1024 起；DeepSeek 64、智谱约 128 是最低的两个"
+  };
+  function getPlatformCacheNote(id) {
+    return CACHE_MIN_NOTES[String(id || "custom")] || CACHE_MIN_NOTES.custom;
+  }
+
   function loadPlatformKeys() {
     const raw = readJson(PLATFORM_KEYS_KEY, {});
     return isRecord(raw) ? raw : {};
@@ -2078,6 +2217,21 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
 
   function estimateTokens(text, imageCount = 0) {
     return Math.ceil(text.length / 2) + imageCount * 1e3;
+  }
+
+  // 纯文本 token 估算：中日韩汉字、全角标点按 1 token，其余按 4 字符 1 token。
+  // 只给「缓存门槛」提示用，不参与限流预算，避免改变既有发送节奏。
+  function estimateTextTokens(text) {
+    const value = String(text || "");
+    let wide = 0;
+    let narrow = 0;
+    for (let i = 0; i < value.length; i += 1) {
+      const code = value.charCodeAt(i);
+      const isWide = (code >= 0x3000 && code <= 0x303f) || (code >= 0x3400 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff) || (code >= 0xff00 && code <= 0xffef);
+      if (isWide) wide += 1;
+      else narrow += 1;
+    }
+    return Math.ceil(wide + narrow / 4);
   }
 
   // OpenAI 兼容服务：基础地址自动补全为 chat/completions；带查询串的完整地址原样保留。
@@ -2639,9 +2793,11 @@ ${subQuestionLines(question)}`,
 
   // 同一题型在不同学科里判分重点不同，这条补充要求挂在基础提示后面。
   var RUBRIC_SUBJECT_TYPE_HINTS = {
-    "\u5730\u7406|\u8BFB\u56FE\u9898": "\u5FC5\u987B\u70B9\u660E\u56FE\u4E2D\u51FA\u73B0\u7684\u65B9\u4F4D\u3001\u56FE\u4F8B\u3001\u7B49\u503C\u7EBF\u6216\u7EDF\u8BA1\u91CF\uFF1B\u53EA\u5199\u7ED3\u8BBA\u4E0D\u5F15\u56FE\u4E0D\u5F97\u5206\u3002",
-    "\u5730\u7406|\u7EFC\u5408\u9898": "\u81EA\u7136\u8981\u7D20\uFF08\u6C14\u5019\u3001\u5730\u5F62\u3001\u6C34\u6587\u3001\u571F\u58E4\uFF09\u4E0E\u4EBA\u6587\u8981\u7D20\uFF08\u5E02\u573A\u3001\u4EA4\u901A\u3001\u52B3\u52A8\u529B\uFF09\u5206\u5F00\u5217\u70B9\uFF0C\u6BCF\u70B9\u5355\u72EC\u8BA1\u5206\u3002",
+    "\u5730\u7406|\u8BFB\u56FE\u9898": "\u5FC5\u987B\u70B9\u660E\u56FE\u4E2D\u51FA\u73B0\u7684\u65B9\u4F4D\u3001\u56FE\u4F8B\u3001\u7B49\u503C\u7EBF\u6216\u7EDF\u8BA1\u91CF\uFF1B\u53EA\u5199\u7ED3\u8BBA\u4E0D\u5F15\u56FE\u4E0D\u5F97\u5206\uFF1B\u63CF\u8FF0\u6309\u65B9\u4F4D/\u5206\u5E03/\u53D8\u5316/\u6570\u503C\u5206\u5C42\u3002",
+    "\u5730\u7406|\u7EFC\u5408\u9898": "\u5148\u505A\u533A\u57DF\u5B9A\u4F4D\u5E76\u63D0\u53D6\u6750\u6599\u4FE1\u606F\uFF0C\u518D\u6309\u81EA\u7136\u8981\u7D20\uFF08\u6C14\u5019\u3001\u5730\u5F62\u3001\u6C34\u6587\u3001\u571F\u58E4\uFF09\u4E0E\u4EBA\u6587\u8981\u7D20\uFF08\u5E02\u573A\u3001\u4EA4\u901A\u3001\u52B3\u52A8\u529B\uFF09\u5206\u5F00\u5217\u70B9\uFF1B\u6BCF\u70B9\u5199\u6210\u201C\u4F9D\u636E\u2192\u7ED3\u8BBA\u201D\uFF0C\u53EA\u5199\u7ED3\u8BBA\u6700\u591A\u7ED9\u4E00\u534A\uFF0C\u540C\u4E00\u8981\u7D20\u4E0D\u91CD\u590D\u7ED9\u5206\u3002",
     "\u5730\u7406|\u586B\u7A7A\u9898": "\u5730\u540D\u3001\u65B9\u4F4D\u3001\u6570\u503C\u6309\u552F\u4E00\u7B54\u6848\u5224\u5206\uFF0C\u5141\u8BB8\u540C\u4E49\u5199\u6CD5\uFF0C\u9519\u522B\u5B57\u6309\u9519\u7B54\u5904\u7406\u3002",
+    "\u5730\u7406|\u6750\u6599\u5206\u6790\u9898": "\u5148\u63D0\u53D6\u6750\u6599\u4E2D\u7684\u6587\u5B57\u4E0E\u56FE\u8868\u4FE1\u606F\uFF0C\u518D\u5BF9\u5E94\u5730\u7406\u539F\u7406\uFF1B\u6BCF\u4E2A\u91C7\u5206\u70B9\u6CE8\u660E\u6750\u6599\u4F9D\u636E\uFF0C\u7F3A\u4F9D\u636E\u6309\u534A\u989D\u3002",
+    "\u5730\u7406|\u7B80\u7B54\u9898": "\u6309\u70B9\u7ED9\u5206\uFF0C\u6BCF\u70B9\u843D\u5230\u672C\u9898\u533A\u57DF\uFF1B\u672F\u8BED\u4E0E\u7B49\u4EF7\u8868\u8FF0\u660E\u786E\uFF0C\u53EA\u5199\u7ED3\u8BBA\u4E0D\u7ED9\u6EE1\u5206\u3002",
     "\u5316\u5B66|\u586B\u7A7A\u9898": "\u5316\u5B66\u5F0F\u3001\u79BB\u5B50\u7B26\u53F7\u3001\u53CD\u5E94\u6761\u4EF6\u6309\u89C4\u8303\u4E66\u5199\u5224\u5206\uFF0C\u914D\u5E73\u9519\u8BEF\u8BE5\u7A7A\u4E0D\u5F97\u5206\u3002",
     "\u5316\u5B66|\u65B9\u7A0B\u5F0F\u4E66\u5199": "\u5316\u5B66\u5F0F\u6B63\u786E\u3001\u914D\u5E73\u3001\u6761\u4EF6\u4E0E\u2191\u2193\u7B26\u53F7\u9F50\u5168\u624D\u7ED9\u6EE1\u5206\uFF0C\u7F3A\u4E00\u9879\u6309\u70B9\u6263\u3002",
     "\u751F\u7269|\u9057\u4F20\u63A8\u65AD\u9898": "\u57FA\u56E0\u578B\u3001\u8868\u73B0\u578B\u3001\u6BD4\u4F8B\u5206\u522B\u8BBE\u5206\uFF0C\u63A8\u5BFC\u8FC7\u7A0B\u7F3A\u5931\u4F46\u7ED3\u8BBA\u6B63\u786E\u7684\u6309\u534A\u7ED9\u3002",
@@ -2675,6 +2831,34 @@ ${subQuestionLines(question)}`,
   }
 
   // 题型到底影响了什么：给界面一句人话摘要，避免「选了题型却不知道有啥用」。
+  // 地理阅卷的共性口径：区域定位、因果链、等价表述、“任答几点”上限。
+  // 这些直接决定同一份答案不同老师给分是否一致，所以写死在生成提示里。
+  function buildGeographyGuide(type, question, maxScore) {
+    const value = String(type || "");
+    const text = String(question || "");
+    const lines = [
+      "地理学科硬性要求（必须落实到得分点）：",
+      "1. 先写一行【区域与材料】：位置（经纬度/海陆/相对位置）、图名与图例、关键统计量或等值线特征；得分点必须落到本题区域，不得写通用模板。",
+      "2. 每个得分点写成「依据/原理 → 结论」，只写结论不写依据的该点最多给一半；形成过程题按时间或因果顺序拆分，缺一环按点扣。",
+      "3. 明确列出可接受的等价表述与必须出现的地理术语（如“降水丰富/降水多”“市场广阔/需求量大”），意思正确但口语化的按等价给分。",
+      "4. 自然要素与人文要素分开列；有利/不利、内因/外因成对出现的分别设点；同一维度不重复给分。",
+      "5. 以学校标准答案的采分点为准，不合并、不新增；写“任答两点/答出其中三点”的严格按上限计分；写“言之有理即可”的按论据质量给分，不要求逐字一致。",
+      "6. 6 分及以上至少拆 3 个独立得分点，每点 1–2 分；未答到的点不给分，不倒扣。",
+      "7. 常见失分写进扣分/不给分：因果倒置、区域错位、只答现象不答成因、漏限制条件（季节/方位/尺度）、只答单方面、术语错误。",
+      "8. 多小问按小问分节，每小问分值之和等于该小问满分；题目没给各小问分值时按总分平均分配并注明。"
+    ];
+    if (/综合|材料/.test(value)) {
+      lines.push("9. 综合/材料题先提取材料中的文字与图表信息，再对应地理原理；每个采分点注明「材料依据 + 原理 + 结论」，缺材料依据的按半额。");
+    }
+    if (/读图/.test(value)) {
+      lines.push("9. 读图题按「方位/分布/变化/数值」分层描述；判读错位、漏图例或漏单位的该点不得分。");
+    }
+    if (/是否|赞同|反对|建议|措施|理由|谈谈|看法/.test(text)) {
+      lines.push("9. 开放性设问先明确观点（1 分），再给至少两条结合本题区域的论据（每条 1–2 分）；只表态不给论据不得分；合理即可。");
+    }
+    return lines.join("\n");
+  }
+
   function rubricRuleSummary(subject, type) {
     const mode = rubricScoringMode(type) === "tier" ? "\u6863\u6B21\u7ED9\u5206" : "\u6309\u70B9\u7ED9\u5206";
     const hint = rubricTypeHint(subject, type).split("\u3002")[0];
@@ -2687,6 +2871,12 @@ ${subQuestionLines(question)}`,
     const hasImages = Boolean(payload?.hasImages);
     const maxScore = Number(payload?.maxScore) || 0;
     const mode = rubricScoringMode(payload?.questionType);
+    const subject = String(payload?.subject || "").trim();
+    const questionType = String(payload?.questionType || "");
+    const isGeography = subject === "地理";
+    const geoGuide = isGeography ? buildGeographyGuide(questionType, question, maxScore) : "";
+    // 地理综合/材料题要多写区域、因果链和常见失分，800 字会挤掉关键信息。
+    const charLimit = isGeography && /综合|材料/.test(questionType) ? 1000 : isGeography ? 900 : 800;
     const deductionRule = mode === "point"
       ? "\u672C\u9898\u4E3A\u6309\u70B9\u7ED9\u5206\u9898\uFF1A\u7B54\u5230\u5F97\u5206\u70B9\u5373\u7ED9\u8BE5\u70B9\u5206\u503C\uFF1B\u672A\u7B54\u5230\u6216\u7B54\u9519\u8BE5\u70B9\uFF0C\u8BE5\u70B9\u4E0D\u7ED9\u5206\uFF0C\u4E0D\u5F97\u5199\u6210\u5012\u6263\u3001\u6263\u5206\u6216\u8D1F\u5206\u3002"
       : "\u4EC5\u5BF9\u5377\u9762\u3001\u5012\u6263\u7B49\u660E\u786E\u89C4\u5B9A\u7684\u60C5\u5F62\u5217\u51FA\u6263\u5206\u4E0A\u9650\uFF0C\u4E0D\u5F97\u8DE8\u6863\u6263\u5206\u3002";
@@ -2707,10 +2897,12 @@ ${subQuestionLines(question)}`,
       answerText || (hasImages ? "\u6807\u51C6\u7B54\u6848\u8BF7\u89C1\u9644\u56FE\u3002" : "\u672A\u63D0\u4F9B\u6807\u51C6\u7B54\u6848\u6587\u5B57\uFF0C\u8BF7\u6839\u636E\u9898\u76EE\u63A8\u65AD\u3002"),
       "",
       `\u8BE5\u9898\u578B\u7684\u7279\u6B8A\u8981\u6C42\uFF1A${rubricTypeHint(payload?.subject, payload?.questionType)}`,
+      geoGuide || null,
       "",
       "\u8BF7\u4E25\u683C\u6309\u4EE5\u4E0B\u7ED3\u6784\u8F93\u51FA\u7EAF\u6587\u672C\uFF08\u4E0D\u8981 Markdown \u4EE3\u7801\u5757\uFF0C\u4E0D\u8981\u5BD2\u6696\uFF09\uFF1A",
       "\u4E00\u3001\u9898\u578B\u4E0E\u5206\u503C\u5EFA\u8BAE",
       "\u4E8C\u3001\u5F97\u5206\u70B9",
+      isGeography ? "\uFF08\u5148\u5199\u4E00\u884C\u3010\u533A\u57DF\u4E0E\u6750\u6599\u3011\uFF1A\u4F4D\u7F6E/\u56FE\u4F8B/\u5173\u952E\u6570\u636E\uFF1B\u518D\u9010\u6761\u5217\u5F97\u5206\u70B9\uFF09" : null,
       "1. \u6BCF\u9879\u5F97\u5206\u70B9\u5355\u72EC\u4E00\u884C\uFF0C\u6CE8\u660E\u5177\u4F53\u5206\u503C\u3002",
       "\u4E09\u3001\u6263\u5206\u89C4\u5219",
       `- ${deductionRule}`,
@@ -2720,10 +2912,11 @@ ${subQuestionLines(question)}`,
       "- \u672A\u4F5C\u7B54\u3001\u7A7A\u767D\u3001\u7B54\u975E\u6240\u95EE\u3001\u5408\u7406\u4F46\u4E0E\u6807\u51C6\u7B54\u6848\u8868\u8FBE\u4E0D\u540C\u7684\u60C5\u5F62\u5982\u4F55\u5904\u7406\u3002",
       "",
       "\u8981\u6C42\uFF1A",
+      "- \u5982\u679C\u3010\u5B66\u6821\u6807\u51C6\u7B54\u6848\u3011\u91CC\u5DF2\u7ECF\u5199\u6210\u8BC4\u5206\u7EC6\u5219/\u91C7\u5206\u70B9\uFF0C\u6309\u539F\u6587\u62C6\u5206\uFF0C\u4FDD\u7559\u539F\u6709\u5206\u503C\u4E0E\u201C\u4EFB\u7B54\u201D\u201C\u8A00\u4E4B\u6709\u7406\u201D\u7B49\u9650\u5B9A\u8BCD\uFF0C\u4E0D\u5F97\u65B0\u589E\u6216\u5408\u5E76\u91C7\u5206\u70B9\u3002",
       "- \u5F97\u5206\u70B9\u5FC5\u987B\u5177\u4F53\u3001\u53EF\u5224\u5B9A\uFF0C\u907F\u514D\u201C\u914D\u60C5\u7ED9\u5206\u201D\u7B49\u6A21\u7CCA\u8868\u8FF0\u3002",
       maxScore > 0 ? `- \u5404\u5F97\u5206\u70B9\u5206\u503C\u4E4B\u548C\u5FC5\u987B\u7B49\u4E8E\u6EE1\u5206 ${maxScore} \u5206\uFF1B\u672A\u7B54\u5230\u7684\u5F97\u5206\u70B9\u53EA\u662F\u4E0D\u7ED9\u5206\uFF0C\u4E0D\u5F97\u5199\u6210\u5012\u6263\u6216\u8D1F\u5206\u3002` : "- \u5404\u5F97\u5206\u70B9\u5206\u503C\u4E4B\u548C\u5E94\u7B49\u4E8E\u672C\u9898\u6EE1\u5206\uFF1B\u672A\u7B54\u5230\u7684\u5F97\u5206\u70B9\u53EA\u662F\u4E0D\u7ED9\u5206\uFF0C\u4E0D\u5F97\u5199\u6210\u5012\u6263\u6216\u8D1F\u5206\u3002",
       "- \u4FDD\u7559\u9898\u76EE\u4E0E\u7B54\u6848\u4E2D\u7684\u5316\u5B66\u5F0F\u3001\u6570\u5B66\u516C\u5F0F\u3001\u7B26\u53F7\u3001\u4E13\u6709\u540D\u8BCD\u539F\u6837\uFF0C\u4E0D\u8981\u6539\u5199\u6216\u7FFB\u8BD1\u3002",
-      "- \u603B\u5B57\u6570\u63A7\u5236\u5728 800 \u5B57\u4EE5\u5185\u3002"
+      `- \u603B\u5B57\u6570\u63A7\u5236\u5728 ${charLimit} \u5B57\u4EE5\u5185\u3002`
     ];
     return sections.filter((item) => item !== null && item !== void 0).join("\n");
   }
@@ -2743,10 +2936,14 @@ ${subQuestionLines(question)}`,
     const maxScore = Number(payload?.maxScore) || 0;
     const rawImages = Array.isArray(payload?.answerImages) ? payload.answerImages.filter((src) => typeof src === "string" && src.trim()) : [];
     if (!question && !answerText && rawImages.length === 0) throw new Error("\u8BF7\u586B\u5199\u9898\u76EE\u6216\u6807\u51C6\u7B54\u6848");
+    // 地理标准答案常含地图/统计图，生成阶段一次性保到 1600px，避免图例、经纬度和小字被缩糊。
+    const genImageConfig = subject === "\u5730\u7406"
+      ? { ...(imageConfig || {}), maxEdge: Math.max(1600, Number(imageConfig?.maxEdge) || 0), detail: "high" }
+      : (imageConfig || {});
     const prepared = [];
     for (const src of rawImages) {
       try {
-        const image = await prepareImage(src, imageConfig || {});
+        const image = await prepareImage(src, genImageConfig);
         if (image?.dataUrl) prepared.push(image);
       } catch { /* \u56FE\u7247\u5904\u7406\u5931\u8D25\u5219\u8DF3\u8FC7 */ }
     }
@@ -3076,6 +3273,32 @@ async function gradeQuestion(options) {
   });
   stage("\u6A21\u578B\u8BC4\u5206", gradeService.model);
   const grade = await runGrade(gradeService, question, maxScore, prompt, payloadImages, config, rateLimiter, imageOptions, forcedByModel);
+  // 同一道题连续多份都拿不到前缀命中时，在结果里留一个可点击的排查入口。
+  // 只读响应里的 usage，不改变请求参数，也不额外发请求。
+  const probeUsage = grade.usage;
+  if (probeUsage && Number(probeUsage.prompt) > 0) {
+    const probe = noteCacheProbe({
+      platform: gradeService.platform,
+      model: gradeService.model,
+      questionKey: question.questionId || question.topicNumStr || "当前题目",
+      prefixHash: hashString(prompt),
+      cached: probeUsage.cached,
+      promptTokens: probeUsage.prompt,
+      textTokens: estimateTextTokens(prompt)
+    });
+    if (probe.streak >= 3) {
+      grade.cacheMiss = {
+        streak: probe.streak,
+        driftCount: probe.driftCount,
+        textTokens: probe.textTokens,
+        promptTokens: probe.promptTokens,
+        imageCount: payloadImages.length,
+        platform: gradeService.platform || "custom",
+        model: gradeService.model,
+        modelEverHit: modelCacheEverHit(gradeService.platform, gradeService.model)
+      };
+    }
+  }
   if (grade.status === "blank" && grade.score > 0) {
     reviewReasons.push("\u8BC6\u522B\u4E3A\u672A\u4F5C\u7B54\u4F46\u7ED9\u51FA\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u67E5");
   }
@@ -3398,6 +3621,23 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   .zygr-history-list { max-height: 30vh; }
   .zygr-history-detail { position: static; max-height: none; }
 }
+.zygr-cache-hint {
+  display: block; width: 100%; margin-top: 8px; padding: 5px 9px;
+  border-radius: 8px; border: 1px dashed rgba(180,83,9,.45);
+  background: rgba(251,191,36,.14); color: #b45309;
+  font-size: 11px; line-height: 1.5; text-align: left;
+}
+.zygr-cache-hint:hover { background: rgba(251,191,36,.24); }
+.zygr-dialog.zygr-cache-dialog { width: min(520px, 100%); }
+.zygr-dialog-body.zygr-cache-help-body { gap: 12px; font-size: 12px; line-height: 1.7; color: var(--zygr-muted); }
+.zygr-cache-help-summary { margin: 0; color: var(--zygr-ink); }
+.zygr-cache-help-impact {
+  margin: 0; padding: 8px 10px; border-radius: 9px; line-height: 1.6;
+  background: rgba(22,163,74,.10); border: 1px solid rgba(22,163,74,.22); color: #15803d;
+}
+.zygr-cache-help-section { display: grid; gap: 5px; }
+.zygr-cache-help-section h3 { margin: 0; font-size: 13px; color: #3730a3; }
+.zygr-cache-help-section ul { margin: 0; padding-left: 18px; display: grid; gap: 5px; }
 @keyframes zygr-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes zygr-float { 0%,100% { transform: translate(0,0); } 50% { transform: translate(-18px,18px); } }
 @media (max-width: 520px) {
@@ -3439,6 +3679,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     constructor(callbacks) {
       this.callbacks = callbacks;
       this.toastTimer = 0;
+      this.cacheMiss = null;
       this.host = document.createElement("div");
       this.host.className = "zygr-host";
       this.shadow = this.host.attachShadow({ mode: "open" });
@@ -3502,6 +3743,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         <button class="zygr-btn zygr-ghost" data-act="settings">\u8BBE\u7F6E</button>
       </footer>
       <div class="zygr-toast" id="zygr-toast" hidden></div>
+    </div>
+    <div class="zygr-overlay" id="zygr-cache-help" hidden>
+      <div class="zygr-dialog zygr-cache-dialog">
+        <div class="zygr-dialog-head"><h2>前缀缓存未命中 · 不影响阅卷</h2><button class="zygr-icon" data-act="cache-help-close" aria-label="关闭">\xD7</button></div>
+        <div class="zygr-dialog-body zygr-cache-help-body" id="zygr-cache-help-body"></div>
+      </div>
     </div>`;
     }
     q(selector) {
@@ -3544,7 +3791,20 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           this.callbacks.onHistory();
         } else if (action === "settings") {
           this.callbacks.onSettings();
+        } else if (action === "cache-help") {
+          this.showCacheHelp();
+        } else if (action === "cache-help-close") {
+          this.hideCacheHelp();
         }
+      });
+      const help = this.shadow.querySelector("#zygr-cache-help");
+      if (help) {
+        help.addEventListener("click", (event) => {
+          if (event.target === help) this.hideCacheHelp();
+        });
+      }
+      this.shadow.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") this.hideCacheHelp();
       });
     }
     mount() {
@@ -3556,6 +3816,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     }
     hide() {
       this.panel.hidden = true;
+      this.hideCacheHelp();
     }
     setSubtitle(value) {
       this.setText("zygr-subtitle", value);
@@ -3635,6 +3896,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     setResult(result) {
       const container = this.q("#zygr-result");
       container.replaceChildren();
+      this.cacheMiss = result.cacheMiss || null;
       const row = document.createElement("div");
       row.className = "zygr-score-row";
       const score = document.createElement("div");
@@ -3705,13 +3967,86 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         : "";
       meta.textContent = `\u94FE\u8DEF ${result.pipeline} \xB7 \u6A21\u578B ${result.model} \xB7 \u8017\u65F6 ${(result.elapsedMs / 1e3).toFixed(1)}s${usageText}`;
       container.appendChild(meta);
+      if (this.cacheMiss) {
+        const hint = document.createElement("button");
+        hint.type = "button";
+        hint.className = "zygr-cache-hint";
+        hint.dataset.act = "cache-help";
+        hint.textContent = `\u524D\u7F00\u7F13\u5B58\u5DF2\u8FDE\u7EED ${this.cacheMiss.streak} \u6B21\u672A\u547D\u4E2D\uFF0C\u70B9\u51FB\u67E5\u770B\u539F\u56E0`;
+        container.appendChild(hint);
+      }
       this.setCache(result.cacheHit ? "\u7F13\u5B58\u547D\u4E2D" : "\u65B0\u7ED3\u679C", result.cacheHit ? "ok" : result.needsReview ? "warn" : "idle");
       this.setStage("\u5B8C\u6210");
+    }
+    // 未命中解释：只用本地累计的计数与估算值，不重新发请求。
+    showCacheHelp() {
+      const info = this.cacheMiss;
+      const overlay = this.shadow.querySelector("#zygr-cache-help");
+      const body = this.shadow.querySelector("#zygr-cache-help-body");
+      if (!info || !overlay || !body) return;
+      const section = (title, items) => {
+        const wrap = document.createElement("div");
+        wrap.className = "zygr-cache-help-section";
+        const heading = document.createElement("h3");
+        heading.textContent = title;
+        const list = document.createElement("ul");
+        for (const item of items) {
+          const li = document.createElement("li");
+          li.textContent = item;
+          list.appendChild(li);
+        }
+        wrap.append(heading, list);
+        return wrap;
+      };
+      const summary = document.createElement("p");
+      summary.className = "zygr-cache-help-summary";
+      summary.textContent = `${info.model} 已连续 ${info.streak} 次没有命中前缀缓存。本次固定文本约 ${info.textTokens} token，输入合计 ${info.promptTokens} token（含 ${info.imageCount} 张作答图）。`;
+      const impact = document.createElement("p");
+      impact.className = "zygr-cache-help-impact";
+      impact.textContent = "不影响阅卷结果：缓存只复用输入的预计算，模型输出与不缓存时完全一致；它只影响 token 费用和首字速度。";
+      const reasons = [];
+      if (Number(info.driftCount) >= 2) {
+        reasons.push(`这道题的固定文本在批改过程中变了 ${info.driftCount} 次（提示词哈希不一致），缓存每次都会重建。重点查题目、小题、分值是否在不同学生页面上解析得不一致。`);
+      }
+      reasons.push(...(info.modelEverHit
+        ? [
+          "这个模型命中过前缀缓存，说明它支持；这次连续未命中，更可能是固定文本没达到门槛、前缀被改动，或缓存已过期。",
+          "固定文本里混进了每份都会变的内容：时间、学生姓名/学号，或页面解析出的小题数量与文案不一致。",
+          "并发太高时请求被路由到了别的实例，或者距上一份超过 TTL（多数平台 5–15 分钟）。",
+          "平台没有返回 cached_tokens 字段（部分中转/兼容网关会省略），无法据此判断。"
+        ]
+        : [
+          "该平台可能按「整条消息」缓存：同一条消息里的作答图一变，前面的文字也一起失效（火山方舟的隐式缓存实测如此）。",
+          "该模型可能不支持前缀缓存，或这个视觉模型不在缓存支持列表里——同平台的文本模型支持，不等于 VL 模型支持。",
+          `固定文本约 ${info.textTokens} token，没达到该模型的最小缓存长度（参考：${getPlatformCacheNote(info.platform)}）。`,
+          "平台没有返回 cached_tokens 字段（部分中转/兼容网关会省略），无法据此判断。"
+        ]));
+      const advice = [
+        info.textTokens < 1024
+          ? "固定文本不足 1024 token：换 DeepSeek（约 64）或智谱（约 128）最容易命中；文本超过 4096 时 Gemini 写入免费更划算。"
+          : "文本长度已经够：优先换一个明确支持该视觉模型的平台，或检查前缀是否被动态内容打断。",
+        "如果换了平台仍是 0 命中，说明它按整条消息缓存，图片一变文字就失效——别再为它调提示词，直接换平台。",
+        "同一道题连续批完再换题，别在题与题之间来回跳。",
+        "设置 → 限速与超时，把 RPM 降到 15 左右；并发越高，越容易被路由到没有缓存的实例。",
+        "批量批改期间固定输出档位：切档会改写提示词，这道题的缓存要重新建立。"
+      ];
+      body.replaceChildren(impact, summary, section("可能的原因", reasons), section("可以怎么处理", advice));
+      const note = document.createElement("p");
+      note.className = "zygr-hint";
+      note.textContent = `参考门槛：${getPlatformCacheNote(info.platform)}。以上是经验判断，最终以平台返回的 cached_tokens 为准。`;
+      body.appendChild(note);
+      overlay.hidden = false;
+    }
+    hideCacheHelp() {
+      const overlay = this.shadow.querySelector("#zygr-cache-help");
+      if (overlay) overlay.hidden = true;
     }
     // 换卷/定位后把结果区清空：旧分数留在面板上会诱导老师提交到另一份卷。
     clearResult() {
       const container = this.q("#zygr-result");
       container.replaceChildren();
+      this.cacheMiss = null;
+      this.hideCacheHelp();
       const note = document.createElement("div");
       note.className = "zygr-reason";
       note.textContent = "\u6279\u6539\u7ED3\u679C\u5C06\u663E\u793A\u5728\u8FD9\u91CC";
@@ -4187,6 +4522,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         }
         if (action === "rubric-load") {
           this.callbacks.onRubricLoad?.();
+          // 载入后立刻用落盘的配置重填表单，否则界面上还是旧内容，看起来像没生效。
+          this.show(loadConfig());
           return;
         }
         if (action === "rubric-clear") {
@@ -4236,7 +4573,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           this.q("[data-config-file]").click();
           return;
         }
-        if (action === "close" || action === "cancel") this.hide();
+        if (action === "close" || action === "cancel") {
+          if (this.confirmDiscard()) this.hide();
+        }
         else if (action === "save") {
           this.callbacks.onSave(this.getDraft());
           this.toast("\u914D\u7F6E\u5DF2\u4FDD\u5B58");
@@ -4338,7 +4677,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         config: this.getDraft(),
         keys: loadPlatformKeys(),
         models: loadPlatformModels(),
-        thinkingModes: loadPlatformThinkingModes()
+        thinkingModes: loadPlatformThinkingModes(),
+        rubrics: loadRubricLibrary()
       };
       const now = new Date();
       const pad = (value) => String(value).padStart(2, "0");
@@ -4538,6 +4878,18 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       });
       return draft;
     }
+    // 题目/答案/评分标准只有点「保存配置」或「保存本题标准」才会落盘；
+    // 直接关窗口时提醒一次，避免整段标准白填。
+    confirmDiscard() {
+      try {
+        const draft = this.getDraft();
+        const saved = loadConfig();
+        if (sameRubricContext(draft.context, saved.context)) return true;
+        return window.confirm("批改上下文（题目 / 参考答案 / 评分标准）有未保存的修改，确定关闭？");
+      } catch {
+        return true;
+      }
+    }
     toast(message) {
       const element = this.q("[data-toast]");
       element.textContent = message;
@@ -4612,6 +4964,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     let observer = null;
     let observerTimer = 0;
     let watchTimer = 0;
+    // 阅卷 iframe 被路由整段换掉时，旧 doc 已不在文档里，需要重新 detect 而不是继续观察它。
+    let redetecting = false;
+    // 容器页是 SPA：阅卷页往往在点「阅卷」之后才在 iframe 里加载，没找到时按 1.5 秒轮询。
+    let detectTimer = 0;
+    let detecting = false;
     const panel = new GraderPanel({
       onGrade: () => {
         void runGrade2();
@@ -4707,6 +5064,14 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         if (isRecord(data.keys)) savePlatformKeys(data.keys);
         if (isRecord(data.models)) savePlatformModels(data.models);
         if (isRecord(data.thinkingModes)) savePlatformThinkingModes(data.thinkingModes);
+        // 评分标准库只补不覆盖：导入配置不该抹掉本机已有的其它题目标准。
+        if (isRecord(data.rubrics)) {
+          const local = loadRubricLibrary();
+          for (const [key, value] of Object.entries(data.rubrics)) {
+            if (isRecord(value)) local[key] = value;
+          }
+          saveRubricLibrary(local);
+        }
         syncKeysFromConfig(config);
         syncModelsFromConfig(config);
         syncThinkingModesFromConfig(config);
@@ -5252,22 +5617,35 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       panel.setAutoMode(false);
       panel.setSubtitle(`\u8FDE\u7EED\u6279\u9605\u5DF2\u505C\u6B62 \xB7 \u5171 ${count} \u4EFD`);
     }
-    async function detect() {
-      if (!isZhixueHost()) {
-        panel.setSubtitle("\u5F53\u524D\u975E\u9605\u5377\u9875\u9762");
-        return;
+    async function detect(waitMs) {
+      if (detecting) return;
+      detecting = true;
+      window.clearTimeout(detectTimer);
+      try {
+        if (!isZhixueHost()) {
+          panel.setSubtitle("\u5F53\u524D\u975E\u9605\u5377\u9875\u9762");
+          return;
+        }
+        const doc = await waitForMarkingDocument(waitMs === void 0 ? 1e4 : waitMs);
+        if (!doc) {
+          panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u9605\u5377\u63A7\u4EF6");
+          // 智学网是「容器 + iframe」的 SPA：启动时 iframe 还停在试卷列表，
+          // 点「阅卷」后同一个 iframe 才导航到阅卷页。只探测一次会永远错过，
+          // 这里退到 1.5 秒一轮的轻量轮询，找到阅卷页后自动停止。
+          detectTimer = window.setTimeout(() => {
+            void detect(0).catch(() => {});
+          }, 1500);
+          return;
+        }
+        markingDoc = doc;
+        // 每次拿到阅卷文档都校验一次：平台路由切换会换掉 iframe，旧 hook 随之失效。
+        ensureZhixueHook(doc);
+        applyQuestion(readQuestion(doc));
+        updateProgress();
+        watchDocument(doc);
+      } finally {
+        detecting = false;
       }
-      const doc = await waitForMarkingDocument();
-      if (!doc) {
-        panel.setSubtitle("\u672A\u68C0\u6D4B\u5230\u9605\u5377\u63A7\u4EF6");
-        return;
-      }
-      markingDoc = doc;
-      // 每次拿到阅卷文档都校验一次：平台路由切换会换掉 iframe，旧 hook 随之失效。
-      ensureZhixueHook(doc);
-      applyQuestion(readQuestion(doc));
-      updateProgress();
-      watchDocument(doc);
     }
     // 判「还是同一份卷」：题号 + 作答图（去签名）+ 接口身份三者都对得上才算没换。
     // 刚换卷时观察器比 DOM 慢，scanRecordId 可能一边为空——这时不能据此判换卷，
@@ -5328,7 +5706,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       observer?.disconnect();
       window.clearTimeout(observerTimer);
       window.clearInterval(watchTimer);
-      if (!doc.body) return;
+      // doc 可能是 iframe 文档，也可能是 wujie 的 shadow root（没有 body）。
+      const scope = doc.body || doc;
+      if (!scope) return;
       const refresh = () => {
         applyQuestion(readQuestion(doc));
         updateProgress();
@@ -5349,13 +5729,24 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         const alive = list.length > 0 && list.every((node) => node.isConnected);
         if (alive && bound.length === list.length && bound.every((node, index) => node === list[index])) return;
         observer?.disconnect();
-        bound = list.length > 0 ? list : [doc.body];
+        bound = list.length > 0 ? list : [scope];
         observer = new MutationObserver(schedule);
         for (const node of bound) observer.observe(node, { childList: true, subtree: true, characterData: true });
       };
       bind();
       // 兜底：接口和 DOM 事件都没反应时，题号或首图变了也补一次刷新。
       watchTimer = window.setInterval(() => {
+        // 首次打开时 iframe/微前端容器可能先给一个只有打分框的中间页，随后整段换掉。
+        // 旧 doc 脱离页面后继续观察它永远等不到图，这里重新探测一次。
+        if (!rootAlive(doc)) {
+          if (!redetecting) {
+            redetecting = true;
+            void detect().finally(() => {
+              redetecting = false;
+            });
+          }
+          return;
+        }
         bind();
         const key = quickKey();
         if (key === lastKey) return;

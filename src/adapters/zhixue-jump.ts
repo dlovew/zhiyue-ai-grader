@@ -22,7 +22,7 @@ function jumpApiTopicNum(value) {
   return match ? `${match[1]},${match[2]}` : text;
 }
 function jumpCurrentTopicLabel(doc) {
-  const root = doc || getIframeDoc() || mainDoc();
+  const root = doc || getMarkingRoot() || mainDoc();
   const text = (root.querySelector(SELECTORS.topicIndex)?.textContent || "").replace(/\s/g, "");
   return text.replace(/^第/, "").replace(/题$/, "");
 }
@@ -60,7 +60,7 @@ function jumpVueOf(element) {
 }
 // 回评方法：页面组件是 returnMarkingPushToCherkItem，记录面板组件是 toCherkItem。
 function jumpFindVue(doc) {
-  const root = doc || getIframeDoc() || mainDoc();
+  const root = doc || getMarkingRoot() || mainDoc();
   for (const selector of [".personal_box", "#app", "#remarking_box", "body"]) {
     const element = root.querySelector(selector);
     if (!element) continue;
@@ -73,7 +73,7 @@ function jumpFindVue(doc) {
 }
 // 切题号：和老师手点题号列表一样，点完等标题真的变过去。
 async function jumpSwitchTopic(doc, label, timeout = 1e4) {
-  const root = doc || getIframeDoc() || mainDoc();
+  const root = doc || getMarkingRoot() || mainDoc();
   if (!label || jumpCurrentTopicLabel(root) === label) return true;
   const links = Array.from(root.querySelectorAll("#topicList .topiclist-content a"));
   const target = links.find((item) => (item.textContent || "").trim() === label);
@@ -182,9 +182,9 @@ async function jumpApplyRecord(doc, record) {
 async function jumpToMarkedRecord(entry, options = {}) {
   const question = entry?.question || {};
   const identity = question.identity || {};
-  const doc = options.doc || getIframeDoc() || mainDoc();
+  const doc = options.doc || getMarkingRoot() || mainDoc();
   if (!doc) return { ok: false, error: "未检测到阅卷控件，请先打开阅卷页" };
-  const win = doc.defaultView || null;
+  const win = rootWindow(doc);
   const userCode = String(identity.userCode || "").trim();
   const markingPaperId = String(identity.markingPaperId || hookCurrentField("markingPaperId") || "").trim();
   const origin = await jumpResolveOrigin(win, markingPaperId);
@@ -228,7 +228,7 @@ async function resolveMarkedRecordId(doc, identity, expectedScore) {
     }
   }
   if (!markingPaperId) return null;
-  const win = doc.defaultView || null;
+  const win = rootWindow(doc);
   const origin = await jumpResolveOrigin(win, markingPaperId);
   if (!origin) return null;
   try {

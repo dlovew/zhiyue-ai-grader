@@ -30,6 +30,7 @@
     constructor(callbacks) {
       this.callbacks = callbacks;
       this.toastTimer = 0;
+      this.cacheMiss = null;
       this.host = document.createElement("div");
       this.host.className = "zygr-host";
       this.shadow = this.host.attachShadow({ mode: "open" });
@@ -93,6 +94,12 @@
         <button class="zygr-btn zygr-ghost" data-act="settings">\u8BBE\u7F6E</button>
       </footer>
       <div class="zygr-toast" id="zygr-toast" hidden></div>
+    </div>
+    <div class="zygr-overlay" id="zygr-cache-help" hidden>
+      <div class="zygr-dialog zygr-cache-dialog">
+        <div class="zygr-dialog-head"><h2>前缀缓存未命中 · 不影响阅卷</h2><button class="zygr-icon" data-act="cache-help-close" aria-label="关闭">\xD7</button></div>
+        <div class="zygr-dialog-body zygr-cache-help-body" id="zygr-cache-help-body"></div>
+      </div>
     </div>`;
     }
     q(selector) {
@@ -135,7 +142,20 @@
           this.callbacks.onHistory();
         } else if (action === "settings") {
           this.callbacks.onSettings();
+        } else if (action === "cache-help") {
+          this.showCacheHelp();
+        } else if (action === "cache-help-close") {
+          this.hideCacheHelp();
         }
+      });
+      const help = this.shadow.querySelector("#zygr-cache-help");
+      if (help) {
+        help.addEventListener("click", (event) => {
+          if (event.target === help) this.hideCacheHelp();
+        });
+      }
+      this.shadow.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") this.hideCacheHelp();
       });
     }
     mount() {
@@ -147,6 +167,7 @@
     }
     hide() {
       this.panel.hidden = true;
+      this.hideCacheHelp();
     }
     setSubtitle(value) {
       this.setText("zygr-subtitle", value);
@@ -226,6 +247,7 @@
     setResult(result) {
       const container = this.q("#zygr-result");
       container.replaceChildren();
+      this.cacheMiss = result.cacheMiss || null;
       const row = document.createElement("div");
       row.className = "zygr-score-row";
       const score = document.createElement("div");
@@ -296,13 +318,86 @@
         : "";
       meta.textContent = `\u94FE\u8DEF ${result.pipeline} \xB7 \u6A21\u578B ${result.model} \xB7 \u8017\u65F6 ${(result.elapsedMs / 1e3).toFixed(1)}s${usageText}`;
       container.appendChild(meta);
+      if (this.cacheMiss) {
+        const hint = document.createElement("button");
+        hint.type = "button";
+        hint.className = "zygr-cache-hint";
+        hint.dataset.act = "cache-help";
+        hint.textContent = `\u524D\u7F00\u7F13\u5B58\u5DF2\u8FDE\u7EED ${this.cacheMiss.streak} \u6B21\u672A\u547D\u4E2D\uFF0C\u70B9\u51FB\u67E5\u770B\u539F\u56E0`;
+        container.appendChild(hint);
+      }
       this.setCache(result.cacheHit ? "\u7F13\u5B58\u547D\u4E2D" : "\u65B0\u7ED3\u679C", result.cacheHit ? "ok" : result.needsReview ? "warn" : "idle");
       this.setStage("\u5B8C\u6210");
+    }
+    // 未命中解释：只用本地累计的计数与估算值，不重新发请求。
+    showCacheHelp() {
+      const info = this.cacheMiss;
+      const overlay = this.shadow.querySelector("#zygr-cache-help");
+      const body = this.shadow.querySelector("#zygr-cache-help-body");
+      if (!info || !overlay || !body) return;
+      const section = (title, items) => {
+        const wrap = document.createElement("div");
+        wrap.className = "zygr-cache-help-section";
+        const heading = document.createElement("h3");
+        heading.textContent = title;
+        const list = document.createElement("ul");
+        for (const item of items) {
+          const li = document.createElement("li");
+          li.textContent = item;
+          list.appendChild(li);
+        }
+        wrap.append(heading, list);
+        return wrap;
+      };
+      const summary = document.createElement("p");
+      summary.className = "zygr-cache-help-summary";
+      summary.textContent = `${info.model} 已连续 ${info.streak} 次没有命中前缀缓存。本次固定文本约 ${info.textTokens} token，输入合计 ${info.promptTokens} token（含 ${info.imageCount} 张作答图）。`;
+      const impact = document.createElement("p");
+      impact.className = "zygr-cache-help-impact";
+      impact.textContent = "不影响阅卷结果：缓存只复用输入的预计算，模型输出与不缓存时完全一致；它只影响 token 费用和首字速度。";
+      const reasons = [];
+      if (Number(info.driftCount) >= 2) {
+        reasons.push(`这道题的固定文本在批改过程中变了 ${info.driftCount} 次（提示词哈希不一致），缓存每次都会重建。重点查题目、小题、分值是否在不同学生页面上解析得不一致。`);
+      }
+      reasons.push(...(info.modelEverHit
+        ? [
+          "这个模型命中过前缀缓存，说明它支持；这次连续未命中，更可能是固定文本没达到门槛、前缀被改动，或缓存已过期。",
+          "固定文本里混进了每份都会变的内容：时间、学生姓名/学号，或页面解析出的小题数量与文案不一致。",
+          "并发太高时请求被路由到了别的实例，或者距上一份超过 TTL（多数平台 5–15 分钟）。",
+          "平台没有返回 cached_tokens 字段（部分中转/兼容网关会省略），无法据此判断。"
+        ]
+        : [
+          "该平台可能按「整条消息」缓存：同一条消息里的作答图一变，前面的文字也一起失效（火山方舟的隐式缓存实测如此）。",
+          "该模型可能不支持前缀缓存，或这个视觉模型不在缓存支持列表里——同平台的文本模型支持，不等于 VL 模型支持。",
+          `固定文本约 ${info.textTokens} token，没达到该模型的最小缓存长度（参考：${getPlatformCacheNote(info.platform)}）。`,
+          "平台没有返回 cached_tokens 字段（部分中转/兼容网关会省略），无法据此判断。"
+        ]));
+      const advice = [
+        info.textTokens < 1024
+          ? "固定文本不足 1024 token：换 DeepSeek（约 64）或智谱（约 128）最容易命中；文本超过 4096 时 Gemini 写入免费更划算。"
+          : "文本长度已经够：优先换一个明确支持该视觉模型的平台，或检查前缀是否被动态内容打断。",
+        "如果换了平台仍是 0 命中，说明它按整条消息缓存，图片一变文字就失效——别再为它调提示词，直接换平台。",
+        "同一道题连续批完再换题，别在题与题之间来回跳。",
+        "设置 → 限速与超时，把 RPM 降到 15 左右；并发越高，越容易被路由到没有缓存的实例。",
+        "批量批改期间固定输出档位：切档会改写提示词，这道题的缓存要重新建立。"
+      ];
+      body.replaceChildren(impact, summary, section("可能的原因", reasons), section("可以怎么处理", advice));
+      const note = document.createElement("p");
+      note.className = "zygr-hint";
+      note.textContent = `参考门槛：${getPlatformCacheNote(info.platform)}。以上是经验判断，最终以平台返回的 cached_tokens 为准。`;
+      body.appendChild(note);
+      overlay.hidden = false;
+    }
+    hideCacheHelp() {
+      const overlay = this.shadow.querySelector("#zygr-cache-help");
+      if (overlay) overlay.hidden = true;
     }
     // 换卷/定位后把结果区清空：旧分数留在面板上会诱导老师提交到另一份卷。
     clearResult() {
       const container = this.q("#zygr-result");
       container.replaceChildren();
+      this.cacheMiss = null;
+      this.hideCacheHelp();
       const note = document.createElement("div");
       note.className = "zygr-reason";
       note.textContent = "\u6279\u6539\u7ED3\u679C\u5C06\u663E\u793A\u5728\u8FD9\u91CC";

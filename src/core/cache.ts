@@ -99,6 +99,54 @@ function recordUsage(entry) {
   return next;
 }
 var CACHE_WRITE_DELAY = 1200;
+// 前缀缓存诊断：同一段固定文本在同一模型上连续 0 命中，多半是该模型不支持缓存、
+// 或文本没达到最小缓存长度。这里只累计响应自带的 usage，不产生任何额外请求。
+var CACHE_PROBE_LIMIT = 40;
+var CACHE_PROBE_TTL = 12 * 36e5;
+function loadCacheProbe() {
+  const raw = readJson(STORAGE_KEYS.cacheProbe, {});
+  return isRecord(raw) ? raw : {};
+}
+function pruneCacheProbe(map) {
+  const now = Date.now();
+  const kept = {};
+  const entries = Object.keys(map)
+    .map((key) => [key, map[key]])
+    .filter(([, item]) => isRecord(item) && now - Number(item.at || 0) < CACHE_PROBE_TTL)
+    .sort((a, b) => Number(b[1].at || 0) - Number(a[1].at || 0))
+    .slice(0, CACHE_PROBE_LIMIT);
+  for (const [key, item] of entries) kept[key] = item;
+  return kept;
+}
+// 命中一次就把连续计数清零；everHit 用来区分「模型不支持」和「前缀这次才变」。
+// 分组键用「题目」而不是前缀哈希：这样即便前缀每份都在变，也能累计出连续未命中，
+// 同时 prefixHash 的变化次数能反过来指出「是这道题的前缀不稳」。
+function noteCacheProbe(input) {
+  const key = `${input.platform || "custom"}|${input.model || ""}|${input.questionKey || "当前题目"}`;
+  const map = pruneCacheProbe(loadCacheProbe());
+  const prev = isRecord(map[key]) ? map[key] : {};
+  const hit = Number(input.cached) > 0;
+  const drifted = Boolean(prev.prefixHash) && prev.prefixHash !== String(input.prefixHash || "");
+  const record = {
+    at: Date.now(),
+    prefixHash: String(input.prefixHash || ""),
+    streak: hit ? 0 : Number(prev.streak || 0) + 1,
+    everHit: Boolean(prev.everHit) || hit,
+    driftCount: hit ? 0 : Number(prev.driftCount || 0) + (drifted ? 1 : 0),
+    textTokens: Number(input.textTokens) || Number(prev.textTokens) || 0,
+    promptTokens: Number(input.promptTokens) || 0
+  };
+  map[key] = record;
+  writeJson(STORAGE_KEYS.cacheProbe, map);
+  return record;
+}
+// 同一模型在其它题上命中过，说明模型本身支持缓存，本次更可能是文本太短或前缀被改动。
+function modelCacheEverHit(platform, model) {
+  const prefix = `${platform || "custom"}|${model || ""}|`;
+  const map = loadCacheProbe();
+  return Object.keys(map).some((key) => key.startsWith(prefix) && Boolean(map[key]?.everHit));
+}
+
 var CacheStore = class {
   constructor(ttlDays, maxEntries = 2000, options = {}) {
     this.ttlDays = ttlDays;

@@ -55,7 +55,8 @@
         config: data.config,
         keys: isRecord(data.keys) ? data.keys : {},
         models: isRecord(data.models) ? data.models : {},
-        thinkingModes: isRecord(data.thinkingModes) ? data.thinkingModes : {}
+        thinkingModes: isRecord(data.thinkingModes) ? data.thinkingModes : {},
+        rubrics: isRecord(data.rubrics) ? data.rubrics : {}
       };
     } catch {
       return null;
@@ -100,6 +101,7 @@
     removeKey(STORAGE_KEYS.history);
     removeKey(STORAGE_KEYS.cache);
     removeKey(STORAGE_KEYS.stats);
+    removeKey(STORAGE_KEYS.cacheProbe);
     removeKey(STORAGE_KEYS.thinkingForced);
     removeKey(PRESET_STORAGE_KEY);
     removeKey(RUBRIC_LIBRARY_KEY);

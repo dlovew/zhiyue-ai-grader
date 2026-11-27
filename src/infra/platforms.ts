@@ -214,6 +214,23 @@
     return listPlatformPresets().find((preset) => preset.id === id) || null;
   }
 
+  // 各平台最小缓存长度的参考文案：只用于「未命中」解释弹窗，不参与请求构造。
+  // 数值来自各家文档（2026-11），平台调门槛不影响批改链路。
+  var CACHE_MIN_NOTES = {
+    deepseek: "DeepSeek 官方最小缓存单元约 64 token",
+    sensenova: "商汤未公开缓存门槛，只能按返回字段判断",
+    siliconflow: "硅基流动仅部分模型支持缓存，门槛未公开",
+    moonshot: "Kimi 按块缓存，最小块长未公开；kimi-k3 命中价约为输入价 1/10",
+    dashscope: "通义千问最小 1024 token（隐式约 0.2x，显式约 0.1x）",
+    zhipu: "智谱建议 500 token 以上，实测约 128 token 起就有命中",
+    "volcengine-chat": "火山默认 1024 token（部分模型 2048；deepseek-v4.1-flash 约 128–256）",
+    "opencode-ai": "取决于它背后的模型，门槛以底层平台为准",
+    custom: "多数平台 1024 起；DeepSeek 64、智谱约 128 是最低的两个"
+  };
+  function getPlatformCacheNote(id) {
+    return CACHE_MIN_NOTES[String(id || "custom")] || CACHE_MIN_NOTES.custom;
+  }
+
   function loadPlatformKeys() {
     const raw = readJson(PLATFORM_KEYS_KEY, {});
     return isRecord(raw) ? raw : {};

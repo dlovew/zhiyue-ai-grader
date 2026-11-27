@@ -203,6 +203,8 @@
         }
         if (action === "rubric-load") {
           this.callbacks.onRubricLoad?.();
+          // 载入后立刻用落盘的配置重填表单，否则界面上还是旧内容，看起来像没生效。
+          this.show(loadConfig());
           return;
         }
         if (action === "rubric-clear") {
@@ -252,7 +254,9 @@
           this.q("[data-config-file]").click();
           return;
         }
-        if (action === "close" || action === "cancel") this.hide();
+        if (action === "close" || action === "cancel") {
+          if (this.confirmDiscard()) this.hide();
+        }
         else if (action === "save") {
           this.callbacks.onSave(this.getDraft());
           this.toast("\u914D\u7F6E\u5DF2\u4FDD\u5B58");
@@ -354,7 +358,8 @@
         config: this.getDraft(),
         keys: loadPlatformKeys(),
         models: loadPlatformModels(),
-        thinkingModes: loadPlatformThinkingModes()
+        thinkingModes: loadPlatformThinkingModes(),
+        rubrics: loadRubricLibrary()
       };
       const now = new Date();
       const pad = (value) => String(value).padStart(2, "0");
@@ -553,6 +558,18 @@
         setPath(draft, path, value);
       });
       return draft;
+    }
+    // 题目/答案/评分标准只有点「保存配置」或「保存本题标准」才会落盘；
+    // 直接关窗口时提醒一次，避免整段标准白填。
+    confirmDiscard() {
+      try {
+        const draft = this.getDraft();
+        const saved = loadConfig();
+        if (sameRubricContext(draft.context, saved.context)) return true;
+        return window.confirm("批改上下文（题目 / 参考答案 / 评分标准）有未保存的修改，确定关闭？");
+      } catch {
+        return true;
+      }
     }
     toast(message) {
       const element = this.q("[data-toast]");

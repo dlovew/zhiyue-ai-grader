@@ -4,6 +4,7 @@
     history: "zygr.history.v1",
     cache: "zygr.cache.v1",
     stats: "zygr.stats.v1",
+    cacheProbe: "zygr.cache-probe.v1",
     thinkingForced: "zygr.thinking-forced.v1"
   };
   function readJson(key, fallback) {

@@ -38,51 +38,103 @@
   }
   // 上一个命中的阅卷控件；容器页可能有多个 iframe（任务列表、图表、广告位），
   // 只认「打分框 + 提交按钮」都在的那个，否则填分和提交会打到别的 frame 上。
-  var lastMarkingDoc = null;
-  function frameAlive(doc) {
+  // 新版智学网用 wujie 微前端把阅卷页渲染在 <wujie-app> 的 shadow root 里，
+  // 所以这里找的是「根」：Document 或 ShadowRoot。
+  var lastMarkingRoot = null;
+  var capturedShadowRoots = [];
+  // closed shadow root 拿不到 host.shadowRoot，只能在启动时包一层 attachShadow 记下来。
+  function captureShadowRoots() {
     try {
-      const frame = doc?.defaultView?.frameElement;
-      return Boolean(frame && frame.isConnected);
+      const win = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+      const proto = win?.Element?.prototype;
+      if (!proto || typeof proto.attachShadow !== "function" || proto.attachShadow.__zygrCapture) return;
+      const original = proto.attachShadow;
+      const patched = function (init) {
+        const root = original.call(this, init);
+        try {
+          if (String(this.tagName || "").toLowerCase() === "wujie-app") {
+            capturedShadowRoots.push(root);
+            if (capturedShadowRoots.length > 40) capturedShadowRoots.shift();
+          }
+        } catch { /* 记录失败不影响页面 */ }
+        return root;
+      };
+      patched.__zygrCapture = true;
+      proto.attachShadow = patched;
+    } catch { /* 页面禁用或跨域时忽略 */ }
+  }
+  function shadowRootsOf(root) {
+    const out = [];
+    let hosts = [];
+    try { hosts = Array.from(root.querySelectorAll("wujie-app")); } catch { return out; }
+    for (const host of hosts) {
+      const shadow = host.shadowRoot;
+      if (!shadow || out.includes(shadow)) continue;
+      out.push(shadow);
+      for (const nested of shadowRootsOf(shadow)) out.push(nested);
+    }
+    return out;
+  }
+  function rootAlive(root) {
+    if (!root) return false;
+    try {
+      if (root.nodeType === 11) return Boolean(root.host && root.host.isConnected);
+      const win = root.defaultView;
+      // iframe 整页导航后旧 document 会被换掉，win.document 不再指向它。
+      if (!win || win.closed || win.document !== root) return false;
+      const frame = win.frameElement;
+      return !frame || frame.isConnected;
     } catch {
       return false;
     }
   }
-  function getIframeDoc() {
-    if (lastMarkingDoc && frameAlive(lastMarkingDoc)) return lastMarkingDoc;
-    lastMarkingDoc = null;
-    let fallback = null;
-    for (const frame of Array.from(mainDoc().querySelectorAll("iframe"))) {
-      if (!visible(frame)) continue;
-      let doc = null;
+  function rootWindow(root) {
+    if (!root) return null;
+    try {
+      if (root.nodeType === 11) return root.ownerDocument?.defaultView || null;
+      return root.defaultView || null;
+    } catch {
+      return null;
+    }
+  }
+  function accessibleRoots() {
+    const roots = [];
+    const add = (root) => {
+      if (root && !roots.includes(root)) roots.push(root);
+    };
+    const main = mainDoc();
+    add(main);
+    for (const shadow of shadowRootsOf(main)) add(shadow);
+    for (const shadow of capturedShadowRoots) {
       try {
-        doc = frame.contentDocument ?? frame.contentWindow?.document ?? null;
-      } catch {
-        continue;
-      }
-      if (!doc) continue;
-      if (hasScoreInput(doc) && hasSubmitButton(doc)) {
-        lastMarkingDoc = doc;
-        return doc;
+        if (shadow.host?.isConnected) add(shadow);
+      } catch { /* 已失效的 root 跳过 */ }
+    }
+    for (const frame of Array.from(mainDoc().querySelectorAll("iframe"))) {
+      try {
+        const doc = frame.contentDocument ?? frame.contentWindow?.document ?? null;
+        if (!doc) continue;
+        add(doc);
+        for (const shadow of shadowRootsOf(doc)) add(shadow);
+      } catch { /* 跨域 frame 跳过 */ }
+    }
+    return roots;
+  }
+  function getMarkingRoot() {
+    if (lastMarkingRoot && rootAlive(lastMarkingRoot)) return lastMarkingRoot;
+    lastMarkingRoot = null;
+    let fallback = null;
+    for (const root of accessibleRoots()) {
+      if (hasScoreInput(root) && hasSubmitButton(root)) {
+        lastMarkingRoot = root;
+        return root;
       }
       // 只有打分框、提交按钮还没渲染出来时先记着，等下一轮再确认。
-      if (!fallback && hasScoreInput(doc)) fallback = doc;
+      if (!fallback && hasScoreInput(root)) fallback = root;
     }
     return fallback;
   }
-  function accessibleDocs() {
-    const docs = [];
-    for (const iframe of Array.from(mainDoc().querySelectorAll("iframe"))) {
-      try {
-        const doc = iframe.contentDocument ?? iframe.contentWindow?.document ?? null;
-        if (doc && !docs.includes(doc)) docs.push(doc);
-      } catch {
-        continue;
-      }
-    }
-    const main = mainDoc();
-    if (!docs.includes(main)) docs.push(main);
-    return docs;
-  }
+  captureShadowRoots();
   function textOf(doc, selector) {
     return doc.querySelector(selector)?.textContent?.trim() ?? "";
   }
@@ -130,24 +182,34 @@
   async function waitForMarkingDocument(timeout = 1e4) {
     const deadline = Date.now() + timeout;
     let candidate = null;
-    while (Date.now() < deadline) {
-      for (const doc of accessibleDocs()) {
+    // do-while：timeout 为 0 时也要先扫一遍，供「没找到就轻量轮询」的调用方复用。
+    do {
+      for (const doc of accessibleRoots()) {
         if (hasScoreInput(doc) && hasSubmitButton(doc)) return doc;
         if (hasScoreInput(doc)) candidate = doc;
       }
+      if (Date.now() >= deadline) break;
       await new Promise((resolve) => window.setTimeout(resolve, 200));
-    }
+    } while (true);
     return candidate;
   }
   function snapshotFrom(root) {
     let images = [];
+    let fallback = [];
     for (const selector of [SELECTORS.answerImage, SELECTORS.answerImageNew]) {
-      const found = Array.from(root.querySelectorAll(selector)).filter((image) => image.src && visible(image));
-      if (found.length > 0) {
-        images = found;
+      const found = Array.from(root.querySelectorAll(selector)).filter((image) => image.src);
+      if (found.length === 0) continue;
+      const shown = found.filter(visible);
+      if (shown.length > 0) {
+        images = shown;
         break;
       }
+      // 首次打开时图片常常还没完成布局，getClientRects() 为空会被误判成隐藏。
+      // 只要这个容器里一张可见的都没有，就退回未过滤的集合先把 URL 抓到，
+      // 等图片 load 完成后由观察器再刷新一次。
+      if (fallback.length === 0) fallback = found;
     }
+    if (images.length === 0) images = fallback;
     if (images.length === 0) return { urls: [], keys: [], identity: null, ready: false };
     const urls = [...new Set(images.map((image) => image.currentSrc || image.src))];
     const rawKeys = images.map((image) => resourceKey(image.currentSrc || image.src));
@@ -157,18 +219,20 @@
     return { urls, keys, identity, ready: Boolean(identity) && ready };
   }
   function answerSnapshot(doc) {
-    if (doc) return snapshotFrom(doc);
-    // 没有指定文档时先认阅卷控件：路由切换的瞬间别的 frame 里可能还挂着上一份卷子的图。
-    const primary = getIframeDoc();
-    if (primary) {
-      const snapshot = snapshotFrom(primary);
+    const primary = doc ? snapshotFrom(doc) : null;
+    if (primary && primary.urls.length > 0) return primary;
+    // 没有指定文档时先认阅卷控件；指定了但该文档里没图（图在别的 frame/shadow root）时也补扫一遍。
+    const marking = getMarkingRoot();
+    if (marking && marking !== doc) {
+      const snapshot = snapshotFrom(marking);
       if (snapshot.urls.length > 0) return snapshot;
     }
-    for (const root of accessibleDocs()) {
+    for (const root of accessibleRoots()) {
+      if (root === doc) continue;
       const snapshot = snapshotFrom(root);
       if (snapshot.urls.length > 0) return snapshot;
     }
-    return { urls: [], keys: [], identity: null, ready: false };
+    return primary || { urls: [], keys: [], identity: null, ready: false };
   }
   async function gatherAnswerImages(timeout = 25e3) {
     const deadline = Date.now() + timeout;
@@ -190,7 +254,7 @@
     return values.find((value) => Number.isFinite(value) && value > 0) ?? 0;
   }
   function getScoreInputs(doc) {
-    const root = doc ?? getIframeDoc() ?? mainDoc();
+    const root = doc ?? getMarkingRoot() ?? mainDoc();
     const oldSubs = Array.from(root.querySelectorAll(SELECTORS.topicInputs)).filter(visible);
     if (oldSubs.length > 0) {
       return oldSubs.map((element, index) => ({
@@ -257,7 +321,7 @@
   }
   // 进度：页面文本「初评已阅量/任务量： 532/147」优先，接口 teacherMarked/teacherTodo 兜底。
   function readProgress(doc) {
-    const root = doc ?? getIframeDoc() ?? mainDoc();
+    const root = doc ?? getMarkingRoot() ?? mainDoc();
     const text = root.querySelector(SELECTORS.progress)?.textContent || "";
     const match = text.match(/已阅量\s*\/\s*任务量\s*[：:]\s*(\d+)\s*\/\s*(\d+)/) || text.match(/(\d+)\s*\/\s*(\d+)/);
     if (match) return { marked: Number(match[1]), todo: Number(match[2]) };
@@ -333,7 +397,7 @@
     return { ok: true, error: "" };
   }
   function submitGrade(doc) {
-    const iframe = getIframeDoc();
+    const iframe = getMarkingRoot();
     const candidates = [iframe, doc, mainDoc()].filter((item, index, all) => Boolean(item) && all.indexOf(item) === index);
     for (const root of candidates) {
       const byText = Array.from(root.querySelectorAll("button")).find((button2) => {

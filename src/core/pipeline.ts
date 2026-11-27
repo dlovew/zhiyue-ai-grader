@@ -106,6 +106,32 @@ async function gradeQuestion(options) {
   });
   stage("\u6A21\u578B\u8BC4\u5206", gradeService.model);
   const grade = await runGrade(gradeService, question, maxScore, prompt, payloadImages, config, rateLimiter, imageOptions, forcedByModel);
+  // 同一道题连续多份都拿不到前缀命中时，在结果里留一个可点击的排查入口。
+  // 只读响应里的 usage，不改变请求参数，也不额外发请求。
+  const probeUsage = grade.usage;
+  if (probeUsage && Number(probeUsage.prompt) > 0) {
+    const probe = noteCacheProbe({
+      platform: gradeService.platform,
+      model: gradeService.model,
+      questionKey: question.questionId || question.topicNumStr || "当前题目",
+      prefixHash: hashString(prompt),
+      cached: probeUsage.cached,
+      promptTokens: probeUsage.prompt,
+      textTokens: estimateTextTokens(prompt)
+    });
+    if (probe.streak >= 3) {
+      grade.cacheMiss = {
+        streak: probe.streak,
+        driftCount: probe.driftCount,
+        textTokens: probe.textTokens,
+        promptTokens: probe.promptTokens,
+        imageCount: payloadImages.length,
+        platform: gradeService.platform || "custom",
+        model: gradeService.model,
+        modelEverHit: modelCacheEverHit(gradeService.platform, gradeService.model)
+      };
+    }
+  }
   if (grade.status === "blank" && grade.score > 0) {
     reviewReasons.push("\u8BC6\u522B\u4E3A\u672A\u4F5C\u7B54\u4F46\u7ED9\u51FA\u4E86\u6B63\u5206\uFF0C\u8BF7\u4EBA\u5DE5\u6838\u67E5");
   }
