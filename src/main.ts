@@ -29,6 +29,8 @@
     let lastSubmitAt = 0;
     const SUBMIT_COOLDOWN = 1500;
     const forcedNotified = new Set();
+    // 每个「平台 + 地址 + 模型」只做一次读图校验，避免每次批改都多花一次请求。
+    const visionVerified = new Set();
     let autoMode = false;
     let autoStopRequested = false;
     // 复核队列：从「下一条需复核」进入后，提交完自动标记并跳到下一条待复核的卷子。
@@ -222,6 +224,16 @@
       if (!service.endpoint.trim() || !service.model.trim()) return false;
       return testConnection(service, serviceLimiter);
     }
+    // 首次用某个模型批改前先做一次读图校验。文本模型在这一步就会被挡住，
+    // 既不会写出一条 0 分历史，也不会让连续批阅一路批下去。
+    async function ensureVisionSupport() {
+      const service = config.pipeline.vlm;
+      const key = `${service.platform}|${service.endpoint}|${service.model}`;
+      if (visionVerified.has(key)) return;
+      panel.setStage("校验图片读取能力", service.model);
+      await testConnection(service, limiter);
+      visionVerified.add(key);
+    }
     async function runGrade2() {
       if (busy) return false;
       if (!currentQuestion || !markingDoc) {
@@ -244,6 +256,7 @@
       panel.setBusy(true);
       panel.clearError();
       try {
+        await ensureVisionSupport();
         panel.setStage("\u7B49\u5F85\u4F5C\u7B54\u56FE\u7247\u7A33\u5B9A");
         let images = await gatherAnswerImages();
         if (images.length === 0) {

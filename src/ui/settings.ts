@@ -32,118 +32,327 @@
       this.bind();
     }
     markup() {
-      const field = (label, path, type = "text") => `
-      <div class="zygr-field"><label>${label}</label><input data-field="${path}" type="${type}"></div>`;
-      const area = (label, path, hint = "") => `
-      <div class="zygr-field"><label>${label}</label><textarea data-field="${path}" rows="6"></textarea>${hint ? `<span class="zygr-hint">${hint}</span>` : ""}</div>`;
-      const select = (label, path, options) => `
-      <div class="zygr-field"><label>${label}</label><select data-field="${path}">
-        ${options.map(([value, text]) => `<option value="${value}">${text}</option>`).join("")}
-      </select></div>`;
-      const platformSelect = (label, path) => `
-      <div class="zygr-field"><label>${label}</label><select data-field="${path}" data-platform-select></select></div>`;
-      return `<div class="zygr-overlay" hidden><div class="zygr-dialog zygr-wide">
-      <div class="zygr-dialog-head"><h2>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u8BBE\u7F6E</h2><button class="zygr-icon" data-act="close" aria-label="\u5173\u95ED">\xD7</button></div>
-      <div class="zygr-dialog-body">
-        <div class="zygr-tabs">
-          <button class="zygr-tab zygr-active" data-tab="context">\u6279\u6539\u4E0A\u4E0B\u6587</button>
-          <button class="zygr-tab" data-tab="api">\u63A5\u53E3\u4E0E\u94FE\u8DEF</button>
-          <button class="zygr-tab" data-tab="generator">\u8BC4\u5206\u6807\u51C6\u751F\u6210</button>
-          <button class="zygr-tab" data-tab="advanced">\u9AD8\u7EA7</button>
+      const fieldRow = (label, path, type = "text", extra = "") => `
+        <div class="zg-row">
+          <div class="zg-rowmain"><span class="zg-rowlabel">${label}</span></div>
+          <input class="zg-input zg-num" data-field="${path}" type="${type}" aria-label="${label}" ${extra}>
+        </div>`;
+      const area = (label, path, rows, placeholder, badge = "") => `
+        <div class="zg-field">
+          <label>${label}${badge}</label>
+          <textarea data-field="${path}" rows="${rows}" placeholder="${placeholder}"></textarea>
+        </div>`;
+      return `<div class="zygr-overlay" hidden>
+      <div class="zygr-dialog" role="dialog" aria-modal="true" aria-labelledby="zygr-settings-title">
+        <header class="zg-head">
+          <div>
+            <h2 id="zygr-settings-title">\u8BBE\u7F6E</h2>
+            <p>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u914D\u7F6E\u53EA\u4FDD\u5B58\u5728\u672C\u673A</p>
+          </div>
+          <button class="zp-iconbtn" data-act="close" aria-label="\u5173\u95ED">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </header>
+
+        <div class="zg-shell">
+          <nav class="zg-nav" aria-label="\u8BBE\u7F6E\u5206\u533A" role="tablist">
+            <button class="zg-navitem is-active" data-tab="context" role="tab" aria-selected="true">
+              <span class="zg-tile blue" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h9a3 3 0 013 3v13H8a3 3 0 01-3-3z"/><path d="M8 4v13a3 3 0 00-3 3"/></svg></span>
+              \u6279\u6539\u4E0A\u4E0B\u6587
+            </button>
+            <button class="zg-navitem" data-tab="api" role="tab" aria-selected="false">
+              <span class="zg-tile purple" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v4M15 3v4M7 7h10v3a5 5 0 01-10 0zM12 15v6"/></svg></span>
+              \u63A5\u53E3\u4E0E\u94FE\u8DEF
+            </button>
+            <button class="zg-navitem" data-tab="generator" role="tab" aria-selected="false">
+              <span class="zg-tile pink" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.7 4.4L18 9l-4.3 1.6L12 15l-1.7-4.4L6 9l4.3-1.6z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg></span>
+              \u8BC4\u5206\u6807\u51C6\u751F\u6210
+            </button>
+            <button class="zg-navitem" data-tab="advanced" role="tab" aria-selected="false">
+              <span class="zg-tile gray" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h14M5 12h14M5 18h14"/><circle cx="9" cy="6" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="8" cy="18" r="2" fill="currentColor" stroke="none"/></svg></span>
+              \u9AD8\u7EA7
+            </button>
+            <div class="zg-navfoot">\u6240\u6709\u914D\u7F6E\u4E0E\u8BB0\u5F55\u53EA\u5B58\u5728\u6D4F\u89C8\u5668\u672C\u5730\uFF0C\u4E0D\u4E0A\u4F20\u670D\u52A1\u5668\u3002\u6E05\u7A7A\u6570\u636E\u540E\u9700\u91CD\u65B0\u586B\u5199\u3002</div>
+          </nav>
+
+          <div class="zg-pane">
+            <div class="zg-page is-active" data-page="context">
+              <div class="zg-pagehead">
+                <h2>\u6279\u6539\u4E0A\u4E0B\u6587</h2>
+                <p>\u9898\u53F7\u3001\u6EE1\u5206\u4E0E\u5C0F\u9898\u7531\u9605\u5377\u9875\u8BFB\u53D6\uFF1B\u8FD9\u91CC\u7684\u53C2\u8003\u7B54\u6848\u4E0E\u8BC4\u5206\u6807\u51C6\u4F1A\u968F\u6BCF\u6B21\u6279\u6539\u53D1\u9001\u7ED9\u6A21\u578B\u3002</p>
+              </div>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u9898\u76EE\u4E0E\u9605\u5377\u4F9D\u636E</h3>
+                <div class="zg-group">
+                  ${area("\u9898\u76EE\u5185\u5BB9", "context.question", 3, "\u7559\u7A7A\u65F6\u4F7F\u7528\u9875\u9762\u9898\u53F7\uFF0C\u586B\u5199\u540E\u80FD\u63D0\u9AD8\u5224\u65AD\u7CBE\u5EA6", '<span class="zg-opt">\u53EF\u9009</span>')}
+                  ${area("\u53C2\u8003\u7B54\u6848", "context.answer", 5, "", '<span class="zg-req">\u5FC5\u586B</span>')}
+                  ${area("\u8BC4\u5206\u6807\u51C6", "context.rubric", 6, "", '<span class="zg-req">\u5FC5\u586B</span>')}
+                </div>
+                <p class="zg-note">\u6EE1\u5206\u4E0D\u5FC5\u624B\u5DE5\u7EF4\u62A4\uFF1A\u6279\u6539\u524D\u4F1A\u8BFB\u9875\u9762\uFF0C\u4E0D\u4E00\u81F4\u65F6\u81EA\u52A8\u5199\u56DE\u5E76\u63D0\u793A\u4E00\u884C\uFF0C\u4E0D\u518D\u963B\u65AD\u6279\u6539\u3002</p>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u57FA\u672C\u53C2\u6570</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u672C\u65B9\u6848\u6EE1\u5206</span><span class="zg-rowdesc">\u4E0E\u9875\u9762\u4E0D\u4E00\u81F4\u65F6\u81EA\u52A8\u540C\u6B65</span></div>
+                    <input class="zg-input zg-num" data-field="context.maxScore" type="number" aria-label="\u672C\u65B9\u6848\u6EE1\u5206">
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u5B66\u79D1</span><span class="zg-rowdesc">\u7528\u4E8E\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\u4E0E\u5224\u5206\u53E3\u5F84</span></div>
+                    <span class="zg-select">
+                      <select data-field="context.subject" aria-label="\u5B66\u79D1">
+                        <option value="">\u4E0D\u6307\u5B9A\uFF08\u6309\u624B\u52A8\u53C2\u6570\uFF09</option>
+                        ${Object.keys(RUBRIC_SUBJECTS).map((name) => `<option value="${name}">${name}</option>`).join("")}
+                      </select>
+                    </span>
+                  </div>
+                </div>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u6807\u51C6\u5E93</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u672C\u9898\u6807\u51C6</span><span class="zg-rowdesc">\u6309\u300C\u8BD5\u5377 + \u9898\u53F7\u300D\u5206\u69FD\u4FDD\u5B58</span></div>
+                    <div class="zg-rowactions">
+                      <button class="zg-btn small" data-act="rubric-save">\u4FDD\u5B58</button>
+                      <button class="zg-btn small ghost" data-act="rubric-load">\u8F7D\u5165</button>
+                      <button class="zg-btn small ghost" data-act="rubric-clear">\u6E05\u7A7A</button>
+                    </div>
+                  </div>
+                </div>
+                <p class="zg-note">\u5207\u5230\u5176\u5B83\u9898\u53F7\u65F6\u4F1A\u81EA\u52A8\u5B58\u4E0B\u5F53\u524D\u8FD9\u4EFD\u3001\u5E76\u8F7D\u5165\u90A3\u9053\u9898\u5DF2\u5B58\u7684\u6807\u51C6\uFF1B\u6CA1\u5B58\u8FC7\u5219\u6E05\u7A7A\u7B54\u6848\u4E0E\u6807\u51C6\uFF0C\u907F\u514D\u62FF\u9519\u7B54\u6848\u3002</p>
+              </section>
+            </div>
+
+            <div class="zg-page" data-page="api" hidden>
+              <div class="zg-pagehead">
+                <h2>\u63A5\u53E3\u4E0E\u94FE\u8DEF</h2>
+                <p>\u8BC4\u5206\u53EA\u8D70\u591A\u6A21\u6001\u76F4\u8BC4\uFF1A\u628A\u4F5C\u7B54\u56FE\u76F4\u63A5\u4EA4\u7ED9\u89C6\u89C9\u6A21\u578B\uFF0C\u4E0D\u505A OCR \u4E2D\u8F6C\u3002</p>
+              </div>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u5E73\u53F0\u9884\u8BBE</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u5E73\u53F0</span><span class="zg-rowdesc">\u5207\u6362\u4F1A\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u4F4F\u7684 Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F</span></div>
+                    <span class="zg-select wide"><select data-field="pipeline.vlm.platform" data-platform-select aria-label="\u5E73\u53F0\u9884\u8BBE"></select></span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u63A5\u53E3\u5730\u5740</span></div>
+                    <input class="zg-input" data-field="pipeline.vlm.endpoint" style="max-width:340px" aria-label="\u63A5\u53E3\u5730\u5740">
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">API Key</span></div>
+                    <span class="zg-inputwrap">
+                      <input class="zg-input" data-field="pipeline.vlm.apiKey" type="password" aria-label="API Key">
+                      <button data-act="toggle-key" aria-label="\u663E\u793A\u6216\u9690\u85CF API Key">\u663E\u793A</button>
+                    </span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u6A21\u578B</span><span class="zg-rowdesc">\u5FC5\u987B\u652F\u6301\u56FE\u7247\u8F93\u5165</span></div>
+                    <input class="zg-input" data-field="pipeline.vlm.model" style="max-width:200px" aria-label="\u6A21\u578B\u540D\u79F0">
+                  </div>
+                  <div class="zg-row" data-model-options hidden>
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u6A21\u578B\u5217\u8868</span><span class="zg-rowdesc">\u9009\u62E9\u4E00\u4E2A\u586B\u5165\u4E0A\u65B9\u6A21\u578B</span></div>
+                    <span class="zg-select"><select data-field-model-picker aria-label="\u9009\u62E9\u6A21\u578B"></select></span>
+                    <button class="zg-btn small" data-act="apply-model">\u4F7F\u7528</button>
+                  </div>
+                </div>
+                <div class="zg-inline" style="margin-top:8px">
+                  <button class="zg-btn small" data-act="fetch-models">\u83B7\u53D6\u6A21\u578B\u5217\u8868</button>
+                  <span class="zg-status" data-status="models"></span>
+                  <button class="zg-btn small" data-test="vlm">\u6D4B\u8BD5\u591A\u6A21\u6001</button>
+                  <span class="zg-status" data-status="vlm"></span>
+                </div>
+                <p class="zg-note">\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u5217\u8868\u65F6\u53EA\u63D0\u793A\u624B\u52A8\u586B\u5199\uFF0C\u4E0D\u4F1A\u62A5\u9519\u4E2D\u65AD\u3002</p>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u601D\u8003\u6A21\u5F0F</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u601D\u8003\u7A0B\u5EA6</span><span class="zg-rowdesc">\u9ED8\u8BA4\u5173\u95ED\uFF0C\u957F\u94FE\u63A8\u7406\u6A21\u578B\u53EF\u80FD\u9700\u6570\u5341\u79D2</span></div>
+                    <div class="zg-seg" data-seg="thinking" role="group" aria-label="\u601D\u8003\u6A21\u5F0F">
+                      <button data-value="off" aria-pressed="true" title="${thinkingLevelLabel("off")}">${thinkingLevelLabel("off")}</button>
+                      <button data-value="auto" aria-pressed="false" title="${thinkingLevelLabel("auto")}">${thinkingLevelLabel("auto").replace(/\uFF08.*$/, "")}</button>
+                    </div>
+                    <select data-field="pipeline.thinkingMode" hidden aria-hidden="true" tabindex="-1">
+                      <option value="off">${thinkingLevelLabel("off")}</option>
+                      <option value="auto">${thinkingLevelLabel("auto")}</option>
+                    </select>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u751F\u6548\u68C0\u6D4B</span><span class="zg-rowdesc">GLM-5.3 \u7B49\u6A21\u578B\u4F1A\u5F3A\u5236\u601D\u8003\uFF0C\u9009\u5173\u95ED\u4E5F\u6309\u6A21\u578B\u9ED8\u8BA4\u8FD0\u884C</span></div>
+                    <button class="zg-btn small" data-act="test-thinking">\u6D4B\u8BD5</button>
+                    <span class="zg-status" data-status="thinking"></span>
+                  </div>
+                </div>
+                <p class="zg-note">\u80FD\u4E0D\u80FD\u5173\u95ED\u53D6\u51B3\u4E8E\u6A21\u578B\u800C\u4E0D\u662F\u5E73\u53F0\uFF1B\u5982\u679C\u8FD4\u56DE\u201C\u4E0D\u652F\u6301\u5173\u95ED\u601D\u8003\u201D\uFF0C\u7A0B\u5E8F\u4F1A\u81EA\u52A8\u8BC6\u522B\u5E76\u8BB0\u4F4F\uFF0C\u4E0B\u6B21\u4E0D\u518D\u91CD\u590D\u8BD5\u9519\u3002</p>
+              </section>
+            </div>
+
+            <div class="zg-page" data-page="generator" hidden>
+              <div class="zg-pagehead">
+                <h2>\u8BC4\u5206\u6807\u51C6\u751F\u6210</h2>
+                <p>\u9009\u5B66\u79D1\u4E0E\u9898\u578B\uFF0C\u586B\u5199\u9898\u76EE\u4E0E\u5B66\u6821\u6807\u51C6\u7B54\u6848\uFF0C\u8BA9\u6A21\u578B\u751F\u6210\u7ED3\u6784\u5316\u8BC4\u5206\u6807\u51C6\u3002\u4F1A\u6D88\u8D39\u4E00\u6B21\u771F\u5B9E\u8BF7\u6C42\u3002</p>
+              </div>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u751F\u6210\u6761\u4EF6</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u5B66\u79D1</span></div>
+                    <span class="zg-select"><select data-gen="subject" aria-label="\u5B66\u79D1">${Object.keys(RUBRIC_SUBJECTS).map((name) => `<option value="${name}">${name}</option>`).join("")}</select></span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u9898\u578B</span></div>
+                    <span class="zg-select"><select data-gen="type" aria-label="\u9898\u578B"></select></span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u6EE1\u5206</span><span class="zg-rowdesc">\u7559\u7A7A\u5219\u7531 AI \u5EFA\u8BAE</span></div>
+                    <input class="zg-input zg-num" type="number" data-gen="maxScore" min="0" step="0.5" aria-label="\u6EE1\u5206">
+                  </div>
+                </div>
+                <p class="zg-note" data-gen="rule-hint"></p>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u9898\u76EE\u4E0E\u6807\u51C6\u7B54\u6848</h3>
+                <div class="zg-group">
+                  <div class="zg-field">
+                    <label>\u9898\u76EE <span class="zg-opt">\u4F5C\u6587\u7C7B\u5FC5\u586B</span></label>
+                    <textarea data-gen="question" rows="3" placeholder="\u53EF\u7C98\u8D34\u9898\u76EE\u6587\u5B57\uFF0C\u6216\u7559\u7A7A\u4EC5\u7528\u56FE\u7247"></textarea>
+                  </div>
+                  <div class="zg-field">
+                    <label>\u5B66\u6821\u6807\u51C6\u7B54\u6848</label>
+                    <textarea data-gen="answer" rows="4" placeholder="\u5316\u5B66\u5F0F\u3001\u516C\u5F0F\u7B26\u53F7\u53EF\u76F4\u63A5\u7C98\u8D34"></textarea>
+                  </div>
+                  <div class="zg-field">
+                    <label>\u6807\u51C6\u7B54\u6848\u56FE\u7247 <span class="zg-opt">\u53EF\u591A\u9009</span></label>
+                    <label class="zg-drop">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M8 8l4-4 4 4M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+                      <span>\u70B9\u51FB\u9009\u62E9\u56FE\u7247</span>
+                      <small>\u652F\u6301\u591A\u5F20\uFF0C\u6309\u987A\u5E8F\u53D1\u9001\u7ED9\u6A21\u578B</small>
+                      <input type="file" data-gen="images" accept="image/*" multiple>
+                    </label>
+                    <p class="zg-note" data-gen-thumbs></p>
+                  </div>
+                </div>
+                <div class="zg-inline" style="margin-top:8px">
+                  <button class="zg-btn primary" data-act="gen-run">\u751F\u6210\u8BC4\u5206\u6807\u51C6</button>
+                  <span class="zg-status" data-status="gen"></span>
+                </div>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u751F\u6210\u7ED3\u679C</h3>
+                <div class="zg-group">
+                  <div class="zg-field">
+                    <label>\u53EF\u76F4\u63A5\u7F16\u8F91\uFF0C\u786E\u8BA4\u65E0\u8BEF\u540E\u4E00\u952E\u586B\u5165</label>
+                    <textarea data-gen="result" rows="10" placeholder="\u751F\u6210\u7684\u6807\u51C6\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC"></textarea>
+                  </div>
+                </div>
+                <div class="zg-inline" style="margin-top:8px">
+                  <button class="zg-btn" data-act="gen-apply">\u4E00\u952E\u586B\u5165\u6279\u6539\u4E0A\u4E0B\u6587</button>
+                  <button class="zg-btn ghost" data-act="gen-copy">\u590D\u5236</button>
+                  <button class="zg-btn ghost" data-act="gen-clear">\u6E05\u7A7A</button>
+                </div>
+              </section>
+            </div>
+
+            <div class="zg-page" data-page="advanced" hidden>
+              <div class="zg-pagehead">
+                <h2>\u9AD8\u7EA7</h2>
+                <p>\u56FE\u7247\u3001\u7F13\u5B58\u3001\u9650\u6D41\u4E0E\u7528\u91CF\u3002\u6539\u9519\u8FD9\u91CC\u4E0D\u4F1A\u5F04\u574F\u6570\u636E\uFF0C\u4F46\u53EF\u80FD\u8BA9\u6279\u6539\u53D8\u6162\u6216\u53D8\u8D35\u3002</p>
+              </div>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u56FE\u7247\u4E0E\u63D0\u793A\u8BCD</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u56FE\u7247\u7CBE\u5EA6</span><span class="zg-rowdesc">\u624B\u5199\u5185\u5BB9\u5EFA\u8BAE\u9AD8\u7CBE\u5EA6</span></div>
+                    <div class="zg-seg" data-seg="detail" role="group" aria-label="\u56FE\u7247\u7CBE\u5EA6">
+                      <button data-value="high" aria-pressed="true">\u9AD8</button>
+                      <button data-value="auto" aria-pressed="false">\u81EA\u52A8</button>
+                      <button data-value="low" aria-pressed="false">\u4F4E</button>
+                    </div>
+                    <select data-field="image.detail" hidden aria-hidden="true" tabindex="-1">
+                      <option value="high">\u9AD8\u7CBE\u5EA6</option>
+                      <option value="auto">\u81EA\u52A8</option>
+                      <option value="low">\u4F4E\u7CBE\u5EA6</option>
+                    </select>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u56FE\u7247\u957F\u8FB9\u4E0A\u9650</span><span class="zg-rowdesc">\u53EA\u7B49\u6BD4\u7F29\u5C0F\uFF0C\u7EDD\u4E0D\u653E\u5927</span></div>
+                    <input class="zg-input zg-num" data-field="image.maxEdge" type="number" aria-label="\u56FE\u7247\u957F\u8FB9\u4E0A\u9650">
+                    <span class="zg-rowvalue">px</span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">JPEG \u8D28\u91CF</span><span class="zg-rowdesc">\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF0C\u53EA\u5F71\u54CD\u4F53\u79EF</span></div>
+                    <input class="zg-input zg-num" data-field="image.quality" type="number" step="0.01" aria-label="JPEG \u8D28\u91CF">
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u5386\u53F2\u4FDD\u7559\u6761\u6570</span></div>
+                    <input class="zg-input zg-num" data-field="historyLimit" type="number" aria-label="\u5386\u53F2\u4FDD\u7559\u6761\u6570">
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u7F13\u5B58\u6709\u6548\u671F</span><span class="zg-rowdesc">\u8D85\u671F\u540E\u540C\u9898\u540C\u56FE\u9700\u91CD\u65B0\u8BF7\u6C42</span></div>
+                    <input class="zg-input zg-num" data-field="cacheTtlDays" type="number" aria-label="\u7F13\u5B58\u6709\u6548\u671F">
+                    <span class="zg-rowvalue">\u5929</span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u7F13\u5B58\u6761\u6570\u4E0A\u9650</span><span class="zg-rowdesc">\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000</span></div>
+                    <input class="zg-input zg-num" data-field="cacheMaxEntries" type="number" aria-label="\u7F13\u5B58\u6761\u6570\u4E0A\u9650">
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565</span><span class="zg-rowdesc">\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px</span></div>
+                    <label class="zg-switch">
+                      <input type="checkbox" data-field="image.autoBySubject" aria-label="\u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565">
+                      <span class="zg-switch-track" aria-hidden="true"></span>
+                    </label>
+                  </div>
+                </div>
+                <p class="zg-note">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u8F93\u51FA\u6863\u4F4D\u5DF2\u79FB\u5230\u4E3B\u9762\u677F\u5E95\u90E8\u3002</p>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u7D2F\u8BA1\u7528\u91CF</h3>
+                <div class="zg-group"><p class="zg-statsline" data-stats>\u7D2F\u8BA1\u7528\u91CF\uFF1A\u6682\u65E0</p></div>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u9650\u901F\u4E0E\u8D85\u65F6</h3>
+                <div class="zg-group">
+                  ${fieldRow("\u5E76\u53D1\u4E0A\u9650", "pipeline.maxConcurrent", "number")}
+                  ${fieldRow("RPM \u9884\u7B97", "pipeline.maxRpm", "number")}
+                  ${fieldRow("TPM \u9884\u7B97", "pipeline.maxTpm", "number")}
+                  ${fieldRow("\u8BF7\u6C42\u8D85\u65F6", "pipeline.timeoutMs", "number")}
+                </div>
+                <p class="zg-note">\u6240\u6709\u914D\u7F6E\u4EC5\u4FDD\u5B58\u5728\u5F53\u524D\u6CB9\u7334\u73AF\u5883\u4E2D\uFF0C\u4E0D\u4F1A\u8BFB\u53D6\u65E7\u63D2\u4EF6\u914D\u7F6E\uFF1B\u6E05\u7A7A\u6570\u636E\u540E\u9700\u91CD\u65B0\u586B\u5199\u3002</p>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u6570\u636E</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u91CD\u7F6E\u4E3A\u9ED8\u8BA4\u914D\u7F6E</span><span class="zg-rowdesc">\u542B\u63A5\u53E3\u5730\u5740\u4E0E\u56FE\u7247\u53C2\u6570\uFF0CAPI Key \u4E5F\u4F1A\u6E05\u7A7A</span></div>
+                    <button class="zg-btn small danger" data-act="reset">\u91CD\u7F6E</button>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u6E05\u7A7A\u5168\u90E8\u6570\u636E</span><span class="zg-rowdesc">\u5386\u53F2\u3001\u7F13\u5B58\u3001\u6807\u51C6\u5E93\u4E0E\u914D\u7F6E\u4E00\u5E76\u5220\u9664</span></div>
+                    <button class="zg-btn small danger" data-act="clear">\u6E05\u7A7A</button>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
         </div>
 
-        <div class="zygr-section" data-page="context">
-          <h3>\u9898\u76EE\u4E0E\u8BC4\u5377\u4F9D\u636E</h3>
-          <p class="zygr-hint">\u9898\u53F7\u3001\u6EE1\u5206\u4E0E\u5C0F\u9898\u7531\u667A\u5B66\u7F51\u9605\u5377\u9875\u8BFB\u53D6\uFF1B\u8FD9\u91CC\u586B\u5199\u7684\u53C2\u8003\u7B54\u6848\u4E0E\u8BC4\u5206\u6807\u51C6\u4F1A\u968F\u6BCF\u6B21\u6279\u6539\u53D1\u9001\u7ED9\u6A21\u578B\u3002\u9898\u76EE\u5185\u5BB9\u53EF\u7559\u7A7A\uFF0C\u7559\u7A7A\u65F6\u4F7F\u7528\u9875\u9762\u9898\u53F7\u3002</p>
-          ${area("\u9898\u76EE\u5185\u5BB9\uFF08\u53EF\u9009\uFF09", "context.question")}
-          ${area("\u53C2\u8003\u7B54\u6848", "context.answer", "\u5FC5\u586B")}
-          ${area("\u8BC4\u5206\u6807\u51C6", "context.rubric", "\u5FC5\u586B")}
-          <div class="zygr-grid">
-            ${field("\u672C\u65B9\u6848\u6EE1\u5206", "context.maxScore", "number")}
-            ${select("\u5B66\u79D1\uFF08\u7528\u4E8E\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF09", "context.subject", [["", "\u4E0D\u6307\u5B9A\uFF08\u6309\u624B\u52A8\u53C2\u6570\uFF09"], ...Object.keys(RUBRIC_SUBJECTS).map((name) => [name, name])])}
+        <footer class="zg-foot">
+          <div class="zg-foot-left">
+            <button class="zg-btn small ghost" data-act="export">\u5BFC\u51FA\u914D\u7F6E</button>
+            <button class="zg-btn small ghost" data-act="import">\u5BFC\u5165\u914D\u7F6E</button>
           </div>
-          <h3>\u6807\u51C6\u5E93\uFF08\u6309\u9898\u53F7\u5206\u522B\u4FDD\u5B58\uFF09</h3>
-          <div class="zygr-row">
-            <button class="zygr-btn zygr-ghost" data-act="rubric-save">\u4FDD\u5B58\u672C\u9898\u6807\u51C6</button>
-            <button class="zygr-btn zygr-ghost" data-act="rubric-load">\u8F7D\u5165\u672C\u9898\u6807\u51C6</button>
-            <button class="zygr-btn zygr-ghost" data-act="rubric-clear">\u6E05\u7A7A\u672C\u9898\u6807\u51C6</button>
+          <div class="zg-foot-right">
+            <button class="zg-btn" data-act="cancel">\u5173\u95ED</button>
+            <button class="zg-btn primary" data-act="save">\u4FDD\u5B58\u914D\u7F6E</button>
           </div>
-          <p class="zygr-hint">\u5207\u5230\u5176\u5B83\u9898\u53F7\u65F6\u4F1A\u81EA\u52A8\u5B58\u4E0B\u5F53\u524D\u8FD9\u4EFD\u3001\u5E76\u8F7D\u5165\u90A3\u9053\u9898\u5DF2\u5B58\u7684\u6807\u51C6\uFF1B\u4E0A\u9762\u4E09\u4E2A\u6309\u94AE\u7528\u4E8E\u624B\u52A8\u5B58\u53D6\u3002</p>
-        </div>
-
-        <div class="zygr-section" data-page="api" hidden>
-          <h3>\u5E73\u53F0\u9884\u8BBE</h3>
-          <p class="zygr-hint">\u9009\u62E9\u5E73\u53F0\u4F1A\u586B\u5165\u63A5\u53E3\u5730\u5740\uFF0C\u5E76\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F\u3002\u5176\u4ED6\u5E73\u53F0\u8BF7\u9009\u300C\u81EA\u5B9A\u4E49\uFF08\u624B\u52A8\u586B\u5199\uFF09\u300D\u3002</p>
-
-          <h3>\u591A\u6A21\u6001\u76F4\u8BC4</h3>
-          <p class="zygr-hint">\u8BC4\u5206\u53EA\u4F7F\u7528\u591A\u6A21\u6001\u89C6\u89C9\u6A21\u578B\uFF1A\u76F4\u63A5\u8BFB\u53D6\u4F5C\u7B54\u56FE\u7247\u5E76\u6309\u8BC4\u5206\u6807\u51C6\u8F93\u51FA JSON\u3002\u6A21\u578B\u5FC5\u987B\u652F\u6301\u56FE\u7247\u8F93\u516E\u3002</p>
-          ${select("\u601D\u8003\u6A21\u5F0F", "pipeline.thinkingMode", [["off", thinkingLevelLabel("off")], ["auto", thinkingLevelLabel("auto")]])}
-          <div class="zygr-row"><button class="zygr-btn zygr-ghost" data-act="test-thinking">\u6D4B\u8BD5\u5F53\u524D\u601D\u8003\u6A21\u5F0F\u662F\u5426\u751F\u6548</button><span class="zygr-test-status" data-status="thinking"></span></div>
-          <p class="zygr-hint">\u9ED8\u8BA4\u5173\u95ED\u601D\u8003\uFF0C\u754C\u9762\u53EA\u7ED9\u4E24\u6863\uFF1A\u300C\u5173\u95ED\u601D\u8003\u300D\u4E0E\u300C\u6A21\u578B\u9ED8\u8BA4\u300D\uFF08\u4E0D\u4F20\u5F3A\u5EA6\u53C2\u6570\uFF09\u3002\u80FD\u4E0D\u80FD\u5173\u95ED\u53D6\u51B3\u4E8E\u6A21\u578B\u800C\u4E0D\u662F\u5E73\u53F0\uFF1A\u5DF2\u77E5 GLM-5.3\u3001GLM-5.3-FLASH \u5F3A\u5236\u601D\u8003\uFF0C\u9009\u5173\u95ED\u4E5F\u4E0D\u4F1A\u62A5\u9519\uFF0C\u4F1A\u76F4\u63A5\u6309\u6A21\u578B\u9ED8\u8BA4\u8FD0\u884C\uFF1B\u5176\u5B83\u6A21\u578B\u5982\u679C\u8FD4\u56DE\u201C\u4E0D\u652F\u6301\u5173\u95ED\u601D\u8003\u201D\uFF0C\u7A0B\u5E8F\u4F1A\u81EA\u52A8\u8BC6\u522B\u5E76\u8BB0\u4F4F\uFF0C\u4E0B\u6B21\u4E0D\u518D\u91CD\u590D\u8BD5\u9519\u3002</p>
-
-          ${platformSelect("\u5E73\u53F0\u9884\u8BBE", "pipeline.vlm.platform")}
-          <h3>\u591A\u6A21\u6001\u670D\u52A1</h3>
-          <div class="zygr-grid">
-            ${field("\u63A5\u53E3\u5730\u5740", "pipeline.vlm.endpoint")}${field("API Key", "pipeline.vlm.apiKey", "password")}
-            ${field("\u6A21\u578B", "pipeline.vlm.model")}
-          </div>
-          <p class="zygr-hint">\u586B OpenAI \u517C\u5BB9 Chat Completions \u5730\u5740\u4E0E\u89C6\u89C9\u6A21\u578B\u540D\u3002</p>
-          <div class="zygr-row"><button class="zygr-btn" data-act="fetch-models">\u83B7\u53D6\u6A21\u578B\u5217\u8868</button><span class="zygr-test-status" data-status="models"></span></div>
-          <div data-model-options hidden><select data-field-model-picker aria-label="\u9009\u62E9\u6A21\u578B"></select><button class="zygr-btn" data-act="apply-model">\u4F7F\u7528\u6240\u9009\u6A21\u578B</button></div>
-          <div class="zygr-row"><button class="zygr-btn" data-test="vlm">\u6D4B\u8BD5\u591A\u6A21\u6001</button><span class="zygr-test-status" data-status="vlm"></span></div>
-        </div>
-
-        <div class="zygr-section" data-page="generator" hidden>
-          <h3>\u8BC4\u5206\u6807\u51C6\u751F\u6210\u5668</h3>
-          <p class="zygr-hint">\u9009\u5B66\u79D1\u4E0E\u9898\u578B\uFF0C\u586B\u5199\u9898\u76EE\u4E0E\u5B66\u6821\u6807\u51C6\u7B54\u6848\uFF08\u6587\u5B57\u6216\u56FE\u7247\u4EFB\u9009\uFF09\uFF0C\u8BA9 AI \u751F\u6210\u7ED3\u6784\u5316\u8BC4\u5206\u6807\u51C6\u3002\u751F\u6210\u540E\u53EF\u76F4\u63A5\u7F16\u8F91\uFF0C\u786E\u8BA4\u65E0\u8BEF\u540E\u4E00\u952E\u586B\u5165\u300C\u6279\u6539\u4E0A\u4E0B\u6587 \xB7 \u8BC4\u5206\u6807\u51C6\u300D\u3002\u4F7F\u7528\u4E0E\u6279\u6539\u76F8\u540C\u7684\u591A\u6A21\u6001\u670D\u52A1\uFF0C\u4F1A\u6D88\u8D39\u4E00\u6B21\u771F\u5B9E\u8BF7\u6C42\u3002</p>
-          <div class="zygr-grid">
-            <div class="zygr-field"><label>\u5B66\u79D1</label><select data-gen="subject">${Object.keys(RUBRIC_SUBJECTS).map((name) => `<option value="${name}">${name}</option>`).join("")}</select></div>
-            <div class="zygr-field"><label>\u9898\u578B</label><select data-gen="type"></select></div>
-            <p class="zygr-hint" data-gen="rule-hint"></p>
-            <div class="zygr-field"><label>\u6EE1\u5206\uFF08\u53EF\u9009\uFF09</label><input type="number" data-gen="maxScore" min="0" step="0.5" placeholder="\u7559\u7A7A\u5219\u7531 AI \u5EFA\u8BAE"></div>
-          </div>
-          <div class="zygr-field" data-gen-field><label>\u9898\u76EE\uFF08\u4F5C\u6587\u7C7B\u5FC5\u586B\uFF0C\u5176\u4ED6\u53EF\u9009\uFF09</label><textarea data-gen="question" rows="3" placeholder="\u53EF\u7C98\u8D34\u9898\u76EE\u6587\u5B57\uFF0C\u6216\u7559\u7A7A\u4EC5\u7528\u56FE\u7247"></textarea></div>
-          <div class="zygr-field" data-gen-field><label>\u5B66\u6821\u6807\u51C6\u7B54\u6848\uFF08\u6587\u5B57\uFF09</label><textarea data-gen="answer" rows="4" placeholder="\u53EF\u7C98\u8D34\u6807\u51C6\u7B54\u6848\u6587\u5B57\uFF0C\u5316\u5B66\u5F0F\u3001\u516C\u5F0F\u7B26\u53F7\u53EF\u76F4\u63A5\u7C98\u8D34"></textarea></div>
-          <div class="zygr-field" data-gen-field><label>\u6807\u51C6\u7B54\u6848\u56FE\u7247\uFF08\u53EF\u591A\u9009\uFF09</label><input type="file" data-gen="images" accept="image/*" multiple><div data-gen-thumbs class="zygr-row"></div></div>
-          <div class="zygr-row"><button class="zygr-btn zygr-primary" data-act="gen-run">\u751F\u6210\u8BC4\u5206\u6807\u51C6</button><span class="zygr-test-status" data-status="gen"></span></div>
-          <div class="zygr-field" data-gen-field><label>\u751F\u6210\u7ED3\u679C\uFF08\u53EF\u76F4\u63A5\u7F16\u8F91\uFF09</label><textarea data-gen="result" rows="14" placeholder="\u751F\u6210\u540E\u5728\u6B64\u4FEE\u6539\uFF0C\u786E\u8BA4\u65E0\u8BEF\u540E\u70B9\u300C\u4E00\u952E\u586B\u5165\u300D"></textarea></div>
-          <div class="zygr-row"><button class="zygr-btn" data-act="gen-apply">\u4E00\u952E\u586B\u5165\u9898\u76EE\u3001\u53C2\u8003\u7B54\u6848\u3001\u8BC4\u5206\u6807\u51C6</button><button class="zygr-btn zygr-ghost" data-act="gen-copy">\u590D\u5236\u7ED3\u679C</button><button class="zygr-btn zygr-ghost" data-act="gen-clear">\u6E05\u7A7A</button></div>
-        </div>
-
-        <div class="zygr-section" data-page="advanced" hidden>
-          <h3>\u56FE\u7247\u4E0E\u63D0\u793A\u8BCD</h3>
-          <div class="zygr-grid">
-            ${select("\u56FE\u7247\u7CBE\u5EA6", "image.detail", [["high", "\u9AD8\u7CBE\u5EA6\uFF08\u63A8\u8350\uFF0C\u624B\u5199\u5FC5\u9009\uFF09"], ["auto", "\u81EA\u52A8\uFF08\u7531\u5E73\u53F0\u51B3\u5B9A\uFF09"], ["low", "\u4F4E\u7CBE\u5EA6\uFF08\u4EC5\u9009\u62E9/\u586B\u7A7A\u5224\u5BF9\u9519\uFF09"]])}
-            ${field("\u56FE\u7247\u957F\u8FB9\u4E0A\u9650\uFF08px\uFF09", "image.maxEdge", "number")}
-            ${field("JPEG \u8D28\u91CF\uFF080.5-1\uFF09", "image.quality", "number")}
-            ${field("\u5386\u53F2\u4FDD\u7559\u6761\u6570", "historyLimit", "number")}
-            ${field("\u7F13\u5B58\u6709\u6548\u671F\uFF08\u5929\uFF09", "cacheTtlDays", "number")}
-            ${field("\u7F13\u5B58\u6761\u6570\u4E0A\u9650", "cacheMaxEntries", "number")}
-          </div>
-          <label class="zygr-row"><input type="checkbox" data-field="image.autoBySubject"> \u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF08\u5DF2\u9009\u5B66\u79D1\u65F6\u751F\u6548\uFF09</label>
-          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u8F93\u51FA\u6863\u4F4D\u5DF2\u79FB\u5230\u4E3B\u9762\u677F\u5E95\u90E8\uFF0C\u76F4\u63A5\u5F71\u54CD\u8F93\u51FA token\uFF1A\u7B80\u7565\u6700\u7701\u3001\u6807\u51C6\u9002\u4E2D\u3001\u8BE6\u7EC6\u6700\u8D35\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\u3002\u56FE\u7247\u53EA\u6309\u957F\u8FB9\u7B49\u6BD4\u7F29\u5C0F\uFF0C\u7EDD\u4E0D\u653E\u5927\uFF1A\u539F\u56FE\u672C\u6765\u5C31\u5C0F\u4E8E\u8BE5\u957F\u8FB9\u65F6\u4FDD\u6301\u539F\u59CB\u50CF\u7D20\uFF0C\u4EA4\u7ED9\u670D\u52A1\u5546\u5F52\u4E00\u5316\u4E5F\u4E0D\u4F1A\u4E22\u4FE1\u606F\u3002</p>
-          <p class="zygr-hint" data-stats>\u7D2F\u8BA1\u7528\u91CF\uFF1A\u6682\u65E0</p>
-          <h3>\u9650\u901F\u4E0E\u8D85\u65F6</h3>
-          <div class="zygr-grid">
-            ${field("\u5E76\u53D1\u4E0A\u9650", "pipeline.maxConcurrent", "number")}
-            ${field("RPM \u9884\u7B97", "pipeline.maxRpm", "number")}
-            ${field("TPM \u9884\u7B97", "pipeline.maxTpm", "number")}
-            ${field("\u8BF7\u6C42\u8D85\u65F6\uFF08\u6BEB\u79D2\uFF09", "pipeline.timeoutMs", "number")}
-          </div>
-          <p class="zygr-hint">\u6240\u6709\u914D\u7F6E\u4EC5\u4FDD\u5B58\u5728\u5F53\u524D\u6CB9\u7334\u73AF\u5883\u4E2D\uFF0C\u4E0D\u4F1A\u8BFB\u53D6\u65E7\u63D2\u4EF6\u914D\u7F6E\uFF1B\u6E05\u7A7A\u6570\u636E\u540E\u9700\u91CD\u65B0\u586B\u5199\u3002</p>
-        </div>
+        </footer>
+        <input type="file" data-config-file accept="application/json,.json" hidden>
+        <div class="zygr-toast" data-toast hidden></div>
       </div>
-      <div class="zygr-dialog-foot">
-        <button class="zygr-btn zygr-ghost" data-act="export">\u5BFC\u51FA\u914D\u7F6E</button>
-        <button class="zygr-btn zygr-ghost" data-act="import">\u5BFC\u5165\u914D\u7F6E</button>
-        <button class="zygr-btn zygr-ghost" data-act="reset">\u91CD\u7F6E\u9ED8\u8BA4</button>
-        <button class="zygr-btn zygr-ghost" data-act="clear">\u6E05\u7A7A\u6570\u636E</button>
-        <button class="zygr-btn" data-act="cancel">\u5173\u95ED</button>
-        <button class="zygr-btn zygr-primary" data-act="save">\u4FDD\u5B58\u914D\u7F6E</button>
-      </div>
-      <input type="file" data-config-file accept="application/json,.json" hidden>
-      <div class="zygr-toast" data-toast hidden></div>
-    </div></div>`;
+    </div>`;
     }
     q(selector) {
       const element = this.shadow.querySelector(selector);
@@ -155,10 +364,31 @@
         const target = event.target;
         const tab = target.closest("[data-tab]");
         if (tab) {
-          this.shadow.querySelectorAll("[data-tab]").forEach((item) => item.classList.toggle("zygr-active", item === tab));
-          this.shadow.querySelectorAll("[data-page]").forEach((page) => {
-            page.hidden = page.getAttribute("data-page") !== tab.dataset.tab;
+          this.shadow.querySelectorAll("[data-tab]").forEach((item) => {
+            const active = item === tab;
+            item.classList.toggle("is-active", active);
+            item.setAttribute("aria-selected", String(active));
           });
+          this.shadow.querySelectorAll("[data-page]").forEach((page) => {
+            const active = page.getAttribute("data-page") === tab.dataset.tab;
+            page.hidden = !active;
+            page.classList.toggle("is-active", active);
+          });
+          this.q(".zg-pane").scrollTop = 0;
+          return;
+        }
+        const segButton = target.closest(".zg-seg button");
+        if (segButton) {
+          const seg = segButton.parentElement;
+          seg.querySelectorAll("button").forEach((item) => {
+            item.setAttribute("aria-pressed", String(item === segButton));
+          });
+          const select = seg.dataset.seg === "thinking"
+            ? this.shadow.querySelector('[data-field="pipeline.thinkingMode"]')
+            : seg.dataset.seg === "detail"
+              ? this.shadow.querySelector('[data-field="image.detail"]')
+              : null;
+          if (select) select.value = segButton.dataset.value;
           return;
         }
         const test = target.closest("[data-test]");
@@ -167,6 +397,15 @@
           return;
         }
         const action = target.closest("[data-act]")?.dataset.act;
+        if (action === "toggle-key") {
+          const input = this.shadow.querySelector('[data-field="pipeline.vlm.apiKey"]');
+          if (input) {
+            const show = input.type === "password";
+            input.type = show ? "text" : "password";
+            target.textContent = show ? "\u9690\u85CF" : "\u663E\u793A";
+          }
+          return;
+        }
         if (action === "gen-run") {
           void this.generateRubric();
           return;
@@ -226,7 +465,7 @@
           if (maxScoreField) maxScoreField.value = "";
           this.rubricImages = [];
           const thumbs = this.shadow.querySelector("[data-gen-thumbs]");
-          if (thumbs) thumbs.innerHTML = "";
+          if (thumbs) thumbs.textContent = "";
           return;
         }
         if (action === "fetch-models") {
@@ -283,10 +522,24 @@
         }
       });
     }
+    // 分段控件只是显示层，真正的值仍写在隐藏的 select 里，getDraft / show / applyPlatform 不必改。
+    syncSegments() {
+      [["thinking", '[data-field="pipeline.thinkingMode"]'], ["detail", '[data-field="image.detail"]']].forEach(([name, selector]) => {
+        const select = this.shadow.querySelector(selector);
+        const seg = this.shadow.querySelector(`[data-seg="${name}"]`);
+        if (!select || !seg) return;
+        seg.querySelectorAll("button").forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.value === select.value));
+        });
+      });
+    }
     // 思考只保留两档，历史配置里的 low/high/max 在回填时收敛为「模型默认」。
     clampThinkingSelect() {
       const element = this.shadow.querySelector('[data-field="pipeline.thinkingMode"]');
-      if (element instanceof HTMLSelectElement) element.value = clampThinkingLevel("", element.value);
+      if (element instanceof HTMLSelectElement) {
+        element.value = clampThinkingLevel("", element.value);
+        this.syncSegments();
+      }
     }
     // 累计用量来自本地计数，不触发任何请求。
     refreshStats() {
@@ -348,6 +601,7 @@
       // 历史记忆里可能是 low/high/max，统一收敛为「模型默认」。
       if (thinkingElement) thinkingElement.value = clampThinkingLevel(id, rememberedThinking || thinkingElement.value || "off");
       if (preset.endpoint) setField(`${base}.endpoint`, preset.endpoint);
+      this.syncSegments();
       this.toast(`\u5DF2\u5207\u6362\u5230\u300C${preset.label}\u300D\uFF0C\u5DF2\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 API Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F`);
     }
     exportConfig() {
@@ -387,7 +641,7 @@
       const setStatus = (text, state = "") => {
         if (!status) return;
         status.textContent = text;
-        status.className = `zygr-test-status${state ? ` zygr-${state}` : ""}`;
+        status.className = `zg-status${state ? ` ${state}` : ""}`;
       };
       setStatus("\u83B7\u53D6\u4E2D\u2026");
       try {
@@ -457,7 +711,7 @@
       const setStatus = (text, state = "") => {
         if (!status) return;
         status.textContent = text;
-        status.className = `zygr-test-status${state ? ` zygr-${state}` : ""}`;
+        status.className = `zg-status${state ? ` ${state}` : ""}`;
       };
       const value = (key) => String(this.shadow.querySelector(`[data-gen="${key}"]`)?.value ?? "").trim();
       const payload = {
@@ -496,7 +750,7 @@
       const setStatus = (text, state = "") => {
         if (!status) return;
         status.textContent = text;
-        status.className = `zygr-test-status${state ? ` zygr-${state}` : ""}`;
+        status.className = `zg-status${state ? ` ${state}` : ""}`;
       };
       const startedAt = Date.now();
       setStatus("\u6D4B\u8BD5\u4E2D\u2026 0s\uFF08\u957F\u94FE\u63A8\u7406\u6A21\u578B\u53EF\u80FD\u9700\u6570\u5341\u79D2\uFF09");
@@ -525,20 +779,20 @@
       const setStatus = (text, state = "") => {
         if (!status) return;
         status.textContent = text;
-        status.className = `zygr-test-status${state ? ` zygr-${state}` : ""}`;
+        status.className = `zg-status${state ? ` ${state}` : ""}`;
       };
       setStatus("\u6D4B\u8BD5\u4E2D\u2026");
       if (button) button.disabled = true;
       this.toast("\u6B63\u5728\u6D4B\u8BD5\u8FDE\u63A5\u2026");
       try {
         const ok = await this.callbacks.onTest(draft);
-        const message = ok ? "\u8FDE\u63A5\u6B63\u5E38" : "\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u914D\u7F6E";
+        const message = ok ? "\u56FE\u7247\u8BFB\u53D6\u6B63\u5E38" : "\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u914D\u7F6E";
         setStatus(message, ok ? "ok" : "bad");
         this.toast(message);
       } catch (error) {
         const message = error instanceof Error ? error.message : "\u8FDE\u63A5\u5931\u8D25";
         const providerMessage = error?.providerMessage ? String(error.providerMessage) : "";
-        const detail = error?.configSummary ? ` | 实际配置: ${error.configSummary}` : "";
+        const detail = error?.configSummary ? ` | \u5B9E\u9645\u914D\u7F6E: ${error.configSummary}` : "";
         setStatus(message + detail, "bad");
         this.toast(providerMessage ? providerMessage.slice(0, 120) : message.slice(0, 120));
       } finally {
@@ -566,7 +820,7 @@
         const draft = this.getDraft();
         const saved = loadConfig();
         if (sameRubricContext(draft.context, saved.context)) return true;
-        return window.confirm("批改上下文（题目 / 参考答案 / 评分标准）有未保存的修改，确定关闭？");
+        return window.confirm("\u6279\u6539\u4E0A\u4E0B\u6587\uFF08\u9898\u76EE / \u53C2\u8003\u7B54\u6848 / \u8BC4\u5206\u6807\u51C6\uFF09\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u5173\u95ED\uFF1F");
       } catch {
         return true;
       }
@@ -594,7 +848,12 @@
         else element.value = value === void 0 || value === null ? "" : String(value);
       });
       this.clampThinkingSelect();
+      this.syncSegments();
       const keyElement = this.shadow.querySelector('[data-field="pipeline.vlm.apiKey"]');
+      // 钥匙默认遮住：只在本次打开期间允许「显示」，重新打开时回到密码态。
+      if (keyElement instanceof HTMLInputElement) keyElement.type = "password";
+      const reveal = this.shadow.querySelector('[data-act="toggle-key"]');
+      if (reveal) reveal.textContent = "\u663E\u793A";
       const modelElement = this.shadow.querySelector('[data-field="pipeline.vlm.model"]');
       if (keyElement) keyElement.dataset.platformBound = boundPlatform;
       if (modelElement) modelElement.dataset.platformBound = boundPlatform;
@@ -606,4 +865,3 @@
       this.q(".zygr-overlay").hidden = true;
     }
   };
-

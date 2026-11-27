@@ -413,11 +413,61 @@
     };
   }
 
-  async function testConnection(service, rateLimiter) {
+  // 视觉校验图：白底黑字的大号 4 位随机数字。文本模型看不到数字，只能拒答或瞎猜。
+  // 用 canvas 现场生成 PNG，避免依赖外链，也不会被平台的图片域名校验挡住。
+  function visionProbeImage() {
+    if (typeof document === "undefined" || !document.createElement) return null;
+    try {
+      const code = Array.from({ length: 4 }, () => Math.floor(Math.random() * 10)).join("");
+      const canvas = document.createElement("canvas");
+      canvas.width = 480;
+      canvas.height = 160;
+      const context = canvas.getContext("2d");
+      if (!context) return null;
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#111111";
+      context.font = '700 96px "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(code, canvas.width / 2, canvas.height / 2 + 4);
+      const dataUrl = canvas.toDataURL("image/png");
+      if (!dataUrl.startsWith("data:image/png")) return null;
+      return { code, dataUrl };
+    } catch {
+      return null;
+    }
+  }
+
+  // 真·多模态测试：必须能把图里的随机数字读回来，纯文本模型在这一步就会被挡住。
+  async function probeVision(service, rateLimiter) {
+    const probe = visionProbeImage();
+    if (!probe) {
+      return { ok: true, skipped: true, verdict: "\u5F53\u524D\u73AF\u5883\u65E0\u6CD5\u751F\u6210\u6D4B\u8BD5\u56FE\u7247\uFF0C\u5DF2\u8DF3\u8FC7\u89C6\u89C9\u6821\u9A8C" };
+    }
     const text = await chatCompletion(
       service,
-      [{ role: "user", content: "\u8BF7\u53EA\u56DE\u590D\uFF1Aok" }],
-      { rateLimiter, timeoutMs: 15e3, retries: 0, estimatedTokens: 20 }
+      [{
+        role: "user",
+        content: [
+          { type: "text", text: "\u53EA\u56DE\u590D\u56FE\u7247\u4E2D\u7684 4 \u4F4D\u6570\u5B57\uFF0C\u4E0D\u8981\u89E3\u91CA\u3002" },
+          { type: "image_url", image_url: { url: probe.dataUrl, detail: "high" } }
+        ]
+      }],
+      { rateLimiter, timeoutMs: 3e4, retries: 1, maxTokens: 800, estimatedTokens: 300 }
     );
-    return text.trim().length > 0;
+    const digits = String(text || "").replace(/[^0-9]/g, "");
+    if (digits.includes(probe.code)) {
+      return { ok: true, verdict: "\u56FE\u7247\u8BFB\u53D6\u6B63\u5E38" };
+    }
+    return {
+      ok: false,
+      verdict: `\u6A21\u578B\u300C${service.model}\u300D\u672A\u80FD\u8BFB\u53D6\u6D4B\u8BD5\u56FE\u7247\uFF08\u56DE\u590D\uFF1A${sampleText(text) || "\u7A7A"}\uFF09\uFF0C\u53EF\u80FD\u4E0D\u662F\u591A\u6A21\u6001\u6A21\u578B`
+    };
+  }
+
+  async function testConnection(service, rateLimiter) {
+    const result = await probeVision(service, rateLimiter);
+    if (!result.ok) throw new Error(result.verdict);
+    return true;
   }

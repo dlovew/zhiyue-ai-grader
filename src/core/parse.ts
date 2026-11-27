@@ -198,4 +198,27 @@
   function parseGrade(raw, maxScore, subQuestions = []) {
     return fromJson(raw, maxScore, subQuestions) ?? fromRepairedJson(raw, maxScore, subQuestions) ?? fromText(raw, maxScore, subQuestions);
   }
+  // 文本模型收到 image_url 时常会回「无法查看图片」这类拒答。它不是 0 分，
+  // 而是根本没看到作答图；必须作废本次结果，不能写历史，也不能继续连续批阅。
+  // 只匹配「能力不足」的措辞，不匹配「字迹模糊/无法辨认」这类正常的不可辨判定。
+  function looksLikeVisionFailure(text) {
+    const value = String(text || "");
+    if (!value) return false;
+    return /无法(?:查看|看到|读取|访问|打开)(?:到)?(?:这张|该|提供的)?(?:图片|图像|照片)/i.test(value)
+      || /(?:没有|未)(?:收到|提供|附带)(?:任何)?(?:图片|图像|照片)/i.test(value)
+      || /不支持(?:图片|图像|视觉|多模态)/i.test(value)
+      || /(?:我|本模型|该模型|当前模型).{0,10}(?:是|属于|作为).{0,6}(?:纯文本|文本|语言)模型/i.test(value)
+      || /(?:text[- ]only|language)\s+model/i.test(value)
+      || /(?:cannot|can't|unable\s+to)\s+(?:see|view|read|access|process)\s+(?:the\s+)?(?:image|picture|photo)/i.test(value)
+      || /no\s+(?:image|picture|photo)\s+(?:was\s+)?(?:provided|attached|included)/i.test(value);
+  }
+  // 文本模型常把「看不到图」包装成一个合法的 legible + 0 分。分数 0、状态却是「可辨认」、
+  // 理由又说图片无法辨认时，不能当成学生答错；按能力问题作废，避免整批写下 0 分。
+  function isVisionBlockedResult(grade, raw) {
+    if (looksLikeVisionFailure(`${grade?.reason || ""}\n${raw || ""}`)) return true;
+    const reason = `${grade?.reason || ""}\n${raw || ""}`;
+    return Number(grade?.score) === 0
+      && grade?.status === "legible"
+      && /(?:图片|图像)(?:无法|不能)辨认|无法判断作答内容/.test(reason);
+  }
 

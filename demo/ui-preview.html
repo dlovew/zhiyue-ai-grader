@@ -1,0 +1,1843 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>智阅批改助手 · UI 改版预览</title>
+<style>
+  /* ============ 预览页（不属于改版本身） ============ */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden; background: #eef1f5; color: #1d1d1f;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  input, select, textarea { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
+
+  .site { position: fixed; inset: 0; display: flex; flex-direction: column; }
+  .site-top {
+    height: 52px; flex: none; display: flex; align-items: center; gap: 10px;
+    padding: 0 20px; background: #fff; border-bottom: 1px solid #e3e7ee;
+    font-size: 12px; color: #5b6472;
+  }
+  .site-logo { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; background: #2f6fed; color: #fff; font-size: 12px; font-weight: 700; }
+  .site-top b { color: #1f2937; font-size: 14px; font-weight: 600; }
+  .site-top .spacer { flex: 1; }
+  .site-user { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #6b7280; }
+  .site-avatar { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: #dbe3f2; color: #4b5b76; font-size: 11px; }
+  .site-main { flex: 1; display: flex; min-height: 0; }
+  .site-side { width: 216px; flex: none; padding: 16px; display: flex; flex-direction: column; gap: 7px; background: #f7f9fc; border-right: 1px solid #e3e7ee; font-size: 12px; color: #7b8494; }
+  .side-cap { font-size: 10px; letter-spacing: .4px; color: #9aa4b4; padding: 0 2px 2px; }
+  .side-item { height: 34px; padding: 0 10px; display: flex; align-items: center; justify-content: space-between; border-radius: 8px; background: #fff; border: 1px solid #e6ebf3; color: #3d4a5c; }
+  .side-item.on { background: #eaf1ff; border-color: #cfdefb; color: #2f5fce; font-weight: 600; }
+  .site-stage { flex: 1; display: flex; justify-content: center; padding: 22px; overflow: auto; }
+  .sheet { width: min(760px, 100%); height: max-content; padding: 22px 26px; background: #fff; border: 1px solid #e6ebf3; border-radius: 10px; box-shadow: 0 10px 30px rgba(20, 35, 60, .06); }
+  .sheet-h { display: flex; align-items: center; justify-content: space-between; padding-bottom: 12px; margin-bottom: 16px; border-bottom: 1px solid #eef1f6; font-size: 12px; color: #8b95a6; }
+  .sheet-h b { font-size: 14px; color: #25303f; }
+  .sheet-q { font-size: 13px; line-height: 1.9; color: #3a475a; }
+  .sheet-answer { position: relative; height: 320px; margin-top: 18px; border: 1px dashed #d8dfea; border-radius: 8px; overflow: hidden; background: repeating-linear-gradient(180deg, #fbfcfe 0 27px, #f0f3f8 27px 28px); }
+  .sheet-answer::after { content: "作答区（示意）"; position: absolute; left: 14px; top: 10px; font-size: 11px; color: #aab3c2; }
+  .sheet-stamp { position: absolute; right: 18px; bottom: 16px; width: 76px; height: 76px; border: 2px solid #e8b4b0; border-radius: 50%; display: grid; place-items: center; color: #c98b86; font-size: 11px; line-height: 1.4; text-align: center; transform: rotate(-12deg); opacity: .8; }
+  @media (max-width: 900px) { .site-side { display: none; } }
+
+  /* 预览控制台 */
+  .demo-dock {
+    position: fixed; left: 16px; top: 16px; z-index: 50; width: 238px; padding: 12px;
+    background: rgba(255, 255, 255, .88); border: 1px solid rgba(20, 35, 60, .08); border-radius: 16px;
+    box-shadow: 0 12px 34px rgba(20, 35, 60, .12);
+    -webkit-backdrop-filter: blur(20px) saturate(160%); backdrop-filter: blur(20px) saturate(160%);
+    font-size: 12px; color: #3a475a;
+  }
+  .dd-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 11px; font-weight: 600; color: #2f3d52; }
+  .dd-title span { font-size: 10px; font-weight: 400; color: #93a0b4; }
+  .dd-row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  .dd-row > button { flex: 1; height: 26px; border-radius: 7px; background: #fff; border: 1px solid #e2e8f2; font-size: 11px; color: #41506a; }
+  .dd-row > button:hover { background: #f2f6ff; border-color: #c9d8f5; color: #2f5fce; }
+  .dd-label { flex: none; width: 26px; font-size: 10px; color: #93a0b4; }
+  .dd-seg { flex: 1; display: flex; gap: 2px; padding: 2px; background: #eef2f8; border-radius: 7px; }
+  .dd-seg button { flex: 1; height: 22px; border-radius: 5px; font-size: 10.5px; color: #61708a; }
+  .dd-seg button.on { background: #fff; color: #1d1d1f; font-weight: 600; box-shadow: 0 1px 2px rgba(20, 35, 60, .12); }
+  .dd-hint { margin-top: 9px; font-size: 10px; line-height: 1.5; color: #93a0b4; }
+  :root[data-theme="dark"] .demo-dock { background: rgba(32, 32, 36, .9); border-color: rgba(255, 255, 255, .08); color: #dfe3ea; box-shadow: 0 14px 36px rgba(0, 0, 0, .5); }
+  :root[data-theme="dark"] .dd-title { color: #eef1f6; }
+  :root[data-theme="dark"] .dd-row > button { background: #2c2c2e; border-color: rgba(255, 255, 255, .1); color: #c8cdd6; }
+  :root[data-theme="dark"] .dd-row > button:hover { background: #34343a; }
+  :root[data-theme="dark"] .dd-seg { background: rgba(120, 120, 128, .24); }
+  :root[data-theme="dark"] .dd-seg button.on { background: #48484a; color: #fff; }
+
+  /* ============ 改版设计系统 ============ */
+  .zygr-scope {
+    --z-accent: #0071e3;
+    --z-accent-soft: rgba(0, 113, 227, .10);
+    --z-ring: rgba(0, 113, 227, .30);
+    --z-green: #34c759;
+    --z-green-ink: #1c7c3c;
+    --z-green-soft: rgba(52, 199, 89, .14);
+    --z-orange: #ff9500;
+    --z-orange-ink: #a25800;
+    --z-orange-soft: rgba(255, 149, 0, .16);
+    --z-red: #ff3b30;
+    --z-red-ink: #c0362c;
+    --z-red-soft: rgba(255, 59, 48, .12);
+    --z-ink: #1d1d1f;
+    --z-ink2: #6e6e73;
+    --z-ink3: #8e8e93;
+    --z-hairline: rgba(60, 60, 67, .10);
+    --z-fill: rgba(120, 120, 128, .10);
+    --z-fill-2: rgba(120, 120, 128, .18);
+    --z-panel: rgba(250, 250, 252, .84);
+    --z-card: #ffffff;
+    --z-card-t: rgba(255, 255, 255, .72);
+    --z-foot: rgba(255, 255, 255, .34);
+    --z-shadow-lg: 0 24px 64px -18px rgba(15, 23, 42, .32), 0 2px 10px rgba(15, 23, 42, .06);
+    --z-shadow-sm: 0 1px 2px rgba(0, 0, 0, .10);
+    --z-ease: cubic-bezier(.32, .72, 0, 1);
+    color-scheme: light;
+    position: fixed; inset: 0; z-index: 2147483600; pointer-events: none;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 13px; line-height: 1.45; color: var(--z-ink);
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .zygr-scope[data-theme="dark"] {
+    --z-accent: #0a84ff;
+    --z-accent-soft: rgba(10, 132, 255, .20);
+    --z-ring: rgba(10, 132, 255, .38);
+    --z-green: #30d158;
+    --z-green-ink: #5ee07a;
+    --z-green-soft: rgba(48, 209, 88, .18);
+    --z-orange: #ff9f0a;
+    --z-orange-ink: #ffb84d;
+    --z-orange-soft: rgba(255, 159, 10, .18);
+    --z-red: #ff453a;
+    --z-red-ink: #ff7b72;
+    --z-red-soft: rgba(255, 69, 58, .18);
+    --z-ink: #f5f5f7;
+    --z-ink2: #a1a1a6;
+    --z-ink3: #8e8e93;
+    --z-hairline: rgba(255, 255, 255, .10);
+    --z-fill: rgba(120, 120, 128, .24);
+    --z-fill-2: rgba(120, 120, 128, .36);
+    --z-panel: rgba(28, 28, 30, .84);
+    --z-card: #2c2c2e;
+    --z-card-t: rgba(44, 44, 46, .68);
+    --z-foot: rgba(255, 255, 255, .03);
+    --z-shadow-lg: 0 30px 80px -20px rgba(0, 0, 0, .75), 0 2px 12px rgba(0, 0, 0, .35);
+    --z-shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+    color-scheme: dark;
+  }
+  .zygr-scope * { box-sizing: border-box; }
+  .zygr-scope button:focus-visible,
+  .zygr-scope a:focus-visible { outline: 2px solid var(--z-accent); outline-offset: 2px; }
+  .zygr-scope ::-webkit-scrollbar { width: 8px; height: 8px; }
+  .zygr-scope ::-webkit-scrollbar-thumb { background: var(--z-fill-2); border: 2px solid transparent; border-radius: 8px; background-clip: padding-box; }
+  .zygr-scope ::-webkit-scrollbar-track { background: transparent; }
+
+  /* ---------- 主面板 ---------- */
+  .zygr-panel {
+    position: fixed; right: 20px; bottom: 20px; width: 388px; max-height: calc(100vh - 40px);
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--z-panel); border: 1px solid var(--z-hairline); border-radius: 20px;
+    box-shadow: var(--z-shadow-lg);
+    -webkit-backdrop-filter: blur(32px) saturate(180%); backdrop-filter: blur(32px) saturate(180%);
+    pointer-events: auto; animation: zp-in .38s var(--z-ease);
+  }
+  @keyframes zp-in { from { opacity: 0; transform: translateY(14px) scale(.985); } to { opacity: 1; transform: none; } }
+
+  .zp-head { display: flex; align-items: center; gap: 10px; padding: 12px 10px 10px 14px; }
+  .zp-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .zp-logo {
+    width: 30px; height: 30px; flex: none; display: grid; place-items: center;
+    border-radius: 9px; color: #fff; font-size: 14px; font-weight: 700;
+    background: linear-gradient(160deg, #3d9bff, #0067d6);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 2px 6px rgba(0, 113, 227, .22);
+  }
+  .zp-titles { min-width: 0; }
+  .zp-titleline { display: flex; align-items: center; gap: 6px; }
+  .zp-titleline strong { font-size: 13.5px; font-weight: 600; letter-spacing: .1px; }
+  .zp-ver { padding: 1px 6px; border-radius: 999px; background: var(--z-fill); color: var(--z-ink3); font-size: 9.5px; font-weight: 500; }
+  .zp-sub { display: block; margin-top: 1px; font-size: 11px; color: var(--z-ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .zp-header-actions { display: flex; flex: none; gap: 2px; }
+  .zp-iconbtn { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; color: var(--z-ink2); transition: background .18s, color .18s; }
+  .zp-iconbtn:hover { background: var(--z-fill); color: var(--z-ink); }
+  .zp-iconbtn svg { width: 15px; height: 15px; }
+  .zp-chev { transition: transform .28s var(--z-ease); }
+  .zygr-panel.is-collapsed .zp-body,
+  .zygr-panel.is-collapsed .zp-foot { display: none; }
+  .zygr-panel.is-collapsed .zp-chev { transform: rotate(180deg); }
+
+  .zp-body { flex: 1; min-height: 0; display: grid; align-content: start; gap: 10px; padding: 0 14px 12px; overflow: auto; overscroll-behavior: contain; }
+  .zp-status { display: flex; align-items: center; gap: 8px; padding: 0 2px; font-size: 11px; }
+  .zp-stage { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; color: var(--z-ink); }
+  .zp-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--z-accent); box-shadow: 0 0 0 3px var(--z-accent-soft); }
+  .zp-dot.ok { background: var(--z-green); box-shadow: 0 0 0 3px var(--z-green-soft); }
+  .zp-dot.warn { background: var(--z-orange); box-shadow: 0 0 0 3px var(--z-orange-soft); }
+  .zp-count { margin-left: auto; color: var(--z-ink3); font-size: 10.5px; white-space: nowrap; }
+  .zp-chip { padding: 4px 7px; border-radius: 999px; background: var(--z-fill); color: var(--z-ink2); font-size: 10px; line-height: 1; white-space: nowrap; }
+  .zp-chip.ok { background: var(--z-green-soft); color: var(--z-green-ink); }
+  .zp-chip.warn { background: var(--z-orange-soft); color: var(--z-orange-ink); }
+  .zp-chip.new { background: var(--z-accent-soft); color: var(--z-accent); font-weight: 600; }
+  .zp-track { height: 3px; border-radius: 999px; background: var(--z-fill); overflow: hidden; }
+  .zp-track i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--z-accent); transition: width .45s var(--z-ease); }
+
+  .zp-card { padding: 12px; border: 1px solid var(--z-hairline); border-radius: 14px; background: var(--z-card-t); }
+  .zp-kicker { display: block; margin-bottom: 2px; font-size: 9.5px; font-weight: 600; letter-spacing: .3px; color: var(--z-ink3); }
+  .zp-qhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .zp-qmain { min-width: 0; }
+  .zp-qtitle { font-size: 15px; font-weight: 600; letter-spacing: -.2px; }
+  .zp-qtitle span { margin-left: 4px; font-size: 11px; font-weight: 400; color: var(--z-ink2); }
+  .zp-qmeta { margin-top: 2px; font-size: 10.5px; color: var(--z-ink3); }
+  .zp-textbtn { flex: none; padding: 3px 2px; font-size: 10.5px; color: var(--z-accent); }
+  .zp-textbtn:hover { text-decoration: underline; }
+  .zp-thumbs { display: flex; gap: 6px; margin-top: 9px; overflow-x: auto; padding-bottom: 1px; }
+  .zp-thumb {
+    position: relative; width: 52px; height: 52px; flex: none; overflow: hidden; padding: 0;
+    border: 1px solid var(--z-hairline); border-radius: 9px; background: #fff;
+    transition: transform .2s var(--z-ease), box-shadow .2s;
+  }
+  .zp-thumb::before { content: ""; position: absolute; inset: 6px 5px; background: repeating-linear-gradient(180deg, transparent 0 8px, rgba(30, 41, 59, .09) 8px 9px); }
+  .zp-thumb i { position: absolute; left: 10px; height: 2px; border-radius: 2px; background: rgba(30, 41, 59, .38); transform: rotate(-2deg); }
+  .zp-thumb i:nth-child(1) { top: 17px; width: 26px; }
+  .zp-thumb i:nth-child(2) { top: 26px; width: 32px; }
+  .zp-thumb i:nth-child(3) { top: 35px; width: 18px; }
+  .zp-thumb:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(15, 23, 42, .14); }
+  .zp-thumb.plus { display: grid; place-items: center; background: var(--z-fill); color: var(--z-ink3); font-size: 15px; }
+  .zp-thumb.plus::before { display: none; }
+
+  .zp-scorehead { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .zp-score { display: flex; align-items: baseline; gap: 4px; margin-top: 1px; }
+  .zp-score input {
+    width: 96px; height: 46px; padding: 0 2px; border: 0; border-radius: 8px; background: transparent;
+    color: var(--z-ink); font-size: 38px; font-weight: 600; letter-spacing: -1.6px; text-align: left;
+    transition: background .18s, box-shadow .18s;
+  }
+  .zp-score input:hover { background: var(--z-fill); }
+  .zp-score input:focus { outline: none; background: var(--z-card); box-shadow: 0 0 0 3px var(--z-ring); }
+  .zp-score > span { font-size: 12px; color: var(--z-ink3); white-space: nowrap; }
+  .zp-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; padding-top: 16px; }
+  .zp-pill { padding: 3px 8px; border-radius: 999px; background: var(--z-fill); color: var(--z-ink2); font-size: 10.5px; font-weight: 500; white-space: nowrap; }
+  .zp-pill.ok { background: var(--z-green-soft); color: var(--z-green-ink); }
+  .zp-pill.warn { background: var(--z-orange-soft); color: var(--z-orange-ink); }
+  .zp-pill.bad { background: var(--z-red-soft); color: var(--z-red-ink); }
+  .zp-reason { margin: 9px 0 0; font-size: 12px; line-height: 1.68; color: var(--z-ink2); text-wrap: pretty; }
+
+  .zp-sublist { margin-top: 10px; border-top: 1px solid var(--z-hairline); }
+  .zp-subrow { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--z-hairline); }
+  .zp-subrow:last-child { border-bottom: 0; padding-bottom: 2px; }
+  .zp-submain { flex: 1; min-width: 0; }
+  .zp-sublabel { display: block; font-size: 11.5px; font-weight: 600; }
+  .zp-subreason { display: block; margin-top: 1px; font-size: 10.5px; line-height: 1.5; color: var(--z-ink3); }
+  .zp-subscore { display: flex; align-items: baseline; gap: 2px; flex: none; }
+  .zp-subscore input {
+    width: 44px; height: 25px; padding: 0; border: 0; border-radius: 7px; background: var(--z-fill);
+    color: var(--z-ink); font-size: 11.5px; font-weight: 600; text-align: center; transition: background .18s, box-shadow .18s;
+  }
+  .zp-subscore input:focus { outline: none; background: var(--z-card); box-shadow: 0 0 0 3px var(--z-ring); }
+  .zp-subscore em { font-style: normal; font-size: 9.5px; color: var(--z-ink3); }
+  .zp-meta { margin-top: 8px; font-size: 11.5px; line-height: 1.6; color: var(--z-ink2); }
+  .zp-metaline + .zp-metaline { margin-top: 1px; }
+  .zp-notice {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px; width: 100%;
+    margin-top: 8px; padding: 7px 9px; border: 1px solid rgba(255, 149, 0, .28); border-radius: 9px;
+    background: var(--z-orange-soft); color: var(--z-orange-ink); font-size: 10.5px; text-align: left;
+  }
+  .zp-notice:hover { filter: brightness(1.03); }
+  .zp-notice svg { width: 12px; height: 12px; flex: none; }
+
+  .zp-empty { padding: 22px 12px; text-align: center; }
+  .zp-empty-icon { width: 36px; height: 36px; margin: 0 auto; display: grid; place-items: center; border-radius: 11px; background: var(--z-accent-soft); color: var(--z-accent); }
+  .zp-empty-icon svg { width: 18px; height: 18px; }
+  .zp-empty strong { display: block; margin-top: 10px; font-size: 12.5px; font-weight: 600; }
+  .zp-empty p { margin: 4px 0 0; font-size: 11px; line-height: 1.6; color: var(--z-ink3); }
+  .zp-skeleton { display: grid; gap: 8px; padding: 2px 0 4px; }
+  .zp-skeleton div { height: 11px; border-radius: 6px; background: var(--z-fill); animation: zp-pulse 1.3s ease-in-out infinite; }
+  .zp-skeleton .big { width: 118px; height: 34px; border-radius: 9px; }
+  .zp-skeleton .w70 { width: 70%; }
+  .zp-skeleton .w50 { width: 50%; }
+  @keyframes zp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+
+  .zp-error { padding: 9px 11px; border-radius: 10px; background: var(--z-red-soft); color: var(--z-red-ink); font-size: 11px; line-height: 1.6; }
+
+  .zp-foot { flex: none; padding: 10px 12px 12px; border-top: 1px solid var(--z-hairline); background: var(--z-foot); }
+  .zp-actions { display: flex; gap: 8px; }
+  .zp-btn {
+    height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 0 14px; border-radius: 10px; background: var(--z-fill); color: var(--z-ink);
+    font-size: 12.5px; font-weight: 500; transition: background .18s, filter .18s, transform .12s;
+  }
+  .zp-btn:hover { background: var(--z-fill-2); }
+  .zp-btn:active { transform: scale(.985); }
+  .zp-btn.primary { flex: 1; background: var(--z-accent); color: #fff; font-weight: 600; box-shadow: 0 4px 12px -4px rgba(0, 113, 227, .5); }
+  .zp-btn.primary:hover { filter: brightness(1.06); }
+  .zp-btn.running { background: var(--z-red); color: #fff; font-weight: 600; }
+  .zp-btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+  .zp-submit { width: 96px; flex: none; }
+  .zp-options { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+  .zp-mini {
+    height: 26px; display: inline-flex; align-items: center; gap: 4px; padding: 0 9px;
+    border-radius: 8px; background: var(--z-fill); font-size: 11px; color: var(--z-ink); white-space: nowrap;
+  }
+  .zp-mini:hover { background: var(--z-fill-2); }
+  .zp-mini svg { width: 11px; height: 11px; }
+  .zp-mini.running { background: var(--z-red-soft); color: var(--z-red-ink); }
+  .zp-optlabel { font-size: 10px; color: var(--z-ink3); white-space: nowrap; }
+  .zp-stepper { display: inline-flex; align-items: center; height: 26px; padding: 0 2px; border-radius: 8px; background: var(--z-fill); gap: 1px; }
+  .zp-stepper button { width: 19px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: var(--z-ink2); font-size: 13px; line-height: 1; }
+  .zp-stepper button:hover { background: var(--z-fill-2); }
+  .zp-stepper input { width: 30px; height: 22px; padding: 0; border: 0; background: transparent; text-align: center; font-size: 11px; font-weight: 600; -moz-appearance: textfield; }
+  .zp-stepper input::-webkit-outer-spin-button,
+  .zp-stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .zp-stepper input:focus { outline: none; }
+  .zp-stepper input:disabled { opacity: .5; }
+  .zp-seg { display: inline-flex; gap: 1px; margin-left: auto; padding: 2px; border-radius: 8px; background: var(--z-fill); }
+  .zp-seg button { height: 22px; padding: 0 7px; border-radius: 6px; font-size: 10.5px; color: var(--z-ink2); white-space: nowrap; }
+  .zp-seg button[aria-pressed="true"] { background: var(--z-card); color: var(--z-ink); font-weight: 600; box-shadow: var(--z-shadow-sm); }
+  .zp-footbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--z-hairline); }
+  .zp-skip { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--z-ink2); cursor: pointer; }
+  .zp-tools { display: flex; align-items: center; gap: 2px; }
+  .zp-quiet { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; border-radius: 7px; font-size: 11px; color: var(--z-ink2); }
+  .zp-quiet:hover { background: var(--z-fill); color: var(--z-ink); }
+  .zp-quiet svg { width: 12px; height: 12px; }
+
+  .zp-switch {
+    position: relative; width: 32px; height: 19px; flex: none; padding: 0; border: 0; border-radius: 999px;
+    background: var(--z-fill-2); transition: background .22s var(--z-ease);
+  }
+  .zp-switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .28); transition: transform .22s var(--z-ease);
+  }
+  .zp-switch[aria-checked="true"] { background: var(--z-green); }
+  .zp-switch[aria-checked="true"]::after { transform: translateX(13px); }
+  .zp-skip[aria-checked="true"] .zp-switch { background: var(--z-green); }
+  .zp-skip[aria-checked="true"] .zp-switch::after { transform: translateX(13px); }
+
+  /* ---------- 弹层骨架 ---------- */
+  .zygr-overlay {
+    position: fixed; inset: 0; z-index: 2147483610; display: grid; place-items: center; padding: 24px;
+    background: rgba(0, 0, 0, .24);
+    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+    pointer-events: auto; animation: zo-in .24s ease;
+  }
+  @keyframes zo-in { from { opacity: 0; } to { opacity: 1; } }
+  .zygr-dialog {
+    width: min(880px, 100%); height: min(760px, calc(100vh - 48px));
+    display: flex; flex-direction: column; overflow: hidden;
+    background: #f5f5f7; border: 1px solid var(--z-hairline); border-radius: 22px;
+    box-shadow: var(--z-shadow-lg); animation: zd-in .32s var(--z-ease);
+  }
+  .zygr-scope[data-theme="dark"] .zygr-dialog { background: #1c1c1e; }
+  @keyframes zd-in { from { opacity: 0; transform: translateY(12px) scale(.985); } to { opacity: 1; transform: none; } }
+  .zg-head { flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 20px 14px 22px; }
+  .zg-head h2 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -.3px; }
+  .zg-head p { margin: 3px 0 0; font-size: 11.5px; color: var(--z-ink3); }
+  .zg-head .zp-iconbtn { margin-top: 2px; }
+
+  /* ---------- 设置 ---------- */
+  .zg-shell { flex: 1; min-height: 0; display: grid; grid-template-columns: 192px minmax(0, 1fr); }
+  .zg-nav {
+    display: flex; flex-direction: column; gap: 2px; padding: 4px 10px 12px;
+    border-right: 1px solid var(--z-hairline); background: rgba(120, 120, 128, .045);
+    overflow: auto;
+  }
+  .zg-navitem { display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 9px; border-radius: 9px; font-size: 12.5px; color: var(--z-ink2); text-align: left; }
+  .zg-navitem:hover { background: var(--z-fill); }
+  .zg-navitem.is-active { background: var(--z-card); color: var(--z-ink); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, .07); }
+  .zg-tile { width: 22px; height: 22px; flex: none; display: grid; place-items: center; border-radius: 6px; color: #fff; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .25); }
+  .zg-tile svg { width: 13px; height: 13px; }
+  .zg-tile.blue { background: #0a84ff; }
+  .zg-tile.purple { background: #5e5ce6; }
+  .zg-tile.pink { background: #ff375f; }
+  .zg-tile.gray { background: #8e8e93; }
+  .zg-navfoot { margin-top: auto; padding: 14px 9px 0; font-size: 10px; line-height: 1.6; color: var(--z-ink3); }
+  .zg-pane { overflow: auto; padding: 8px 22px 28px; }
+
+  .zg-page { display: none; align-content: start; gap: 18px; }
+  .zg-page.is-active { display: grid; }
+  .zg-pagehead h2 { margin: 6px 0 0; font-size: 17px; font-weight: 600; letter-spacing: -.2px; }
+  .zg-pagehead p { margin: 4px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--z-ink3); }
+  .zg-section { display: grid; gap: 0; }
+  .zg-grouptitle { margin: 0 0 7px 2px; font-size: 11.5px; font-weight: 600; color: var(--z-ink2); }
+  .zg-note { margin: 7px 2px 0; font-size: 10.5px; line-height: 1.6; color: var(--z-ink3); text-wrap: pretty; }
+  .zg-group { overflow: hidden; background: var(--z-card); border-radius: 12px; box-shadow: 0 0 0 1px var(--z-hairline); }
+  .zg-row { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 9px 14px; }
+  .zg-row + .zg-row { border-top: 1px solid var(--z-hairline); }
+  .zg-rowmain { flex: 1; min-width: 0; }
+  .zg-rowlabel { display: block; font-size: 12.5px; }
+  .zg-rowdesc { display: block; margin-top: 1px; font-size: 10.5px; line-height: 1.5; color: var(--z-ink3); }
+  .zg-rowactions { display: flex; flex: none; gap: 6px; }
+  .zg-rowvalue { flex: none; font-size: 12px; color: var(--z-ink2); }
+
+  .zg-field { display: block; padding: 12px 14px; }
+  .zg-field + .zg-field { border-top: 1px solid var(--z-hairline); }
+  .zg-field > label { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; font-size: 12px; font-weight: 600; }
+  .zg-opt, .zg-req { padding: 1px 6px; border-radius: 999px; font-size: 9.5px; font-weight: 400; }
+  .zg-opt { background: var(--z-fill); color: var(--z-ink3); }
+  .zg-req { background: var(--z-orange-soft); color: var(--z-orange-ink); }
+
+  .zg-input, .zg-field textarea, .zg-select select {
+    width: 100%; border: 1px solid transparent; border-radius: 9px; background: var(--z-fill);
+    font-size: 12.5px; transition: background .18s, box-shadow .18s, border-color .18s;
+  }
+  .zg-input { height: 30px; padding: 0 10px; }
+  .zg-field textarea { min-height: 62px; padding: 9px 11px; line-height: 1.65; resize: vertical; }
+  .zg-input:hover, .zg-field textarea:hover, .zg-select select:hover { background: var(--z-fill-2); }
+  .zg-input:focus, .zg-field textarea:focus, .zg-select select:focus {
+    outline: none; background: var(--z-card); border-color: var(--z-accent); box-shadow: 0 0 0 3px var(--z-ring);
+  }
+  .zg-input::placeholder, .zg-field textarea::placeholder { color: var(--z-ink3); }
+  .zg-num { width: 88px; flex: none; text-align: right; }
+  .zg-inputwrap { position: relative; }
+  .zg-inputwrap .zg-input { padding-right: 50px; }
+  .zg-inputwrap button { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); height: 24px; padding: 0 8px; border-radius: 6px; font-size: 10.5px; color: var(--z-ink2); }
+  .zg-inputwrap button:hover { background: var(--z-fill); }
+  .zg-select { position: relative; flex: none; width: 168px; }
+  .zg-select::after {
+    content: ""; position: absolute; right: 11px; top: 50%; width: 6px; height: 6px; pointer-events: none;
+    border-right: 1.5px solid var(--z-ink3); border-bottom: 1.5px solid var(--z-ink3);
+    transform: translateY(-70%) rotate(45deg);
+  }
+  .zg-select select { height: 30px; padding: 0 26px 0 10px; appearance: none; -webkit-appearance: none; }
+  .zg-select.wide { width: 210px; }
+
+  .zg-switch {
+    position: relative; width: 42px; height: 25px; flex: none; padding: 0; border-radius: 999px;
+    background: var(--z-fill-2); transition: background .22s var(--z-ease);
+  }
+  .zg-switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 21px; height: 21px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .28); transition: transform .22s var(--z-ease);
+  }
+  .zg-switch[aria-checked="true"] { background: var(--z-green); }
+  .zg-switch[aria-checked="true"]::after { transform: translateX(17px); }
+
+  .zg-seg { display: inline-flex; gap: 1px; padding: 2px; border-radius: 8px; background: var(--z-fill); }
+  .zg-seg button { height: 26px; padding: 0 11px; border-radius: 6px; font-size: 11.5px; color: var(--z-ink2); white-space: nowrap; }
+  .zg-seg button[aria-pressed="true"] { background: var(--z-card); color: var(--z-ink); font-weight: 600; box-shadow: var(--z-shadow-sm); }
+
+  .zg-btn {
+    height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 14px;
+    border-radius: 9px; background: var(--z-fill); color: var(--z-ink); font-size: 12.5px; font-weight: 500;
+    transition: background .18s, filter .18s, transform .12s;
+  }
+  .zg-btn:hover { background: var(--z-fill-2); }
+  .zg-btn:active { transform: scale(.985); }
+  .zg-btn.primary { background: var(--z-accent); color: #fff; font-weight: 600; }
+  .zg-btn.primary:hover { filter: brightness(1.06); }
+  .zg-btn.ghost { background: transparent; color: var(--z-ink2); }
+  .zg-btn.ghost:hover { background: var(--z-fill); color: var(--z-ink); }
+  .zg-btn.danger { background: transparent; color: var(--z-red-ink); }
+  .zg-btn.danger:hover { background: var(--z-red-soft); }
+  .zg-btn.small { height: 28px; padding: 0 10px; font-size: 11.5px; }
+  .zg-btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+
+  .zg-status { font-size: 11px; color: var(--z-ink3); }
+  .zg-status.ok { color: var(--z-green-ink); }
+  .zg-status.bad { color: var(--z-red-ink); }
+  .zg-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .zg-inline .zg-status { margin-left: 2px; }
+
+  .zg-drop {
+    display: grid; place-items: center; gap: 5px; padding: 16px; text-align: center;
+    border: 1px dashed var(--z-hairline); border-radius: 10px; background: var(--z-fill);
+    font-size: 11.5px; color: var(--z-ink2); cursor: pointer; transition: background .18s, border-color .18s;
+  }
+  .zg-drop:hover { background: var(--z-fill-2); border-color: var(--z-ink3); }
+  .zg-drop svg { width: 18px; height: 18px; color: var(--z-ink3); }
+  .zg-drop small { font-size: 10px; color: var(--z-ink3); }
+  .zg-drop input { display: none; }
+
+  .zg-lead { margin: 0; font-size: 12px; line-height: 1.7; color: var(--z-ink2); }
+  .zg-bullets { padding: 4px 14px; }
+  .zg-bullets ul { margin: 7px 0 8px; padding-left: 17px; display: grid; gap: 5px; }
+  .zg-bullets li { font-size: 11.5px; line-height: 1.65; color: var(--z-ink2); }
+  .zg-stats { display: grid; grid-template-columns: 1fr 1fr; }
+  .zg-stat { padding: 11px 14px; }
+  .zg-stat:nth-child(odd) { border-right: 1px solid var(--z-hairline); }
+  .zg-stat:nth-child(n+3) { border-top: 1px solid var(--z-hairline); }
+  .zg-stat b { display: block; font-size: 17px; font-weight: 600; letter-spacing: -.3px; }
+  .zg-stat span { display: block; margin-top: 2px; font-size: 10.5px; color: var(--z-ink3); }
+
+  .zg-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--z-hairline); background: var(--z-card-t); }
+  .zg-foot-left, .zg-foot-right { display: flex; align-items: center; gap: 6px; }
+  .zg-foot-left { flex: 1; }
+
+  /* ---------- 历史 ---------- */
+  .zh-toolbar { flex: none; display: flex; align-items: center; gap: 10px; padding: 0 20px 10px; }
+  .zh-search { position: relative; width: 236px; margin-left: auto; }
+  .zh-search input {
+    width: 100%; height: 30px; padding: 0 10px 0 28px; border: 1px solid transparent; border-radius: 8px;
+    background: var(--z-fill); font-size: 12px; transition: background .18s, box-shadow .18s, border-color .18s;
+  }
+  .zh-search input:focus { outline: none; background: var(--z-card); border-color: var(--z-accent); box-shadow: 0 0 0 3px var(--z-ring); }
+  .zh-search svg { position: absolute; left: 9px; top: 50%; width: 13px; height: 13px; color: var(--z-ink3); transform: translateY(-50%); pointer-events: none; }
+  .zh-summary { flex: none; padding: 0 22px 9px; font-size: 10.5px; color: var(--z-ink3); }
+  .zh-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 318px minmax(0, 1fr); gap: 14px; padding: 0 20px 16px; }
+  .zh-list { display: grid; align-content: start; gap: 6px; overflow-y: auto; overflow-x: hidden; padding-right: 2px; }
+  .zh-row {
+    display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 11px;
+    min-width: 0; background: var(--z-card); box-shadow: 0 0 0 1px var(--z-hairline); text-align: left;
+    transition: box-shadow .18s, transform .18s;
+  }
+  .zh-row:hover { transform: translateY(-1px); box-shadow: 0 0 0 1px var(--z-hairline), 0 6px 16px -8px rgba(15, 23, 42, .35); }
+  .zh-row[aria-selected="true"] { box-shadow: 0 0 0 1.5px var(--z-accent); }
+  .zh-score { width: 38px; height: 38px; flex: none; display: grid; place-items: center; border-radius: 10px; background: var(--z-fill); font-size: 13px; font-weight: 600; }
+  .zh-row.needs .zh-score { background: var(--z-orange-soft); color: var(--z-orange-ink); }
+  .zh-main { flex: 1; min-width: 0; }
+  .zh-l1 { display: block; font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .zh-l2 { display: block; margin-top: 2px; font-size: 10.5px; color: var(--z-ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .zh-arrow { width: 13px; height: 13px; flex: none; color: var(--z-ink3); }
+  .zh-detail { overflow: auto; padding: 16px; background: var(--z-card); border-radius: 14px; box-shadow: 0 0 0 1px var(--z-hairline); }
+  .zh-detailhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .zh-bigscore { margin-top: 1px; font-size: 32px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.1; }
+  .zh-bigscore span { margin-left: 3px; font-size: 12px; font-weight: 400; letter-spacing: 0; color: var(--z-ink3); }
+  .zh-stats { margin-top: 12px; border-top: 1px solid var(--z-hairline); }
+  .zh-statrow { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; font-size: 11.5px; }
+  .zh-statrow + .zh-statrow { border-top: 1px solid var(--z-hairline); }
+  .zh-statrow dt { flex: none; width: 74px; color: var(--z-ink3); font-size: 10.5px; }
+  .zh-statrow dd { margin: 0; flex: 1; min-width: 0; color: var(--z-ink2); line-height: 1.6; text-wrap: pretty; }
+  .zh-h4 { margin: 14px 0 2px; font-size: 11px; font-weight: 600; color: var(--z-ink3); }
+  .zh-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+  .zh-empty { padding: 40px 12px; text-align: center; font-size: 11.5px; color: var(--z-ink3); }
+
+  /* ---------- 提示条 ---------- */
+  .zygr-toast {
+    position: fixed; left: 50%; top: 20px; z-index: 2147483640; transform: translateX(-50%);
+    padding: 9px 15px; border-radius: 999px; background: rgba(29, 29, 31, .88); color: #fff;
+    font-size: 11.5px; line-height: 1.4; white-space: nowrap; pointer-events: none;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .22);
+    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    animation: zt-in .22s var(--z-ease);
+  }
+  @keyframes zt-in { from { opacity: 0; transform: translate(-50%, -8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+  @media (max-width: 860px) {
+    .zygr-dialog { height: min(820px, calc(100vh - 32px)); }
+    .zg-shell { grid-template-columns: 1fr; }
+    .zg-nav { flex-direction: row; overflow-x: auto; padding: 0 12px 8px; border-right: 0; border-bottom: 1px solid var(--z-hairline); }
+    .zg-navitem { height: 32px; white-space: nowrap; }
+    .zg-navfoot { display: none; }
+    .zg-pane { padding: 14px 16px 22px; }
+    .zh-body { grid-template-columns: 1fr; }
+    .zh-list { max-height: 34vh; }
+    .zh-detail { min-height: 240px; }
+  }
+  @media (max-width: 640px) {
+    .zygr-overlay { padding: 0; place-items: end center; }
+    .zygr-dialog { width: 100%; height: calc(100vh - 24px); border-radius: 20px 20px 0 0; }
+    .zh-toolbar { flex-wrap: wrap; }
+    .zh-search { width: 100%; margin-left: 0; }
+    .zg-row { flex-wrap: wrap; }
+    .zg-select, .zg-select.wide { width: 100%; }
+    .zg-foot { flex-wrap: wrap; }
+  }
+  @media (max-width: 520px) {
+    .zygr-panel { left: 10px; right: 10px; bottom: 10px; width: auto; max-height: 78vh; border-radius: 18px; }
+    .zp-options { flex-wrap: wrap; }
+    .zp-seg { margin-left: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .zygr-scope *, .zygr-scope *::before, .zygr-scope *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 背景：模拟智学网阅卷页 -->
+<div class="site" aria-hidden="true">
+  <div class="site-top">
+    <span class="site-logo">智</span>
+    <b>智学网</b>
+    <span>在线阅卷</span>
+    <span class="spacer"></span>
+    <span class="site-user">高二地理 · 期中联考 <span class="site-avatar">王</span></span>
+  </div>
+  <div class="site-main">
+    <aside class="site-side">
+      <span class="side-cap">任务列表</span>
+      <div class="side-item"><span>43(1) 综合题</span><span>147</span></div>
+      <div class="side-item on"><span>43(2) 综合题</span><span>96</span></div>
+      <div class="side-item"><span>44(1) 读图题</span><span>132</span></div>
+      <div class="side-item"><span>44(2) 材料题</span><span>78</span></div>
+    </aside>
+    <div class="site-stage">
+      <article class="sheet">
+        <header class="sheet-h"><b>43(2) 综合题</b><span>满分 10 分 · 第 1 / 96 份</span></header>
+        <p class="sheet-q">阅读某区域等高线地形图，回答下列问题。<br>（1）描述图中河流干流的流向，并写出该图的比例尺。</p>
+        <div class="sheet-answer"><span class="sheet-stamp">阅卷中</span></div>
+      </article>
+    </div>
+  </div>
+</div>
+
+<!-- 预览控制台 -->
+<aside class="demo-dock">
+  <div class="dd-title">UI 预览 <span>Apple 风格改版</span></div>
+  <div class="dd-row">
+    <button data-demo="panel">主面板</button>
+    <button data-demo="settings">设置</button>
+    <button data-demo="history">历史</button>
+  </div>
+  <div class="dd-row">
+    <span class="dd-label">状态</span>
+    <div class="dd-seg" id="dd-state">
+      <button data-state="empty">空</button>
+      <button data-state="busy">批改中</button>
+      <button data-state="result" class="on">已出分</button>
+    </div>
+  </div>
+  <div class="dd-row">
+    <span class="dd-label">外观</span>
+    <div class="dd-seg" id="dd-theme">
+      <button data-theme-btn="light" class="on">浅色</button>
+      <button data-theme-btn="dark">深色</button>
+    </div>
+  </div>
+  <div class="dd-hint">按钮、开关、分段控件、历史列表都可以点；改版本身只替换样式与布局，不改变任何功能。</div>
+</aside>
+
+<div class="zygr-scope" id="zygr-root" data-theme="light">
+
+  <!-- 主面板 -->
+  <section class="zygr-panel" id="zp" aria-label="智阅批改助手">
+    <header class="zp-head">
+      <div class="zp-brand">
+        <span class="zp-logo" aria-hidden="true">智</span>
+        <div class="zp-titles">
+          <div class="zp-titleline"><strong>智阅批改助手</strong><span class="zp-ver">v1.3.4</span></div>
+          <span class="zp-sub" id="zp-sub">已读取题目 · 43(2)</span>
+        </div>
+      </div>
+      <div class="zp-header-actions">
+        <button class="zp-iconbtn" data-act="collapse" aria-label="折叠面板" title="折叠">
+          <svg class="zp-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <button class="zp-iconbtn" data-act="close" aria-label="关闭面板" title="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="zp-body" id="zp-body">
+      <div class="zp-status">
+        <span class="zp-stage"><i class="zp-dot ok" id="zp-dot"></i><span id="zp-stage">完成</span></span>
+        <span class="zp-count" id="zp-progress">已批 533 · 任务 147</span>
+        <span class="zp-chip ok" id="zp-chip">缓存命中</span>
+      </div>
+      <div class="zp-track"><i id="zp-bar" style="width:100%"></i></div>
+
+      <section class="zp-card" aria-label="当前题目">
+        <div class="zp-qhead">
+          <div class="zp-qmain">
+            <span class="zp-kicker">当前题目</span>
+            <div class="zp-qtitle">43(2) <span>地理 · 综合题</span></div>
+            <div class="zp-qmeta">3 个小题 · 满分 10 · 2 张作答图</div>
+          </div>
+          <button class="zp-textbtn" data-act="reread">重新读取</button>
+        </div>
+        <div class="zp-thumbs">
+          <button class="zp-thumb" aria-label="查看作答图 1" title="作答图 1"><i></i><i></i><i></i></button>
+          <button class="zp-thumb" aria-label="查看作答图 2" title="作答图 2"><i></i><i></i><i></i></button>
+          <span class="zp-thumb plus" aria-hidden="true">+</span>
+        </div>
+      </section>
+
+      <section class="zp-card zp-result" id="zp-result" aria-live="polite"></section>
+      <div class="zp-error" id="zp-error" hidden></div>
+    </div>
+
+    <footer class="zp-foot">
+      <div class="zp-actions">
+        <button class="zp-btn primary" data-act="grade">开始批改</button>
+        <button class="zp-btn zp-submit" data-act="submit">提交结果</button>
+      </div>
+
+      <div class="zp-options">
+        <button class="zp-mini" data-act="continuous">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5l11 7-11 7z"/></svg>
+          <span>连续批阅</span>
+        </button>
+        <span class="zp-optlabel">最多</span>
+        <div class="zp-stepper">
+          <button data-step="-1" aria-label="减少份数">−</button>
+          <input id="zp-limit-input" type="number" min="1" max="5000" step="1" value="20" aria-label="连续批阅份数上限">
+          <button data-step="1" aria-label="增加份数">+</button>
+        </div>
+        <span class="zp-optlabel">份</span>
+        <div class="zp-seg" role="group" aria-label="输出档位">
+          <button data-output="brief" aria-pressed="false">简略</button>
+          <button data-output="standard" aria-pressed="true">标准</button>
+          <button data-output="detailed" aria-pressed="false">详细</button>
+        </div>
+      </div>
+
+      <div class="zp-footbar">
+        <button class="zp-skip" data-act="skip-confirm" role="switch" aria-checked="false" aria-label="提交免确认">
+          <span class="zp-switch" aria-hidden="true"></span>
+          <span>提交免确认</span>
+        </button>
+        <span class="zp-tools">
+          <button class="zp-quiet" data-act="history">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            历史
+          </button>
+          <button class="zp-quiet" data-act="settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="7" cy="17" r="2"/></svg>
+            设置
+          </button>
+        </span>
+      </div>
+    </footer>
+  </section>
+
+  <!-- 设置 -->
+  <div class="zygr-overlay" id="settings" hidden>
+    <div class="zygr-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="zg-head">
+        <div>
+          <h2 id="settings-title">设置</h2>
+          <p>智阅批改助手 v1.3.4 · 配置只保存在本机</p>
+        </div>
+        <button class="zp-iconbtn" data-close aria-label="关闭设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+
+      <div class="zg-shell">
+        <nav class="zg-nav" aria-label="设置分区">
+          <button class="zg-navitem is-active" data-page="context">
+            <span class="zg-tile blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h9a3 3 0 013 3v13H8a3 3 0 01-3-3z"/><path d="M8 4v13a3 3 0 00-3 3"/></svg></span>
+            批改上下文
+          </button>
+          <button class="zg-navitem" data-page="api">
+            <span class="zg-tile purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v4M15 3v4M7 7h10v3a5 5 0 01-10 0zM12 15v6"/></svg></span>
+            接口与链路
+          </button>
+          <button class="zg-navitem" data-page="generator">
+            <span class="zg-tile pink"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.7 4.4L18 9l-4.3 1.6L12 15l-1.7-4.4L6 9l4.3-1.6z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg></span>
+            评分标准生成
+          </button>
+          <button class="zg-navitem" data-page="advanced">
+            <span class="zg-tile gray"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h14M5 12h14M5 18h14"/><circle cx="9" cy="6" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="8" cy="18" r="2" fill="currentColor" stroke="none"/></svg></span>
+            高级
+          </button>
+          <div class="zg-navfoot">所有配置与记录只存在浏览器本地，不上传服务器。清空数据后需重新填写。</div>
+        </nav>
+
+        <div class="zg-pane">
+          <!-- 批改上下文 -->
+          <div class="zg-page is-active" data-page="context">
+            <div class="zg-pagehead">
+              <h2>批改上下文</h2>
+              <p>题号、满分与小题由阅卷页读取；这里的参考答案与评分标准会随每次批改发送给模型。</p>
+            </div>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">题目与阅卷依据</h3>
+              <div class="zg-group">
+                <div class="zg-field">
+                  <label for="ctx-question">题目内容 <span class="zg-opt">可选</span></label>
+                  <textarea id="ctx-question" rows="3" placeholder="留空时使用页面题号，填写后能提高判断精度">阅读某区域等高线地形图，回答下列问题。</textarea>
+                </div>
+                <div class="zg-field">
+                  <label for="ctx-answer">参考答案 <span class="zg-req">必填</span></label>
+                  <textarea id="ctx-answer" rows="5">（1）河流干流自西北流向东南；比例尺 1:50000。
+（2）甲处为山脊，乙处为山谷；乙处易发育河流。
+（3）坡度陡，施工难度大；需架桥，成本较高。</textarea>
+                </div>
+                <div class="zg-field">
+                  <label for="ctx-rubric">评分标准 <span class="zg-req">必填</span></label>
+                  <textarea id="ctx-rubric" rows="6">第 (1) 问 4 分：流向 2 分（西北—东南），比例尺 2 分（1:50000）。
+第 (2) 问 4 分：山脊 1 分，山谷 1 分，发育河流的判断 2 分。
+第 (3) 问 2 分：坡度与成本各 1 分，只答其一给 1 分。
+出现方位颠倒、比例尺换算错误时，该点不得分。</textarea>
+                </div>
+              </div>
+              <p class="zg-note">满分不必手工维护：批改前会读页面，不一致时自动写回并提示一行，不再阻断批改。</p>
+            </section>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">基本参数</h3>
+              <div class="zg-group">
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">本方案满分</span><span class="zg-rowdesc">与页面不一致时自动同步</span></div>
+                  <input class="zg-input zg-num" id="ctx-max" type="number" min="0" step="0.5" value="10" aria-label="本方案满分">
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">学科</span><span class="zg-rowdesc">用于自动套用图片策略与判分口径</span></div>
+                  <span class="zg-select">
+                    <select id="ctx-subject" aria-label="学科">
+                      <option>不指定（按手动参数）</option>
+                      <option selected>地理</option>
+                      <option>语文</option>
+                      <option>数学</option>
+                      <option>英语</option>
+                      <option>物理</option>
+                      <option>化学</option>
+                      <option>生物</option>
+                      <option>历史</option>
+                      <option>政治</option>
+                    </select>
+                  </span>
+                </div>
+              </div>
+            </section>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">标准库</h3>
+              <div class="zg-group">
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">本题标准</span><span class="zg-rowdesc">槽位 43(2) · 今天 09:41 已保存</span></div>
+                  <div class="zg-rowactions">
+                    <button class="zg-btn small" data-s="rubric-save">保存</button>
+                    <button class="zg-btn small ghost" data-s="rubric-load">载入</button>
+                    <button class="zg-btn small ghost" data-s="rubric-clear">清空</button>
+                  </div>
+                </div>
+              </div>
+              <p class="zg-note">切到其它题号时会自动存下当前这份、载入那道题已存的标准；没存过则清空答案与标准，避免拿错答案。</p>
+            </section>
+          </div>
+
+          <!-- 接口与链路 -->
+          <div class="zg-page" data-page="api">
+            <div class="zg-pagehead">
+              <h2>接口与链路</h2>
+              <p>评分只走多模态直评：把作答图直接交给视觉模型，不做 OCR 中转。</p>
+            </div>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">平台预设</h3>
+              <div class="zg-group">
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">平台</span><span class="zg-rowdesc">切换会恢复该平台记住的 Key、模型与思考模式</span></div>
+                  <span class="zg-select wide">
+                    <select id="api-platform" aria-label="平台预设">
+                      <option value="custom">自定义（手动填写）</option>
+                      <option value="deepseek" selected>DeepSeek</option>
+                      <option value="siliconflow">硅基流动</option>
+                      <option value="moonshot">Kimi / Moonshot</option>
+                      <option value="dashscope">通义千问 / DashScope</option>
+                      <option value="zhipu">智谱 GLM</option>
+                      <option value="volc">火山方舟</option>
+                    </select>
+                  </span>
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">接口地址</span></div>
+                  <input class="zg-input" id="api-endpoint" style="max-width:330px" value="https://api.deepseek.com/v1/chat/completions" aria-label="接口地址">
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">API Key</span></div>
+                  <span class="zg-inputwrap" style="max-width:330px;flex:1">
+                    <input class="zg-input" id="api-key" type="password" value="sk-demo-1234567890abcdef" aria-label="API Key">
+                    <button data-s="reveal" aria-label="显示或隐藏 API Key">显示</button>
+                  </span>
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">模型</span><span class="zg-rowdesc">必须支持图片输入</span></div>
+                  <input class="zg-input" id="api-model" style="max-width:200px" value="deepseek-vl2" aria-label="模型名称">
+                </div>
+                <div class="zg-row" id="model-picker-row" hidden>
+                  <div class="zg-rowmain"><span class="zg-rowlabel">模型列表</span><span class="zg-rowdesc">选择一个填入上方模型</span></div>
+                  <span class="zg-select">
+                    <select id="model-picker" aria-label="模型列表">
+                      <option>deepseek-vl2</option>
+                      <option>deepseek-chat</option>
+                      <option>Qwen2.5-VL-72B-Instruct</option>
+                    </select>
+                  </span>
+                </div>
+              </div>
+              <div class="zg-inline" style="margin-top:8px">
+                <button class="zg-btn small" data-s="fetch-models">获取模型列表</button>
+                <button class="zg-btn small" data-s="test-vlm">测试多模态</button>
+                <span class="zg-status" id="status-vlm"></span>
+              </div>
+              <p class="zg-note">平台不支持在线列表时只提示手动填写，不会报错中断。</p>
+            </section>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">思考模式</h3>
+              <div class="zg-group">
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">思考程度</span><span class="zg-rowdesc">默认关闭，长链推理模型可能需要数十秒</span></div>
+                  <div class="zg-seg" data-seg="thinking" role="group" aria-label="思考模式">
+                    <button data-value="off" aria-pressed="true">关闭思考</button>
+                    <button data-value="auto" aria-pressed="false">模型默认</button>
+                  </div>
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">生效检测</span><span class="zg-rowdesc">GLM-5.3 等模型会强制思考，选关闭也按模型默认运行</span></div>
+                  <button class="zg-btn small" data-s="test-thinking">测试</button>
+                  <span class="zg-status" id="status-thinking"></span>
+                </div>
+              </div>
+            </section>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">输出档位</h3>
+              <div class="zg-group">
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">模型输出字数</span><span class="zg-rowdesc">改动立即保存，从下一份开始生效</span></div>
+                  <div class="zg-seg" data-seg="output" role="group" aria-label="输出档位">
+                    <button data-value="brief" aria-pressed="false">简略</button>
+                    <button data-value="standard" aria-pressed="true">标准</button>
+                    <button data-value="detailed" aria-pressed="false">详细</button>
+                  </div>
+                </div>
+              </div>
+              <p class="zg-note">简略最省 token，标准适中，详细最贵。批改进行中会锁定，避免误以为能影响当前这一份。</p>
+            </section>
+          </div>
+
+          <!-- 评分标准生成 -->
+          <div class="zg-page" data-page="generator">
+            <div class="zg-pagehead">
+              <h2>评分标准生成</h2>
+              <p>选学科与题型，填写题目与学校标准答案，让模型生成结构化评分标准。会消费一次真实请求。</p>
+            </div>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">生成条件</h3>
+              <div class="zg-group">
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">学科</span></div>
+                  <span class="zg-select">
+                    <select id="gen-subject" aria-label="学科">
+                      <option>语文</option><option>数学</option><option>英语</option><option>物理</option>
+                      <option>化学</option><option>生物</option><option>历史</option><option>政治</option>
+                      <option selected>地理</option>
+                    </select>
+                  </span>
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">题型</span></div>
+                  <span class="zg-select">
+                    <select id="gen-type" aria-label="题型"></select>
+                  </span>
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">满分</span><span class="zg-rowdesc">留空则由 AI 建议</span></div>
+                  <input class="zg-input zg-num" id="gen-max" type="number" min="0" step="0.5" placeholder="10" aria-label="满分">
+                </div>
+              </div>
+              <p class="zg-note" id="gen-rule">生成口径：先考察图中信息提取是否完整，再考察描述是否准确，每项信息单独计分。</p>
+            </section>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">题目与标准答案</h3>
+              <div class="zg-group">
+                <div class="zg-field">
+                  <label for="gen-question">题目 <span class="zg-opt">作文类必填</span></label>
+                  <textarea id="gen-question" rows="3" placeholder="可粘贴题目文字，或留空仅用图片"></textarea>
+                </div>
+                <div class="zg-field">
+                  <label for="gen-answer">学校标准答案</label>
+                  <textarea id="gen-answer" rows="4" placeholder="化学式、公式符号可直接粘贴"></textarea>
+                </div>
+                <div class="zg-field">
+                  <label>标准答案图片 <span class="zg-opt">可多选</span></label>
+                  <label class="zg-drop">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M8 8l4-4 4 4M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+                    <span>点击选择图片</span>
+                    <small>支持多张，按顺序发送给模型</small>
+                    <input type="file" accept="image/*" multiple>
+                  </label>
+                </div>
+              </div>
+              <div class="zg-inline" style="margin-top:8px">
+                <button class="zg-btn primary" data-s="gen-run" id="gen-run">生成评分标准</button>
+                <span class="zg-status" id="gen-status"></span>
+              </div>
+            </section>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">生成结果</h3>
+              <div class="zg-group">
+                <div class="zg-field">
+                  <label for="gen-result">可直接编辑，确认无误后一键填入</label>
+                  <textarea id="gen-result" rows="10" placeholder="生成的标准会出现在这里"></textarea>
+                </div>
+              </div>
+              <div class="zg-inline" style="margin-top:8px">
+                <button class="zg-btn" data-s="gen-apply">一键填入批改上下文</button>
+                <button class="zg-btn ghost" data-s="gen-copy">复制</button>
+                <button class="zg-btn ghost" data-s="gen-clear">清空</button>
+              </div>
+            </section>
+          </div>
+
+          <!-- 高级 -->
+          <div class="zg-page" data-page="advanced">
+            <div class="zg-pagehead">
+              <h2>高级</h2>
+              <p>图片、缓存、限流与用量。改错这里不会弄坏数据，但可能让批改变慢或变贵。</p>
+            </div>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">图片与提示词</h3>
+              <div class="zg-group">
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">图片精度</span><span class="zg-rowdesc">手写内容建议高精度</span></div>
+                  <div class="zg-seg" data-seg="detail" role="group" aria-label="图片精度">
+                    <button data-value="high" aria-pressed="true">高</button>
+                    <button data-value="auto" aria-pressed="false">自动</button>
+                    <button data-value="low" aria-pressed="false">低</button>
+                  </div>
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">长边上限</span><span class="zg-rowdesc">只等比缩小，绝不放大</span></div>
+                  <input class="zg-input zg-num" type="number" value="1600" aria-label="图片长边上限">
+                  <span class="zg-rowvalue">px</span>
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">JPEG 质量</span><span class="zg-rowdesc">不影响计费，只影响体积</span></div>
+                  <input class="zg-input zg-num" type="number" step="0.01" value="0.82" aria-label="JPEG 质量">
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">历史保留条数</span></div>
+                  <input class="zg-input zg-num" type="number" value="500" aria-label="历史保留条数">
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">缓存有效期</span><span class="zg-rowdesc">超期后同题同图需重新请求</span></div>
+                  <input class="zg-input zg-num" type="number" value="30" aria-label="缓存有效期">
+                  <span class="zg-rowvalue">天</span>
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">缓存条数上限</span><span class="zg-rowdesc">双评大卷可提到 3000</span></div>
+                  <input class="zg-input zg-num" type="number" value="2000" aria-label="缓存条数上限">
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">按学科自动套用图片策略</span><span class="zg-rowdesc">数学/物理/化学 1600px，语文/英语/生物 1440px，历史/政治/地理 1280px</span></div>
+                  <button class="zg-switch" role="switch" aria-checked="true" data-toggle="autoBySubject" aria-label="按学科自动套用图片策略"></button>
+                </div>
+              </div>
+            </section>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">累计用量</h3>
+              <div class="zg-group">
+                <div class="zg-stats">
+                  <div class="zg-stat"><b>128</b><span>批改次数</span></div>
+                  <div class="zg-stat"><b>42</b><span>本地命中（33%）</span></div>
+                  <div class="zg-stat"><b>186,240</b><span>输入 token（前缀命中 58,120）</span></div>
+                  <div class="zg-stat"><b>39,480</b><span>输出 token（含思考 6,120）</span></div>
+                </div>
+              </div>
+            </section>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">限速与超时</h3>
+              <div class="zg-group">
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">并发上限</span></div>
+                  <input class="zg-input zg-num" type="number" value="2" aria-label="并发上限">
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">RPM 预算</span><span class="zg-rowdesc">并发越高越容易路由到无缓存实例</span></div>
+                  <input class="zg-input zg-num" type="number" value="60" aria-label="RPM 预算">
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">TPM 预算</span><span class="zg-rowdesc">低于 12000 时大图容易排队</span></div>
+                  <input class="zg-input zg-num" type="number" value="60000" aria-label="TPM 预算">
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">请求超时</span></div>
+                  <input class="zg-input zg-num" type="number" value="120000" aria-label="请求超时毫秒">
+                  <span class="zg-rowvalue">ms</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="zg-section">
+              <h3 class="zg-grouptitle">数据</h3>
+              <div class="zg-group">
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">重置为默认配置</span><span class="zg-rowdesc">含接口地址与图片参数，API Key 也会清空</span></div>
+                  <button class="zg-btn small danger" data-s="reset">重置</button>
+                </div>
+                <div class="zg-row">
+                  <div class="zg-rowmain"><span class="zg-rowlabel">清空全部数据</span><span class="zg-rowdesc">历史、缓存、标准库与配置一并删除</span></div>
+                  <button class="zg-btn small danger" data-s="clear">清空</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+
+      <footer class="zg-foot">
+        <div class="zg-foot-left">
+          <button class="zg-btn small ghost" data-s="export">导出配置</button>
+          <button class="zg-btn small ghost" data-s="import">导入配置</button>
+        </div>
+        <div class="zg-foot-right">
+          <button class="zg-btn" data-close>关闭</button>
+          <button class="zg-btn primary" data-s="save">保存配置</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 历史 -->
+  <div class="zygr-overlay" id="history" hidden>
+    <div class="zygr-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title">
+      <header class="zg-head">
+        <div>
+          <h2 id="history-title">历史记录</h2>
+          <p id="history-sub">共 4 条 · 2 条需复核</p>
+        </div>
+        <button class="zp-iconbtn" data-close aria-label="关闭历史">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+
+      <div class="zh-toolbar">
+        <div class="zg-seg" data-seg="history" role="group" aria-label="复核筛选">
+          <button data-value="all" aria-pressed="true">全部</button>
+          <button data-value="review" aria-pressed="false">需复核</button>
+          <button data-value="normal" aria-pressed="false">正常</button>
+        </div>
+        <div class="zh-search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input id="h-search" type="search" placeholder="搜索题号或评分依据" aria-label="搜索历史">
+        </div>
+      </div>
+      <div class="zh-summary" id="h-summary"></div>
+
+      <div class="zh-body">
+        <div class="zh-list" id="h-list"></div>
+        <div class="zh-detail" id="h-detail"></div>
+      </div>
+
+      <footer class="zg-foot">
+        <div class="zg-foot-left">
+          <button class="zg-btn small danger" data-h="clear">清空历史</button>
+        </div>
+        <div class="zg-foot-right">
+          <button class="zg-btn small" data-h="csv">导出 CSV</button>
+          <button class="zg-btn small" data-h="html">导出 HTML</button>
+          <button class="zg-btn small primary" data-h="next">下一条需复核</button>
+          <button class="zg-btn small ghost" data-close>关闭</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- 缓存诊断 -->
+  <div class="zygr-overlay" id="help" hidden style="z-index:2147483620">
+    <div class="zygr-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title" style="width:min(560px,100%);height:auto;max-height:min(82vh,700px)">
+      <header class="zg-head">
+        <div>
+          <h2 id="help-title">前缀缓存未命中</h2>
+          <p>不影响阅卷结果，只影响费用与首字速度</p>
+        </div>
+        <button class="zp-iconbtn" data-close aria-label="关闭说明">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <div class="zg-pane" style="padding-top:0;display:grid;gap:14px">
+        <p class="zg-lead">deepseek-vl2 已连续 3 次没有命中前缀缓存。本次固定文本约 940 token，输入合计 1,284 token（含 2 张作答图）。</p>
+        <section class="zg-section">
+          <h3 class="zg-grouptitle">可能的原因</h3>
+          <div class="zg-group zg-bullets">
+            <ul>
+              <li>固定文本里混进了每份都会变的内容：时间、学生姓名或学号。</li>
+              <li>并发太高时请求被路由到了别的实例，或距上一份超过 TTL。</li>
+              <li>平台没有返回 cached_tokens 字段，无法据此判断。</li>
+            </ul>
+          </div>
+        </section>
+        <section class="zg-section">
+          <h3 class="zg-grouptitle">可以怎么处理</h3>
+          <div class="zg-group zg-bullets">
+            <ul>
+              <li>同一道题连续批完再换题，别在题与题之间来回跳。</li>
+              <li>把 RPM 降到 15 左右；并发越高越容易落到没有缓存的实例。</li>
+              <li>批量期间固定输出档位，切档会改写提示词、缓存要重建。</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+      <footer class="zg-foot">
+        <div class="zg-foot-left"></div>
+        <div class="zg-foot-right"><button class="zg-btn primary" data-close>知道了</button></div>
+      </footer>
+    </div>
+  </div>
+
+  <div class="zygr-toast" id="zygr-toast" hidden></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var root = document.getElementById("zygr-root");
+  var panel = document.getElementById("zp");
+  var settings = document.getElementById("settings");
+  var historyDlg = document.getElementById("history");
+  var helpDlg = document.getElementById("help");
+  var toastEl = document.getElementById("zygr-toast");
+  var state = { mode: "result", continuous: false, limit: 20, output: "standard", skipConfirm: false };
+
+  function $(sel, scope) { return (scope || document).querySelector(sel); }
+  function $$(sel, scope) { return Array.prototype.slice.call((scope || document).querySelectorAll(sel)); }
+  function show(el) { el.hidden = false; }
+  function hide(el) { el.hidden = true; }
+  var toastTimer = 0;
+  function toast(message) {
+    toastEl.textContent = message;
+    toastEl.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.hidden = true; }, 2200);
+  }
+  function num(value, fallback) {
+    var n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  /* ---------------- 主面板 ---------------- */
+  var EMPTY_HTML =
+    '<div class="zp-empty">' +
+      '<span class="zp-empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.7 4.4L18 9l-4.3 1.6L12 15l-1.7-4.4L6 9l4.3-1.6z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg></span>' +
+      '<strong>批改结果将显示在这里</strong>' +
+      '<p>读取作答图后，按当前题目的参考答案与评分标准直接评分。</p>' +
+    '</div>';
+
+  var BUSY_HTML =
+    '<div class="zp-skeleton" aria-label="正在评分">' +
+      '<div class="big"></div><div class="w70"></div><div></div><div class="w50"></div><div></div>' +
+    '</div>';
+
+  var RESULT_HTML =
+    '<div class="zp-scorehead">' +
+      '<div>' +
+        '<span class="zp-kicker">得分</span>' +
+        '<div class="zp-score"><input id="zp-total" value="8.5" inputmode="decimal" data-max="10" aria-label="总分"><span>/ 10</span></div>' +
+      '</div>' +
+      '<div class="zp-badges"><span class="zp-pill ok">可辨认</span><span class="zp-pill warn">需复核</span></div>' +
+    '</div>' +
+    '<p class="zp-reason">第 (1) 问准确写出「西北—东南」走向，比例尺换算正确；(2) 问风向判断正确但未说明判断依据，扣 1 分；(3) 问数值正确、漏写单位，扣 0.5 分。</p>' +
+    '<div class="zp-sublist">' +
+      '<div class="zp-subrow"><div class="zp-submain"><span class="zp-sublabel">(1) 流向与比例尺</span><span class="zp-subreason">走向与比例尺均正确</span></div><span class="zp-subscore"><input class="zp-subinput" value="4" data-max="4" aria-label="小题 1 得分"><em>/4</em></span></div>' +
+      '<div class="zp-subrow"><div class="zp-submain"><span class="zp-sublabel">(2) 地形部位判断</span><span class="zp-subreason">风向判断正确，未说明理由，扣 1 分</span></div><span class="zp-subscore"><input class="zp-subinput" value="3" data-max="4" aria-label="小题 2 得分"><em>/4</em></span></div>' +
+      '<div class="zp-subrow"><div class="zp-submain"><span class="zp-sublabel">(3) 施工条件分析</span><span class="zp-subreason">数值换算正确，单位漏写，扣 0.5 分</span></div><span class="zp-subscore"><input class="zp-subinput" value="1.5" data-max="2" aria-label="小题 3 得分"><em>/2</em></span></div>' +
+    '</div>' +
+    '<div class="zp-meta"><div class="zp-metaline">模型 deepseek-vl2 · 耗时 6.8s</div><div class="zp-metaline">输入 1,284（前缀命中 0） · 输出 216（含思考 84）</div></div>' +
+    '<button class="zp-notice" data-act="cache-help"><span>前缀缓存已连续 3 次未命中，点击查看原因</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>';
+
+  function renderPanel() {
+    var result = $("#zp-result");
+    var stage = $("#zp-stage");
+    var dot = $("#zp-dot");
+    var bar = $("#zp-bar");
+    var chip = $("#zp-chip");
+    var progress = $("#zp-progress");
+    var gradeBtn = $('[data-act="grade"]', panel);
+    var submitBtn = $('[data-act="submit"]', panel);
+
+    if (state.mode === "empty") {
+      result.innerHTML = EMPTY_HTML;
+      stage.textContent = "就绪";
+      dot.className = "zp-dot";
+      bar.style.width = "8%";
+      chip.textContent = "待配置";
+      chip.className = "zp-chip";
+      progress.textContent = "已批 533 · 任务 147";
+      gradeBtn.disabled = false;
+      submitBtn.disabled = true;
+    } else if (state.mode === "busy") {
+      result.innerHTML = BUSY_HTML;
+      stage.textContent = "评分中 · 多模态直评";
+      dot.className = "zp-dot";
+      bar.style.width = "70%";
+      chip.textContent = "新结果";
+      chip.className = "zp-chip new";
+      progress.textContent = state.continuous ? "本轮 12 / " + state.limit : "已批 533 · 任务 147";
+      gradeBtn.disabled = true;
+      submitBtn.disabled = true;
+    } else {
+      result.innerHTML = RESULT_HTML;
+      stage.textContent = "完成";
+      dot.className = "zp-dot ok";
+      bar.style.width = "100%";
+      chip.textContent = "缓存命中";
+      chip.className = "zp-chip ok";
+      progress.textContent = state.continuous ? "本轮 12 / " + state.limit : "已批 533 · 任务 147";
+      gradeBtn.disabled = false;
+      submitBtn.disabled = false;
+    }
+    syncOutputButtons();
+    syncLimit();
+  }
+
+  function syncLimit() {
+    var input = $("#zp-limit-input");
+    input.value = String(state.limit);
+    input.disabled = state.continuous;
+    $$("[data-step]", panel).forEach(function (btn) { btn.disabled = state.continuous; });
+  }
+
+  function syncOutputButtons() {
+    $$("[data-output]", panel).forEach(function (btn) {
+      btn.setAttribute("aria-pressed", String(btn.dataset.output === state.output));
+    });
+    $$('[data-seg="output"] button', settings).forEach(function (btn) {
+      btn.setAttribute("aria-pressed", String(btn.dataset.value === state.output));
+    });
+  }
+
+  function syncTotalFromSubs() {
+    var total = $("#zp-total");
+    if (!total) return;
+    var sum = $$(".zp-subinput", panel).reduce(function (acc, input) { return acc + num(input.value, 0); }, 0);
+    total.value = String(Math.round(sum * 10) / 10);
+  }
+
+  function syncSubsFromTotal(value, max) {
+    var inputs = $$(".zp-subinput", panel);
+    if (!inputs.length) return;
+    var target = Math.min(Math.max(num(value, 0), 0), max);
+    var caps = inputs.map(function (input) { return num(input.dataset.max, 0); });
+    var capSum = caps.reduce(function (a, b) { return a + b; }, 0) || 1;
+    var acc = 0;
+    inputs.forEach(function (input, index) {
+      var val = Math.min(caps[index], Math.round((target * caps[index] / capSum) * 2) / 2);
+      input.value = String(val);
+      acc += val;
+    });
+    var diff = Math.round((target - acc) * 10) / 10;
+    if (diff !== 0) {
+      var last = inputs.length - 1;
+      var adjusted = Math.min(caps[last], Math.max(0, Math.round((num(inputs[last].value, 0) + diff) * 10) / 10));
+      inputs[last].value = String(adjusted);
+    }
+  }
+
+  panel.addEventListener("click", function (event) {
+    var step = event.target.closest("[data-step]");
+    if (step) {
+      if (state.continuous) return;
+      state.limit = Math.max(1, Math.min(5000, state.limit + Number(step.dataset.step)));
+      syncLimit();
+      toast("连续批阅上限 " + state.limit + " 份");
+      return;
+    }
+
+    var output = event.target.closest("[data-output]");
+    if (output) {
+      state.output = output.dataset.output;
+      syncOutputButtons();
+      toast("输出档位已设为：" + output.textContent.trim());
+      return;
+    }
+
+    var sw = event.target.closest('[role="switch"]');
+    if (sw) {
+      var on = sw.getAttribute("aria-checked") !== "true";
+      sw.setAttribute("aria-checked", String(on));
+      if (sw.closest('[data-act="skip-confirm"]')) {
+        state.skipConfirm = on;
+        toast(on ? "提交将跳过确认" : "提交前会再次确认");
+      }
+      return;
+    }
+
+    var btn = event.target.closest("[data-act]");
+    if (!btn) return;
+    var act = btn.dataset.act;
+
+    if (act === "collapse") {
+      panel.classList.toggle("is-collapsed");
+      btn.setAttribute("aria-expanded", String(!panel.classList.contains("is-collapsed")));
+    } else if (act === "close") {
+      hide(panel);
+    } else if (act === "reread") {
+      $("#zp-sub").textContent = "已读取题目 · 43(2)";
+      toast("已重新读取题号 43(2)");
+    } else if (act === "grade") {
+      state.mode = "busy";
+      renderPanel();
+      setTimeout(function () {
+        state.mode = "result";
+        renderPanel();
+        toast("批改完成：8.5 / 10");
+      }, 1400);
+    } else if (act === "submit") {
+      toast("已写入 8.5 分并提交（演示）");
+    } else if (act === "continuous") {
+      state.continuous = !state.continuous;
+      var label = $("[data-act='continuous'] span", panel);
+      btn.classList.toggle("running", state.continuous);
+      if (label) label.textContent = state.continuous ? "停止连续批阅" : "连续批阅";
+      if (state.continuous) {
+        state.mode = "busy";
+        renderPanel();
+        toast("连续批阅已开始，最多 " + state.limit + " 份");
+      } else {
+        state.mode = "result";
+        renderPanel();
+        toast("已停止连续批阅");
+      }
+    } else if (act === "history") {
+      show(historyDlg);
+      renderHistory();
+    } else if (act === "settings") {
+      show(settings);
+      switchPage("context");
+    } else if (act === "cache-help") {
+      show(helpDlg);
+    }
+  });
+
+  panel.addEventListener("change", function (event) {
+    if (event.target.id === "zp-total") {
+      var max = num(event.target.dataset.max, 10);
+      syncSubsFromTotal(event.target.value, max);
+      toast("总分已按小题比例分摊");
+    } else if (event.target.classList.contains("zp-subinput")) {
+      syncTotalFromSubs();
+    }
+  });
+
+  $("#zp-limit-input").addEventListener("change", function (event) {
+    state.limit = Math.max(1, Math.min(5000, Math.round(num(event.target.value, 20))));
+    syncLimit();
+  });
+
+  /* ---------------- 弹层通用 ---------------- */
+  function closeOverlay(el) { hide(el); }
+  $$("[data-close]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var overlay = btn.closest(".zygr-overlay");
+      if (overlay) closeOverlay(overlay);
+    });
+  });
+  [settings, historyDlg, helpDlg].forEach(function (overlay) {
+    overlay.addEventListener("click", function (event) {
+      if (event.target === overlay) closeOverlay(overlay);
+    });
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") return;
+    if (!helpDlg.hidden) { hide(helpDlg); return; }
+    if (!historyDlg.hidden) { hide(historyDlg); return; }
+    if (!settings.hidden) { hide(settings); return; }
+    if (!panel.hidden) hide(panel);
+  });
+
+  /* ---------------- 设置 ---------------- */
+  function switchPage(page) {
+    $$(".zg-navitem", settings).forEach(function (item) {
+      item.classList.toggle("is-active", item.dataset.page === page);
+    });
+    $$(".zg-page", settings).forEach(function (item) {
+      item.classList.toggle("is-active", item.dataset.page === page);
+    });
+    $(".zg-pane", settings).scrollTop = 0;
+  }
+
+  function setStatus(el, text, kind) {
+    if (!el) return;
+    el.textContent = text;
+    el.className = "zg-status" + (kind ? " " + kind : "");
+  }
+
+  var PRESETS = {
+    custom: { label: "自定义", endpoint: "", model: "" },
+    deepseek: { label: "DeepSeek", endpoint: "https://api.deepseek.com/v1/chat/completions", model: "deepseek-vl2" },
+    siliconflow: { label: "硅基流动", endpoint: "https://api.siliconflow.cn/v1/chat/completions", model: "Qwen/Qwen2.5-VL-72B-Instruct" },
+    moonshot: { label: "Kimi", endpoint: "https://api.moonshot.cn/v1/chat/completions", model: "moonshot-v1-32k-vision-preview" },
+    dashscope: { label: "通义千问", endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", model: "qwen-vl-max" },
+    zhipu: { label: "智谱 GLM", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions", model: "glm-4v-plus" },
+    volc: { label: "火山方舟", endpoint: "https://ark.cn-beijing.volces.com/api/v3/chat/completions", model: "doubao-vision-pro-32k" }
+  };
+
+  var TYPE_MAP = {
+    "语文": ["现代文阅读", "古诗文阅读", "文言文翻译", "语言文字运用", "名句默写", "作文"],
+    "数学": ["选择题", "填空题", "解答题", "证明题", "应用题"],
+    "英语": ["阅读理解", "完形填空", "语法填空", "短文改错", "翻译", "作文"],
+    "物理": ["选择题", "填空题", "实验题", "计算题", "简答题"],
+    "化学": ["选择题", "填空题", "实验题", "计算题", "方程式书写", "简答题"],
+    "生物": ["选择题", "填空题", "实验题", "识图题", "遗传推断题", "简答题"],
+    "历史": ["选择题", "填空题", "材料分析题", "简答题", "论述题"],
+    "政治": ["选择题", "填空题", "材料分析题", "辨析题", "简答题", "论述题"],
+    "地理": ["选择题", "填空题", "读图题", "综合题", "材料分析题", "简答题"]
+  };
+
+  $("#gen-subject").addEventListener("change", function (event) {
+    var types = TYPE_MAP[event.target.value] || [];
+    $("#gen-type").innerHTML = types.map(function (type) { return "<option>" + type + "</option>"; }).join("");
+    var hint = $("#gen-rule");
+    if (hint) hint.textContent = "生成口径：按「" + event.target.value + " · " + (types[types.length - 1] || "综合题") + "」的判分要点拆分得分点。";
+  });
+  (function initTypes() {
+    var types = TYPE_MAP[$("#gen-subject").value];
+    $("#gen-type").innerHTML = types.map(function (type) { return "<option>" + type + "</option>"; }).join("");
+    $("#gen-type").value = "综合题";
+  })();
+
+  $("#api-platform").addEventListener("change", function (event) {
+    var preset = PRESETS[event.target.value];
+    if (!preset) return;
+    $("#api-endpoint").value = preset.endpoint;
+    $("#api-model").value = preset.model;
+    toast("已切换到「" + preset.label + "」，恢复该平台记住的 Key 与模型");
+  });
+
+  $("#gen-result").addEventListener("input", function () {});
+
+  settings.addEventListener("click", function (event) {
+    var nav = event.target.closest(".zg-navitem");
+    if (nav) { switchPage(nav.dataset.page); return; }
+
+    var sw = event.target.closest(".zg-switch");
+    if (sw) {
+      var on = sw.getAttribute("aria-checked") !== "true";
+      sw.setAttribute("aria-checked", String(on));
+      toast("「" + (sw.dataset.toggle || "选项") + "」已" + (on ? "开启" : "关闭") + "（演示，未写入配置）");
+      return;
+    }
+
+    var segBtn = event.target.closest(".zg-seg button");
+    if (segBtn) {
+      var seg = segBtn.parentElement;
+      $$("button", seg).forEach(function (b) { b.setAttribute("aria-pressed", String(b === segBtn)); });
+      if (seg.dataset.seg === "output") {
+        state.output = segBtn.dataset.value;
+        syncOutputButtons();
+        toast("输出档位已设为：" + segBtn.textContent.trim());
+      } else if (seg.dataset.seg === "thinking") {
+        toast("思考模式：" + segBtn.textContent.trim() + "（演示）");
+      } else if (seg.dataset.seg === "detail") {
+        toast("图片精度：" + segBtn.textContent.trim() + "（演示）");
+      }
+      return;
+    }
+
+    var action = event.target.closest("[data-s]");
+    if (!action) return;
+    var name = action.dataset.s;
+
+    if (name === "save") {
+      toast("配置已保存");
+    } else if (name === "export") {
+      toast("配置已导出（演示不含真实 Key）");
+    } else if (name === "import") {
+      toast("演示环境不读取文件");
+    } else if (name === "reset") {
+      toast("已恢复默认值（演示）");
+    } else if (name === "clear") {
+      toast("演示环境不会真的清空数据");
+    } else if (name === "rubric-save") {
+      toast("已存入标准库：题号 43(2)");
+    } else if (name === "rubric-load") {
+      toast("已载入题号 43(2) 的标准");
+    } else if (name === "rubric-clear") {
+      toast("已清空题号 43(2) 的标准");
+    } else if (name === "reveal") {
+      var key = $("#api-key");
+      var reveal = key.type === "password";
+      key.type = reveal ? "text" : "password";
+      action.textContent = reveal ? "隐藏" : "显示";
+    } else if (name === "fetch-models") {
+      setStatus($("#status-vlm"), "获取中…");
+      setTimeout(function () {
+        $("#model-picker-row").hidden = false;
+        setStatus($("#status-vlm"), "获取到 3 个模型", "ok");
+      }, 700);
+    } else if (name === "test-vlm") {
+      setStatus($("#status-vlm"), "测试中…");
+      setTimeout(function () {
+        setStatus($("#status-vlm"), "连接正常 · 1.2s", "ok");
+        toast("多模态连接正常");
+      }, 900);
+    } else if (name === "test-thinking") {
+      setStatus($("#status-thinking"), "测试中…");
+      setTimeout(function () {
+        setStatus($("#status-thinking"), "已按模型默认运行", "ok");
+      }, 1100);
+    } else if (name === "gen-run") {
+      var run = $("#gen-run");
+      setStatus($("#gen-status"), "生成中…");
+      run.disabled = true;
+      setTimeout(function () {
+        $("#gen-result").value =
+          "一、评分总则\n按信息提取、描述准确、结论完整三项分别计分，答到即得分，不倒扣。\n\n" +
+          "二、分问细则\n(1) 4 分：流向 2 分（西北—东南），比例尺 2 分（1:50000）。\n" +
+          "(2) 4 分：山脊 1 分，山谷 1 分，发育河流的判断 2 分。\n" +
+          "(3) 2 分：坡度陡 1 分，施工成本高 1 分。\n\n" +
+          "三、复核提示\n方位颠倒、比例尺换算错误、单位缺失时标记人工复核。";
+        setStatus($("#gen-status"), "生成完成", "ok");
+        run.disabled = false;
+        toast("生成完成，请检查并微调");
+      }, 1300);
+    } else if (name === "gen-apply") {
+      var text = $("#gen-result").value.trim();
+      if (!text) { toast("请先生成评分标准"); return; }
+      $("#ctx-rubric").value = text;
+      switchPage("context");
+      toast("已填入批改上下文，请点「保存配置」生效");
+    } else if (name === "gen-copy") {
+      var copyText = $("#gen-result").value.trim();
+      if (!copyText) { toast("请先生成评分标准"); return; }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(copyText).then(function () { toast("已复制到剪贴板"); }, function () { toast("复制失败，请手动选中复制"); });
+      } else {
+        toast("当前环境不支持剪贴板");
+      }
+    } else if (name === "gen-clear") {
+      $("#gen-question").value = "";
+      $("#gen-answer").value = "";
+      $("#gen-result").value = "";
+      $("#gen-max").value = "";
+      toast("已清空生成条件与结果");
+    }
+  });
+
+  /* ---------------- 历史 ---------------- */
+  var entries = [
+    {
+      id: "h1", qid: "43(2)", subject: "地理 · 综合题", score: 8.5, max: 10,
+      time: "11-27 15:42", needsReview: true, reviewed: false, confirmed: null,
+      pipeline: "多模态直评", model: "deepseek-vl2", elapsed: "6.8s", cache: "新结果",
+      reason: "第 (1) 问准确写出「西北—东南」走向，比例尺换算正确；(2) 问风向判断正确但未说明判断依据，扣 1 分；(3) 问数值正确、漏写单位，扣 0.5 分。",
+      subs: [
+        { label: "(1) 流向与比例尺", score: 4, max: 4, reason: "走向与比例尺均正确" },
+        { label: "(2) 地形部位判断", score: 3, max: 4, reason: "判断正确，未说明理由" },
+        { label: "(3) 施工条件分析", score: 1.5, max: 2, reason: "单位漏写" }
+      ],
+      usage: { prompt: 1284, cached: 0, completion: 216, reasoning: 84 },
+      userCode: "20240317"
+    },
+    {
+      id: "h2", qid: "43(1)", subject: "地理 · 综合题", score: 9, max: 10,
+      time: "11-27 15:31", needsReview: false, reviewed: true, confirmed: 9,
+      pipeline: "多模态直评", model: "deepseek-vl2", elapsed: "5.2s", cache: "缓存命中",
+      reason: "走向、比例尺与地形部位判断均正确；第 (3) 问漏写「施工成本」，扣 1 分。",
+      subs: [
+        { label: "(1) 流向与比例尺", score: 4, max: 4, reason: "完全正确" },
+        { label: "(2) 地形部位判断", score: 3, max: 3, reason: "完全正确" },
+        { label: "(3) 施工条件分析", score: 2, max: 3, reason: "漏写成本，扣 1 分" }
+      ],
+      usage: { prompt: 1176, cached: 1176, completion: 188, reasoning: 62 },
+      userCode: "20240317"
+    },
+    {
+      id: "h3", qid: "44(1)", subject: "地理 · 读图题", score: 6, max: 10,
+      time: "11-27 14:58", needsReview: true, reviewed: false, confirmed: null,
+      pipeline: "多模态直评", model: "qwen-vl-max", elapsed: "8.4s", cache: "新结果",
+      reason: "图中信息提取不完整：只写出两处图例，漏掉比例尺与指向标；结论部分缺少推理过程。",
+      subs: [
+        { label: "(1) 信息提取", score: 2, max: 4, reason: "只写出两处图例" },
+        { label: "(2) 描述准确", score: 3, max: 4, reason: "方位描述基本正确" },
+        { label: "(3) 结论", score: 1, max: 2, reason: "缺少推理过程" }
+      ],
+      usage: { prompt: 1402, cached: 0, completion: 242, reasoning: 96 },
+      userCode: "20240415"
+    },
+    {
+      id: "h4", qid: "44(2)", subject: "地理 · 材料分析题", score: 7.5, max: 10,
+      time: "11-27 14:26", needsReview: false, reviewed: true, confirmed: null,
+      pipeline: "多模态直评", model: "deepseek-vl2", elapsed: "7.1s", cache: "缓存命中",
+      reason: "要点覆盖较全，第 (2) 问未结合材料中的降水数据，扣 2.5 分。",
+      subs: [
+        { label: "(1) 观点", score: 3, max: 3, reason: "观点明确" },
+        { label: "(2) 论据", score: 2.5, max: 4, reason: "未结合材料数据" },
+        { label: "(3) 结论", score: 2, max: 3, reason: "表述略笼统" }
+      ],
+      usage: { prompt: 1218, cached: 1218, completion: 201, reasoning: 71 },
+      userCode: "20240415"
+    }
+  ];
+
+  var hState = { filter: "all", query: "", selectedId: "h1" };
+
+  function visibleEntries() {
+    var q = hState.query.trim().toLowerCase();
+    return entries.filter(function (entry) {
+      if (hState.filter === "review" && !entry.needsReview) return false;
+      if (hState.filter === "normal" && entry.needsReview) return false;
+      if (q && (entry.qid + " " + entry.subject + " " + entry.reason).toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    });
+  }
+
+  function summaryOf(list) {
+    var tokens = list.reduce(function (acc, entry) {
+      acc.prompt += entry.usage.prompt;
+      acc.completion += entry.usage.completion;
+      acc.cached += entry.usage.cached;
+      return acc;
+    }, { prompt: 0, completion: 0, cached: 0 });
+    var review = list.filter(function (entry) { return entry.needsReview; }).length;
+    return "共 " + list.length + " 条 · 需复核 " + review + " 条 · 输入 " + tokens.prompt + " token（前缀命中 " + tokens.cached + "）· 输出 " + tokens.completion + " token";
+  }
+
+  function renderHistory() {
+    var list = visibleEntries();
+    if (!list.some(function (entry) { return entry.id === hState.selectedId; })) {
+      hState.selectedId = list.length ? list[0].id : "";
+    }
+    $("#history-sub").textContent = "共 " + entries.length + " 条 · " + entries.filter(function (e) { return e.needsReview; }).length + " 条需复核";
+    $("#h-summary").textContent = summaryOf(list);
+
+    var listEl = $("#h-list");
+    listEl.innerHTML = list.length ? list.map(function (entry) {
+      return '<button class="zh-row' + (entry.needsReview ? " needs" : "") + '" data-id="' + entry.id + '" aria-selected="' + (entry.id === hState.selectedId) + '">' +
+        '<span class="zh-score">' + entry.score + '</span>' +
+        '<span class="zh-main">' +
+          '<span class="zh-l1">题号 ' + entry.qid + ' · ' + entry.subject + '</span>' +
+          '<span class="zh-l2">' + entry.time + ' · ' + entry.pipeline + ' · ' + entry.model + (entry.reviewed ? " · 已复核" : "") + '</span>' +
+        '</span>' +
+        (entry.needsReview ? '<span class="zp-pill warn">需复核</span>' : '') +
+        '<svg class="zh-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>' +
+      '</button>';
+    }).join("") : '<div class="zh-empty">暂无符合条件的记录</div>';
+
+    renderDetail();
+  }
+
+  function renderDetail() {
+    var detail = $("#h-detail");
+    var entry = entries.find(function (item) { return item.id === hState.selectedId; });
+    if (!entry) {
+      detail.innerHTML = '<div class="zh-empty">选择一条记录查看详情</div>';
+      return;
+    }
+    var reviewLine = entry.reviewed
+      ? "已复核" + (entry.confirmed !== null ? "（确认 " + entry.confirmed + " 分）" : "")
+      : "未复核";
+    detail.innerHTML =
+      '<div class="zh-detailhead">' +
+        '<div><span class="zp-kicker">题号 ' + entry.qid + '</span><div class="zh-bigscore">' + entry.score + '<span>/ ' + entry.max + ' 分</span></div></div>' +
+        (entry.needsReview ? '<span class="zp-pill warn">需复核</span>' : '<span class="zp-pill ok">正常</span>') +
+      '</div>' +
+      '<p class="zp-reason">' + entry.reason + '</p>' +
+      '<dl class="zh-stats">' +
+        '<div class="zh-statrow"><dt>模型</dt><dd>' + entry.model + '</dd></div>' +
+        '<div class="zh-statrow"><dt>缓存 / 耗时</dt><dd>' + entry.cache + ' / ' + entry.elapsed + '</dd></div>' +
+        '<div class="zh-statrow"><dt>用量</dt><dd>输入 ' + entry.usage.prompt + '（前缀命中 ' + entry.usage.cached + '）· 输出 ' + entry.usage.completion + (entry.usage.reasoning ? '（含思考 ' + entry.usage.reasoning + '）' : '') + '</dd></div>' +
+        '<div class="zh-statrow"><dt>定位</dt><dd>学号 ' + entry.userCode + ' · 试卷已记录</dd></div>' +
+        '<div class="zh-statrow"><dt>复核</dt><dd>' + reviewLine + '</dd></div>' +
+      '</dl>' +
+      '<h4 class="zh-h4">小题</h4>' +
+      '<div class="zp-sublist" style="margin-top:2px">' +
+        entry.subs.map(function (sub) {
+          return '<div class="zp-subrow"><div class="zp-submain"><span class="zp-sublabel">' + sub.label + '</span><span class="zp-subreason">' + sub.reason + '</span></div><span class="zp-subscore"><span class="zp-pill">' + sub.score + ' / ' + sub.max + '</span></span></div>';
+        }).join("") +
+      '</div>' +
+      '<div class="zh-actions">' +
+        '<button class="zg-btn small primary" data-h="jump">定位到该卷</button>' +
+        '<button class="zg-btn small" data-h="review">' + (entry.reviewed ? "修改复核备注" : "标记已复核") + '</button>' +
+        '<button class="zg-btn small ghost" data-h="score">记录确认分</button>' +
+      '</div>';
+  }
+
+  $("#h-search").addEventListener("input", function (event) {
+    hState.query = event.target.value;
+    renderHistory();
+  });
+
+  historyDlg.addEventListener("click", function (event) {
+    var row = event.target.closest(".zh-row");
+    if (row) {
+      hState.selectedId = row.dataset.id;
+      renderHistory();
+      return;
+    }
+    var segBtn = event.target.closest('.zg-seg[data-seg="history"] button');
+    if (segBtn) {
+      hState.filter = segBtn.dataset.value;
+      $$('.zg-seg[data-seg="history"] button', historyDlg).forEach(function (b) {
+        b.setAttribute("aria-pressed", String(b === segBtn));
+      });
+      renderHistory();
+      return;
+    }
+    var action = event.target.closest("[data-h]");
+    if (!action) return;
+    var entry = entries.find(function (item) { return item.id === hState.selectedId; });
+    if (action.dataset.h === "next") {
+      var pending = entries.filter(function (item) { return item.needsReview && !item.reviewed; });
+      var next = pending.find(function (item) { return item.id !== hState.selectedId; }) || pending[0];
+      if (!next) { toast("复核队列已空"); return; }
+      hState.selectedId = next.id;
+      hState.filter = "all";
+      $$('.zg-seg[data-seg="history"] button', historyDlg).forEach(function (b) {
+        b.setAttribute("aria-pressed", String(b.dataset.value === "all"));
+      });
+      renderHistory();
+      toast("已跳到题号 " + next.qid + " 的待复核记录");
+    } else if (action.dataset.h === "csv") {
+      toast("已导出 CSV（演示）");
+    } else if (action.dataset.h === "html") {
+      toast("已导出 HTML（演示）");
+    } else if (action.dataset.h === "clear") {
+      toast("演示环境不会真的清空历史");
+    } else if (action.dataset.h === "jump") {
+      toast(entry ? "已在阅卷页定位到题号 " + entry.qid + "（演示）" : "请选择记录");
+    } else if (action.dataset.h === "review") {
+      if (!entry) return;
+      entry.reviewed = true;
+      renderHistory();
+      toast("已标记复核：" + entry.qid);
+    } else if (action.dataset.h === "score") {
+      if (!entry) return;
+      var raw = window.prompt("确认分数", String(entry.confirmed === null ? entry.score : entry.confirmed));
+      if (raw === null) return;
+      var value = Number(raw);
+      if (!Number.isFinite(value)) return;
+      entry.confirmed = Math.min(Math.max(value, 0), entry.max);
+      entry.reviewed = true;
+      renderHistory();
+      toast("已记录确认分 " + entry.confirmed);
+    }
+  });
+
+  /* ---------------- 预览控制台 ---------------- */
+  $$("#dd-state button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      state.mode = btn.dataset.state;
+      if (state.mode !== "busy" && state.continuous) {
+        state.continuous = false;
+        var label = $("[data-act='continuous'] span", panel);
+        var contBtn = $("[data-act='continuous']", panel);
+        contBtn.classList.remove("running");
+        if (label) label.textContent = "连续批阅";
+      }
+      $$("#dd-state button").forEach(function (b) { b.classList.toggle("on", b === btn); });
+      renderPanel();
+    });
+  });
+
+  $$("#dd-theme button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var theme = btn.dataset.themeBtn;
+      document.documentElement.dataset.theme = theme;
+      root.dataset.theme = theme;
+      $$("#dd-theme button").forEach(function (b) { b.classList.toggle("on", b === btn); });
+    });
+  });
+
+  $$("[data-demo]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var target = btn.dataset.demo;
+      if (target === "panel") { show(panel); }
+      else if (target === "settings") { show(settings); switchPage("context"); }
+      else if (target === "history") { show(historyDlg); renderHistory(); }
+    });
+  });
+
+  renderPanel();
+  renderHistory();
+})();
+</script>
+</body>
+</html>

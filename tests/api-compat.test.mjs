@@ -65,7 +65,7 @@ function loadCore() {
   ];
   const code = files.map((rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n')).join('\n');
   vm.createContext(context);
-  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, stableImageKey, parseGrade, buildGradingPrompt, PROMPT_VERSION, OUTPUT_MODES, normalizeOutputMode, resolveImageOptions, SUBJECT_IMAGE_PROFILES, loadConfig, loadUsageStats, recordUsage, DEFAULT_CONFIG, STORAGE_KEYS, toCsv, toHtml, summarizeEntries, summaryText, entryUsage, entryElapsed, entryHitText, judgeSubmit };`, context);
+  vm.runInContext(`${code}\n;globalThis.__core = { CacheStore, makeGradeCacheKey, compactCacheResult, stableImageKey, parseGrade, looksLikeVisionFailure, isVisionBlockedResult, buildGradingPrompt, PROMPT_VERSION, OUTPUT_MODES, normalizeOutputMode, resolveImageOptions, SUBJECT_IMAGE_PROFILES, loadConfig, loadUsageStats, recordUsage, DEFAULT_CONFIG, STORAGE_KEYS, toCsv, toHtml, summarizeEntries, summaryText, entryUsage, entryElapsed, entryHitText, judgeSubmit };`, context);
   return { core: context.__core, store };
 }
 
@@ -130,7 +130,8 @@ function splitCsvLine(line) {
 
 test('批改结果分数可编辑且提交前应用手动改分', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
-  assert.match(built, /zygr-score-input/);
+  assert.match(built, /zp-total/);
+  assert.match(built, /zp-subinput/);
   assert.match(built, /getScoreEdits\(\)/);
   assert.match(built, /applyScoreEdits\(\)/);
   // 提交等待回执期间页面可能换卷、lastResult 会被清空，写历史必须用先抓下来的局部快照
@@ -154,11 +155,12 @@ test('提交后把人工改过的分数回写缓存，供双评第二账号命�
   assert.match(built, /if \(cache && submittedResult\?\.cacheKey\) cache\.set\(submittedResult\.cacheKey, submittedResult\)/);
 });
 
-test('面板按钮为紧凑自适应布局', () => {
+test('面板操作区保持紧凑自适应', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
-  assert.match(built, /display: flex; flex-wrap: wrap/);
-  assert.match(built, /min-height: 28px/);
-  assert.match(built, /font-size: 11px/);
+  assert.match(built, /\.zp-actions \{ display: flex/);
+  assert.match(built, /\.zp-options \{ display: flex/);
+  assert.match(built, /\.zp-mini \{[\s\S]*?font-size: 11px/);
+  assert.match(built, /@media \(max-width: 520px\)/);
 });
 
 test('手动提交的一次提交勾选框已接入确认跳过逻辑', () => {
@@ -789,7 +791,7 @@ test('连续批阅有份数上限，避免无人看管跑到没配额', () => {
   assert.match(built, /count >= limit/);
   // 份数上限已移到主面板，和连续批阅按钮放在一起；设置页不再保留重复入口。
   assert.match(built, /data-opt='continuous-limit'/);
-  assert.match(built, /zygr-continuous-cell/);
+  assert.match(built, /zp-options/);
   assert.match(built, /onContinuousLimitChange/);
   assert.match(built, /\\u4E0D\\u662F\\u5FC5\\u987B\\u6279\\u6EE1\\u7684\\u4EFD\\u6570/);
   assert.match(built, /var CONTINUOUS_LIMIT_MAX = 5000;/);
@@ -800,7 +802,7 @@ test('连续批阅有份数上限，避免无人看管跑到没配额', () => {
 
 test('输出档位移到主面板，设置页不再保留重复入口', () => {
   const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
-  assert.match(built, /data-opt='output-mode'/);
+  assert.match(built, /data-output-mode/);
   assert.match(built, /onOutputModeChange/);
   assert.match(built, /setOutputMode\(config\.pipeline\.outputMode\)/);
   assert.match(built, /var OUTPUT_MODE_SHORT = /);
@@ -906,6 +908,33 @@ test('分数解析：优先【得分】x/y 的分子，无法确定时不猜', (
   const ambiguous = core.parseGrade('【作答状态】可辨认\n【理由】第1步 2 分，第2步 3 分', 5, []);
   assert.equal(ambiguous.scoreUncertain, true);
   assert.equal(ambiguous.score, 0);
+});
+
+test('模型拒答看不到图片时判为视觉能力问题，不当作 0 分', () => {
+  const { core } = loadCore();
+  assert.equal(core.looksLikeVisionFailure('我无法查看图片，请提供作答图'), true);
+  assert.equal(core.looksLikeVisionFailure('当前模型不支持图片输入'), true);
+  assert.equal(core.looksLikeVisionFailure('I cannot see the image provided.'), true);
+  assert.equal(core.looksLikeVisionFailure('没有收到图片'), true);
+  // 正常的不可辨判定不能误伤：状态是 illegible 时仍按 0 分并走复核
+  assert.equal(core.looksLikeVisionFailure('字迹模糊，无法辨认作答内容'), false);
+  assert.equal(core.isVisionBlockedResult({ status: 'illegible', score: 0, reason: '字迹模糊，无法辨认' }, ''), false);
+  // 文本模型常把「看不到图」包装成 legible + 0 分 + 图片无法辨认
+  assert.equal(core.isVisionBlockedResult({
+    status: 'legible',
+    score: 0,
+    reason: '图片无法辨认，无法判断作答内容，按0分处理。'
+  }, ''), true);
+  assert.equal(core.isVisionBlockedResult({ status: 'legible', score: 8, reason: '答案正确' }, ''), false);
+});
+
+test('多模态测试会发真实图片并校验读图结果', () => {
+  const built = readFileSync(join(root, 'dist', '智阅批改助手.user.js'), 'utf8');
+  assert.match(built, /function visionProbeImage\(/);
+  assert.match(built, /image_url: \{ url: probe\.dataUrl/);
+  assert.match(built, /digits\.includes\(probe\.code\)/);
+  assert.match(built, /await ensureVisionSupport\(\)/);
+  assert.match(built, /isVisionBlockedResult\(grade, raw\)/);
 });
 
 test('旧版 JSON 协议仍然可以解析', () => {

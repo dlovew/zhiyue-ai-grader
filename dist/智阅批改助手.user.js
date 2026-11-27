@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         智阅批改助手
 // @namespace    zygr.local.grader
-// @version      1.3.4
+// @version      1.3.5
 // @description  智学网阅卷辅助：读取作答图并结合配置的评分标准进行多模态直评，支持历史导出。
 // @match        *://www.zhixue.com/*
 // @match        *://zhixue.com/*
@@ -18,7 +18,7 @@
 // ==/UserScript==
 "use strict";
 (() => {
-var ZYGR_VERSION = "1.3.4";
+var ZYGR_VERSION = "1.3.5";
   // src/adapters/zhixue.ts
   var SELECTORS = {
     answerImage: 'div[name="topicImg"] img',
@@ -2537,13 +2537,63 @@ function judgeSubmit(hookActive2, signal, paperChanged = false) {
     };
   }
 
-  async function testConnection(service, rateLimiter) {
+  // 视觉校验图：白底黑字的大号 4 位随机数字。文本模型看不到数字，只能拒答或瞎猜。
+  // 用 canvas 现场生成 PNG，避免依赖外链，也不会被平台的图片域名校验挡住。
+  function visionProbeImage() {
+    if (typeof document === "undefined" || !document.createElement) return null;
+    try {
+      const code = Array.from({ length: 4 }, () => Math.floor(Math.random() * 10)).join("");
+      const canvas = document.createElement("canvas");
+      canvas.width = 480;
+      canvas.height = 160;
+      const context = canvas.getContext("2d");
+      if (!context) return null;
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#111111";
+      context.font = '700 96px "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(code, canvas.width / 2, canvas.height / 2 + 4);
+      const dataUrl = canvas.toDataURL("image/png");
+      if (!dataUrl.startsWith("data:image/png")) return null;
+      return { code, dataUrl };
+    } catch {
+      return null;
+    }
+  }
+
+  // 真·多模态测试：必须能把图里的随机数字读回来，纯文本模型在这一步就会被挡住。
+  async function probeVision(service, rateLimiter) {
+    const probe = visionProbeImage();
+    if (!probe) {
+      return { ok: true, skipped: true, verdict: "\u5F53\u524D\u73AF\u5883\u65E0\u6CD5\u751F\u6210\u6D4B\u8BD5\u56FE\u7247\uFF0C\u5DF2\u8DF3\u8FC7\u89C6\u89C9\u6821\u9A8C" };
+    }
     const text = await chatCompletion(
       service,
-      [{ role: "user", content: "\u8BF7\u53EA\u56DE\u590D\uFF1Aok" }],
-      { rateLimiter, timeoutMs: 15e3, retries: 0, estimatedTokens: 20 }
+      [{
+        role: "user",
+        content: [
+          { type: "text", text: "\u53EA\u56DE\u590D\u56FE\u7247\u4E2D\u7684 4 \u4F4D\u6570\u5B57\uFF0C\u4E0D\u8981\u89E3\u91CA\u3002" },
+          { type: "image_url", image_url: { url: probe.dataUrl, detail: "high" } }
+        ]
+      }],
+      { rateLimiter, timeoutMs: 3e4, retries: 1, maxTokens: 800, estimatedTokens: 300 }
     );
-    return text.trim().length > 0;
+    const digits = String(text || "").replace(/[^0-9]/g, "");
+    if (digits.includes(probe.code)) {
+      return { ok: true, verdict: "\u56FE\u7247\u8BFB\u53D6\u6B63\u5E38" };
+    }
+    return {
+      ok: false,
+      verdict: `\u6A21\u578B\u300C${service.model}\u300D\u672A\u80FD\u8BFB\u53D6\u6D4B\u8BD5\u56FE\u7247\uFF08\u56DE\u590D\uFF1A${sampleText(text) || "\u7A7A"}\uFF09\uFF0C\u53EF\u80FD\u4E0D\u662F\u591A\u6A21\u6001\u6A21\u578B`
+    };
+  }
+
+  async function testConnection(service, rateLimiter) {
+    const result = await probeVision(service, rateLimiter);
+    if (!result.ok) throw new Error(result.verdict);
+    return true;
   }
   // src/infra/image.ts
   function fallbackHash(text) {
@@ -3164,6 +3214,29 @@ ${subQuestionLines(question)}`,
   function parseGrade(raw, maxScore, subQuestions = []) {
     return fromJson(raw, maxScore, subQuestions) ?? fromRepairedJson(raw, maxScore, subQuestions) ?? fromText(raw, maxScore, subQuestions);
   }
+  // 文本模型收到 image_url 时常会回「无法查看图片」这类拒答。它不是 0 分，
+  // 而是根本没看到作答图；必须作废本次结果，不能写历史，也不能继续连续批阅。
+  // 只匹配「能力不足」的措辞，不匹配「字迹模糊/无法辨认」这类正常的不可辨判定。
+  function looksLikeVisionFailure(text) {
+    const value = String(text || "");
+    if (!value) return false;
+    return /无法(?:查看|看到|读取|访问|打开)(?:到)?(?:这张|该|提供的)?(?:图片|图像|照片)/i.test(value)
+      || /(?:没有|未)(?:收到|提供|附带)(?:任何)?(?:图片|图像|照片)/i.test(value)
+      || /不支持(?:图片|图像|视觉|多模态)/i.test(value)
+      || /(?:我|本模型|该模型|当前模型).{0,10}(?:是|属于|作为).{0,6}(?:纯文本|文本|语言)模型/i.test(value)
+      || /(?:text[- ]only|language)\s+model/i.test(value)
+      || /(?:cannot|can't|unable\s+to)\s+(?:see|view|read|access|process)\s+(?:the\s+)?(?:image|picture|photo)/i.test(value)
+      || /no\s+(?:image|picture|photo)\s+(?:was\s+)?(?:provided|attached|included)/i.test(value);
+  }
+  // 文本模型常把「看不到图」包装成一个合法的 legible + 0 分。分数 0、状态却是「可辨认」、
+  // 理由又说图片无法辨认时，不能当成学生答错；按能力问题作废，避免整批写下 0 分。
+  function isVisionBlockedResult(grade, raw) {
+    if (looksLikeVisionFailure(`${grade?.reason || ""}\n${raw || ""}`)) return true;
+    const reason = `${grade?.reason || ""}\n${raw || ""}`;
+    return Number(grade?.score) === 0
+      && grade?.status === "legible"
+      && /(?:图片|图像)(?:无法|不能)辨认|无法判断作答内容/.test(reason);
+  }
 
 // src/core/pipeline.ts
 function configured(service) {
@@ -3209,6 +3282,11 @@ async function runGrade(service, question, maxScore, prompt, images, config, rat
   });
   if (!raw.trim()) throw new Error("\u6A21\u578B\u8FD4\u56DE\u4E3A\u7A7A");
   const grade = parseGrade(raw, maxScore, question.subQuestions);
+  // 模型拒答「看不到图片」：这是模型能力问题，不是这份卷子的 0 分。
+  // 直接抛错让连续批阅停下，并避免把整批卷子写成一串 0 分历史。
+  if (isVisionBlockedResult(grade, raw)) {
+    throw new Error("\u6A21\u578B\u8868\u793A\u65E0\u6CD5\u8BFB\u53D6\u4F5C\u7B54\u56FE\u7247\uFF0C\u5F53\u524D\u6A21\u578B\u53EF\u80FD\u4E0D\u662F\u591A\u6A21\u6001\u6A21\u578B\u3002\u672C\u6B21\u7ED3\u679C\u5DF2\u4F5C\u5E9F\uFF0C\u8FDE\u7EED\u6279\u9605\u5DF2\u505C\u6B62\uFF1B\u8BF7\u5230\u8BBE\u7F6E \u2192 \u63A5\u53E3\u4E0E\u94FE\u8DEF\u66F4\u6362\u652F\u6301\u56FE\u7247\u8F93\u5165\u7684\u6A21\u578B");
+  }
   if (truncated && grade.scoreUncertain) {
     throw new Error("\u6A21\u578B\u8F93\u51FA\u88AB\u957F\u5EA6\u4E0A\u9650\u622A\u65AD\uFF08finish_reason=length\uFF09\uFF0C\u4E14\u6CA1\u80FD\u4ECE\u5DF2\u4EA7\u51FA\u5185\u5BB9\u4E2D\u89E3\u6790\u51FA\u786E\u5B9A\u5206\u6570\uFF0C\u672C\u6B21\u7ED3\u679C\u4F5C\u5E9F\uFF1A\u8BF7\u5173\u95ED\u601D\u8003\u6216\u7F29\u77ED\u8BC4\u5206\u6807\u51C6");
   }
@@ -3396,257 +3474,513 @@ async function gradeQuestion(options) {
   };
 
   // src/ui/styles.ts
+  // 全部样式都活在 shadow root 里：页面原有样式进不来，这里的类名也不会污染页面。
   var STYLES = `
 :host {
-  --zygr-primary: #4f46e5;
-  --zygr-sky: #0ea5e9;
-  --zygr-teal: #14b8a6;
-  --zygr-ink: #0f172a;
-  --zygr-muted: #475569;
-  --zygr-line: rgba(148, 163, 184, .28);
-  --zygr-surface: rgba(255, 255, 255, .82);
-  --zygr-glow: rgba(79, 70, 229, .18);
+  --z-accent: #0071e3;
+  --z-accent-soft: rgba(0, 113, 227, .10);
+  --z-ring: rgba(0, 113, 227, .30);
+  --z-green: #34c759;
+  --z-green-ink: #1c7c3c;
+  --z-green-soft: rgba(52, 199, 89, .14);
+  --z-orange: #ff9500;
+  --z-orange-ink: #a25800;
+  --z-orange-soft: rgba(255, 149, 0, .16);
+  --z-red: #ff3b30;
+  --z-red-ink: #c0362c;
+  --z-red-soft: rgba(255, 59, 48, .12);
+  --z-ink: #1d1d1f;
+  --z-ink2: #6e6e73;
+  --z-ink3: #8e8e93;
+  --z-hairline: rgba(60, 60, 67, .10);
+  --z-fill: rgba(120, 120, 128, .10);
+  --z-fill-2: rgba(120, 120, 128, .18);
+  --z-panel: rgba(250, 250, 252, .84);
+  --z-bg-solid: #f5f5f7;
+  --z-card: #ffffff;
+  --z-card-t: rgba(255, 255, 255, .72);
+  --z-foot: rgba(255, 255, 255, .34);
+  --z-shadow-lg: 0 24px 64px -18px rgba(15, 23, 42, .32), 0 2px 10px rgba(15, 23, 42, .06);
+  --z-shadow-sm: 0 1px 2px rgba(0, 0, 0, .10);
+  --z-ease: cubic-bezier(.32, .72, 0, 1);
+  color-scheme: light;
   position: fixed;
   right: 20px;
   bottom: 20px;
   z-index: 2147483647;
-  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", "Microsoft YaHei", system-ui, sans-serif;
   font-size: 13px;
-  color: var(--zygr-ink);
+  line-height: 1.45;
+  color: var(--z-ink);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+@media (prefers-color-scheme: dark) {
+  :host {
+    --z-accent: #0a84ff;
+    --z-accent-soft: rgba(10, 132, 255, .20);
+    --z-ring: rgba(10, 132, 255, .38);
+    --z-green: #30d158;
+    --z-green-ink: #5ee07a;
+    --z-green-soft: rgba(48, 209, 88, .18);
+    --z-orange: #ff9f0a;
+    --z-orange-ink: #ffb84d;
+    --z-orange-soft: rgba(255, 159, 10, .18);
+    --z-red: #ff453a;
+    --z-red-ink: #ff7b72;
+    --z-red-soft: rgba(255, 69, 58, .18);
+    --z-ink: #f5f5f7;
+    --z-ink2: #a1a1a6;
+    --z-ink3: #8e8e93;
+    --z-hairline: rgba(255, 255, 255, .10);
+    --z-fill: rgba(120, 120, 128, .24);
+    --z-fill-2: rgba(120, 120, 128, .36);
+    --z-panel: rgba(28, 28, 30, .84);
+    --z-bg-solid: #1c1c1e;
+    --z-card: #2c2c2e;
+    --z-card-t: rgba(44, 44, 46, .68);
+    --z-foot: rgba(255, 255, 255, .03);
+    --z-shadow-lg: 0 30px 80px -20px rgba(0, 0, 0, .75), 0 2px 12px rgba(0, 0, 0, .35);
+    --z-shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+    color-scheme: dark;
+  }
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 button, input, select, textarea { font: inherit; color: inherit; }
-button { cursor: pointer; }
-button:disabled { cursor: not-allowed; opacity: .55; }
-.zygr-panel {
-  width: 380px;
-  max-height: calc(100vh - 40px);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, .65);
-  background: linear-gradient(160deg, rgba(255,255,255,.92), rgba(238,242,255,.78));
-  backdrop-filter: blur(18px) saturate(140%);
-  box-shadow: 0 18px 48px rgba(15, 23, 42, .2), inset 0 1px 0 rgba(255,255,255,.7);
-  animation: zygr-in .32s cubic-bezier(.2,.8,.2,1);
+button { background: none; border: 0; padding: 0; cursor: pointer; appearance: none; -webkit-appearance: none; }
+button:disabled { cursor: not-allowed; }
+button:focus-visible { outline: 2px solid var(--z-accent); outline-offset: 2px; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--z-fill-2); border: 2px solid transparent; border-radius: 8px; background-clip: padding-box; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 主面板 ---------- */
+.zp-panel {
+  position: fixed; right: 20px; bottom: 20px; width: 388px; max-height: calc(100vh - 40px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--z-panel); border: 1px solid var(--z-hairline); border-radius: 20px;
+  box-shadow: var(--z-shadow-lg);
+  -webkit-backdrop-filter: blur(32px) saturate(180%); backdrop-filter: blur(32px) saturate(180%);
+  animation: zp-in .38s var(--z-ease);
 }
-.zygr-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 14px 16px;
-  color: #fff;
-  background: linear-gradient(135deg, #4f46e5 0%, #0ea5e9 100%);
-  position: relative;
-  overflow: hidden;
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .zp-panel { background: var(--z-card); }
 }
-.zygr-head::after {
-  content: ""; position: absolute; inset: -60% -20% auto auto; width: 180px; height: 180px;
-  background: radial-gradient(circle, rgba(255,255,255,.35), transparent 70%);
-  animation: zygr-float 6s ease-in-out infinite;
+@keyframes zp-in { from { opacity: 0; transform: translateY(14px) scale(.985); } to { opacity: 1; transform: none; } }
+
+.zp-head { display: flex; align-items: center; gap: 10px; padding: 12px 10px 10px 14px; }
+.zp-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.zp-logo {
+  width: 30px; height: 30px; flex: none; display: grid; place-items: center;
+  border-radius: 9px; color: #fff; font-size: 14px; font-weight: 700;
+  background: linear-gradient(160deg, #3d9bff, #0067d6);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 2px 6px rgba(0, 113, 227, .22);
 }
-.zygr-brand { display: flex; align-items: center; gap: 10px; position: relative; z-index: 1; }
-.zygr-logo {
-  width: 34px; height: 34px; display: grid; place-items: center; border-radius: 11px;
-  background: rgba(255,255,255,.22); border: 1px solid rgba(255,255,255,.4);
-  font-weight: 700; font-size: 17px; letter-spacing: 1px;
+.zp-titles { min-width: 0; }
+.zp-titleline { display: flex; align-items: center; gap: 6px; }
+.zp-titleline strong { font-size: 13.5px; font-weight: 600; letter-spacing: .1px; }
+.zp-ver { padding: 1px 6px; border-radius: 999px; background: var(--z-fill); color: var(--z-ink3); font-size: 9.5px; font-weight: 500; }
+.zp-sub { display: block; max-width: 236px; margin-top: 1px; font-size: 11px; color: var(--z-ink2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zp-header-actions { display: flex; flex: none; gap: 2px; margin-left: auto; }
+.zp-iconbtn { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; color: var(--z-ink2); transition: background .18s, color .18s; }
+.zp-iconbtn:hover { background: var(--z-fill); color: var(--z-ink); }
+.zp-iconbtn svg { width: 15px; height: 15px; }
+.zp-chev { transition: transform .28s var(--z-ease); }
+.zp-panel.is-collapsed .zp-body,
+.zp-panel.is-collapsed .zp-foot { display: none; }
+.zp-panel.is-collapsed .zp-chev { transform: rotate(180deg); }
+
+.zp-body { flex: 1; min-height: 0; display: grid; align-content: start; gap: 10px; padding: 0 14px 12px; overflow: auto; overscroll-behavior: contain; }
+.zp-status { display: flex; align-items: center; gap: 8px; padding: 0 2px; font-size: 11px; }
+.zp-stage { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-weight: 500; color: var(--z-ink); }
+.zp-stage > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zp-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--z-accent); box-shadow: 0 0 0 3px var(--z-accent-soft); }
+.zp-dot.ok { background: var(--z-green); box-shadow: 0 0 0 3px var(--z-green-soft); }
+.zp-dot.warn { background: var(--z-orange); box-shadow: 0 0 0 3px var(--z-orange-soft); }
+.zp-count { margin-left: auto; color: var(--z-ink3); font-size: 10.5px; white-space: nowrap; }
+.zp-chip { padding: 4px 7px; border-radius: 999px; background: var(--z-fill); color: var(--z-ink2); font-size: 10px; line-height: 1; white-space: nowrap; }
+.zp-chip.ok { background: var(--z-green-soft); color: var(--z-green-ink); }
+.zp-chip.warn { background: var(--z-orange-soft); color: var(--z-orange-ink); }
+.zp-chip.new { background: var(--z-accent-soft); color: var(--z-accent); font-weight: 600; }
+.zp-track { height: 3px; border-radius: 999px; background: var(--z-fill); overflow: hidden; }
+.zp-track i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--z-accent); transition: width .45s var(--z-ease); }
+
+.zp-card { padding: 12px; border: 1px solid var(--z-hairline); border-radius: 14px; background: var(--z-card-t); }
+.zp-result:empty { display: none; }
+.zp-kicker { display: block; margin-bottom: 2px; font-size: 9.5px; font-weight: 600; letter-spacing: .3px; color: var(--z-ink3); }
+.zp-qhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.zp-qmain { min-width: 0; }
+.zp-qtitle { font-size: 15px; font-weight: 600; letter-spacing: -.2px; }
+.zp-qmeta { margin-top: 2px; font-size: 10.5px; line-height: 1.55; color: var(--z-ink3); }
+.zp-thumbs { display: flex; gap: 6px; margin-top: 9px; overflow-x: auto; padding-bottom: 1px; }
+.zp-thumbs:empty { display: none; }
+.zp-thumbs img {
+  width: 52px; height: 52px; flex: none; object-fit: cover; border-radius: 9px;
+  border: 1px solid var(--z-hairline); background: var(--z-card); cursor: zoom-in;
+  transition: transform .2s var(--z-ease), box-shadow .2s;
 }
-.zygr-brand strong { display: block; font-size: 16px; letter-spacing: .5px; }
-.zygr-title-row { display: flex; align-items: center; gap: 6px; }
-.zygr-version {
-  flex: none; padding: 2px 6px; border-radius: 999px;
-  border: 1px solid rgba(255,255,255,.34); background: rgba(255,255,255,.16);
-  font-size: 9px; line-height: 1.2; letter-spacing: .2px; opacity: .92;
+.zp-thumbs img:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(15, 23, 42, .16); }
+
+.zp-scorehead { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.zp-score { display: flex; align-items: baseline; gap: 4px; margin-top: 1px; }
+.zp-score input {
+  width: 108px; height: 46px; padding: 0 2px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--z-ink); font-size: 38px; font-weight: 600; letter-spacing: -1.6px; text-align: left;
+  -moz-appearance: textfield; transition: background .18s, box-shadow .18s;
 }
-.zygr-brand small { display: block; opacity: .86; font-size: 11px; margin-top: 2px; }
-.zygr-head-actions { display: flex; gap: 6px; position: relative; z-index: 1; }
-.zygr-icon {
-  width: 28px; height: 28px; border: 1px solid rgba(255,255,255,.32); border-radius: 9px;
-  background: rgba(255,255,255,.14); color: #fff; line-height: 1; transition: .18s;
+.zp-score input::-webkit-outer-spin-button,
+.zp-score input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.zp-score input:hover { background: var(--z-fill); }
+.zp-score input:focus { outline: none; background: var(--z-card); box-shadow: 0 0 0 3px var(--z-ring); }
+.zp-score > span { font-size: 12px; color: var(--z-ink3); white-space: nowrap; }
+.zp-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; padding-top: 16px; }
+.zp-pill { padding: 3px 8px; border-radius: 999px; background: var(--z-fill); color: var(--z-ink2); font-size: 10.5px; font-weight: 500; white-space: nowrap; }
+.zp-pill.ok { background: var(--z-green-soft); color: var(--z-green-ink); }
+.zp-pill.warn { background: var(--z-orange-soft); color: var(--z-orange-ink); }
+.zp-pill.bad { background: var(--z-red-soft); color: var(--z-red-ink); }
+.zp-reason { margin: 9px 0 0; font-size: 12px; line-height: 1.68; color: var(--z-ink2); text-wrap: pretty; }
+.zp-sublist { margin-top: 10px; border-top: 1px solid var(--z-hairline); }
+.zp-subrow { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--z-hairline); }
+.zp-subrow:last-child { border-bottom: 0; padding-bottom: 2px; }
+.zp-submain { flex: 1; min-width: 0; }
+.zp-sublabel { display: block; font-size: 11.5px; font-weight: 600; }
+.zp-subreason { display: block; margin-top: 1px; font-size: 10.5px; line-height: 1.5; color: var(--z-ink3); text-wrap: pretty; }
+.zp-subscore { display: flex; align-items: baseline; gap: 2px; flex: none; }
+.zp-subscore input {
+  width: 44px; height: 25px; padding: 0; border: 0; border-radius: 7px; background: var(--z-fill);
+  color: var(--z-ink); font-size: 11.5px; font-weight: 600; text-align: center;
+  -moz-appearance: textfield; transition: background .18s, box-shadow .18s;
 }
-.zygr-icon:hover { background: rgba(255,255,255,.28); transform: translateY(-1px); }
-.zygr-body { padding: 12px 14px; overflow: auto; display: grid; gap: 10px; }
-.zygr-panel.zygr-collapsed .zygr-body,
-.zygr-panel.zygr-collapsed .zygr-actions { display: none; }
-.zygr-statusbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--zygr-muted); }
-#zygr-progress { font-size: 11px; color: var(--zygr-muted); white-space: nowrap; }
-.zygr-chip {
-  padding: 3px 9px; border-radius: 999px; font-size: 11px; white-space: nowrap;
-  background: rgba(79,70,229,.1); color: #4338ca; border: 1px solid rgba(79,70,229,.18);
+.zp-subscore input::-webkit-outer-spin-button,
+.zp-subscore input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.zp-subscore input:focus { outline: none; background: var(--z-card); box-shadow: 0 0 0 3px var(--z-ring); }
+.zp-subscore em { font-style: normal; font-size: 9.5px; color: var(--z-ink3); }
+.zp-meta { margin-top: 8px; font-size: 11.5px; line-height: 1.6; color: var(--z-ink2); }
+.zp-metaline + .zp-metaline { margin-top: 1px; }
+.zp-reviews { margin-top: 8px; font-size: 10.5px; line-height: 1.6; color: var(--z-orange-ink); }
+.zp-notice {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px; width: 100%;
+  margin-top: 8px; padding: 7px 9px; border: 1px solid rgba(255, 149, 0, .28); border-radius: 9px;
+  background: var(--z-orange-soft); color: var(--z-orange-ink); font-size: 10.5px; line-height: 1.5; text-align: left;
 }
-.zygr-chip.zygr-warn { background: rgba(245,158,11,.12); color: #b45309; border-color: rgba(245,158,11,.25); }
-.zygr-chip.zygr-ok { background: rgba(22,163,74,.12); color: #15803d; border-color: rgba(22,163,74,.25); }
-.zygr-progress { height: 3px; border-radius: 999px; overflow: hidden; background: rgba(148,163,184,.22); }
-.zygr-progress i {
-  display: block; height: 100%; width: 0; border-radius: inherit;
-  background: linear-gradient(90deg, var(--zygr-primary), var(--zygr-sky), var(--zygr-teal));
-  transition: width .4s ease;
+.zp-notice:hover { filter: brightness(1.03); }
+.zp-notice svg { width: 12px; height: 12px; flex: none; }
+.zp-empty { padding: 22px 12px; text-align: center; }
+.zp-empty-icon { width: 36px; height: 36px; margin: 0 auto; display: grid; place-items: center; border-radius: 11px; background: var(--z-accent-soft); color: var(--z-accent); }
+.zp-empty-icon svg { width: 18px; height: 18px; }
+.zp-empty strong { display: block; margin-top: 10px; font-size: 12.5px; font-weight: 600; }
+.zp-empty p { margin: 4px 0 0; font-size: 11px; line-height: 1.6; color: var(--z-ink3); }
+.zp-error { padding: 9px 11px; border-radius: 10px; background: var(--z-red-soft); color: var(--z-red-ink); font-size: 11px; line-height: 1.6; }
+
+.zp-foot { flex: none; padding: 10px 12px 12px; border-top: 1px solid var(--z-hairline); background: var(--z-foot); }
+.zp-actions { display: flex; gap: 8px; }
+.zp-btn {
+  height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 0 14px; border-radius: 10px; background: var(--z-fill); color: var(--z-ink);
+  font-size: 12.5px; font-weight: 500; transition: background .18s, filter .18s, transform .12s;
 }
-.zygr-card {
-  border: 1px solid var(--zygr-line); border-radius: 14px; padding: 12px;
-  background: rgba(255,255,255,.62); box-shadow: 0 6px 18px rgba(15,23,42,.05);
+.zp-btn:hover { background: var(--z-fill-2); }
+.zp-btn:active { transform: scale(.985); }
+.zp-btn.primary { flex: 1; background: var(--z-accent); color: #fff; font-weight: 600; box-shadow: 0 4px 12px -4px rgba(0, 113, 227, .5); }
+.zp-btn.primary:hover { filter: brightness(1.06); }
+.zp-btn.running { background: var(--z-red); color: #fff; font-weight: 600; }
+.zp-btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+.zp-submit { width: 96px; flex: none; }
+.zp-options { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.zp-mini {
+  height: 26px; display: inline-flex; align-items: center; gap: 4px; padding: 0 9px;
+  border-radius: 8px; background: var(--z-fill); font-size: 11px; color: var(--z-ink); white-space: nowrap;
+  transition: background .18s, color .18s;
 }
-.zygr-meta { color: var(--zygr-muted); line-height: 1.7; }
-.zygr-thumbs { display: flex; gap: 6px; overflow-x: auto; margin-top: 9px; padding-bottom: 2px; }
-.zygr-thumbs img {
-  width: 54px; height: 54px; flex: none; object-fit: cover; border-radius: 9px;
-  border: 1px solid var(--zygr-line); cursor: zoom-in; transition: transform .18s, box-shadow .18s;
+.zp-mini:hover { background: var(--z-fill-2); }
+.zp-mini svg { width: 11px; height: 11px; }
+.zp-mini.running { background: var(--z-red-soft); color: var(--z-red-ink); }
+.zp-optlabel { font-size: 10px; color: var(--z-ink3); white-space: nowrap; }
+.zp-stepper { display: inline-flex; align-items: center; height: 26px; padding: 0 2px; border-radius: 8px; background: var(--z-fill); gap: 1px; }
+.zp-stepper button { width: 19px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: var(--z-ink2); font-size: 13px; line-height: 1; }
+.zp-stepper button:hover { background: var(--z-fill-2); }
+.zp-stepper button:disabled { opacity: .4; }
+.zp-stepper input {
+  width: 30px; height: 22px; padding: 0; border: 0; background: transparent; text-align: center;
+  font-size: 11px; font-weight: 600; -moz-appearance: textfield;
 }
-.zygr-thumbs img:hover { transform: scale(1.08); box-shadow: 0 6px 14px rgba(15,23,42,.14); }
-.zygr-score-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
-.zygr-score { font-size: 34px; font-weight: 700; line-height: 1; letter-spacing: -1px; background: linear-gradient(135deg, #4f46e5, #0ea5e9); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.zygr-score small { font-size: 14px; color: var(--zygr-muted); -webkit-text-fill-color: var(--zygr-muted); }
-.zygr-score-input {
-  width: 78px; padding: 2px 6px; border: 1px solid rgba(79,70,229,.28); border-radius: 9px;
-  background: rgba(255,255,255,.9); color: #3730a3; font-size: 20px; font-weight: 700; line-height: 1.2;
-  -webkit-text-fill-color: #3730a3; text-align: center;
+.zp-stepper input::-webkit-outer-spin-button,
+.zp-stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.zp-stepper input:focus { outline: none; }
+.zp-stepper input:disabled { opacity: .5; }
+.zp-seg { display: inline-flex; gap: 1px; margin-left: auto; padding: 2px; border-radius: 8px; background: var(--z-fill); }
+.zp-seg button { height: 22px; padding: 0 7px; border-radius: 6px; font-size: 10.5px; color: var(--z-ink2); white-space: nowrap; }
+.zp-seg button[aria-pressed="true"] { background: var(--z-card); color: var(--z-ink); font-weight: 600; box-shadow: var(--z-shadow-sm); }
+.zp-seg button:disabled { opacity: .5; }
+.zp-footbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--z-hairline); }
+.zp-skip { position: relative; display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--z-ink2); cursor: pointer; user-select: none; }
+.zp-skip input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.zp-switch { position: relative; width: 32px; height: 19px; flex: none; border-radius: 999px; background: var(--z-fill-2); transition: background .22s var(--z-ease); }
+.zp-switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .28); transition: transform .22s var(--z-ease);
 }
-.zygr-score-input:focus { outline: 2px solid var(--zygr-sky); outline-offset: 1px; }
-.zygr-table .zygr-score-input { width: 62px; padding: 3px 5px; font-size: 12px; }
-.zygr-badge { padding: 4px 10px; border-radius: 999px; font-size: 11px; background: rgba(20,184,166,.12); color: #0f766e; border: 1px solid rgba(20,184,166,.24); }
-.zygr-badge.zygr-risk { background: rgba(220,38,38,.1); color: #b91c1c; border-color: rgba(220,38,38,.22); }
-.zygr-reason { margin-top: 10px; color: var(--zygr-muted); line-height: 1.65; }
-.zygr-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12px; }
-.zygr-table th, .zygr-table td { text-align: left; padding: 6px 5px; border-top: 1px solid var(--zygr-line); }
-.zygr-table th { color: var(--zygr-muted); font-weight: 500; }
-.zygr-reviews { margin-top: 8px; color: #b45309; line-height: 1.6; }
-.zygr-error { padding: 9px 11px; border-radius: 10px; background: rgba(220,38,38,.08); color: #b91c1c; border: 1px solid rgba(220,38,38,.18); }
-.zygr-actions {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px 10px;
-  border-top: 1px solid var(--zygr-line); background: rgba(255,255,255,.42);
-}
-.zygr-btn {
-  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
-  min-height: 28px; padding: 0 10px; line-height: 1; white-space: nowrap;
-  border-radius: 7px; border: 1px solid rgba(79,70,229,.18);
-  background: rgba(255,255,255,.78); color: #3730a3; font-size: 11px; transition: .18s;
-}
-.zygr-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 3px 9px rgba(79,70,229,.14); }
-.zygr-btn:focus-visible { outline: 2px solid var(--zygr-sky); outline-offset: 2px; }
-.zygr-continuous-cell {
-  display: inline-flex; align-items: center; gap: 2px;
-  padding: 2px 6px 2px 2px; border: 1px solid var(--zygr-line); border-radius: 9px;
-  background: rgba(255,255,255,.58);
-}
-.zygr-continuous-cell .zygr-btn { border-color: transparent; background: transparent; }
-.zygr-limit {
-  display: inline-flex; align-items: center; gap: 3px;
-  font-size: 10px; line-height: 1; color: var(--zygr-muted); white-space: nowrap;
-  cursor: help; user-select: none;
-}
-.zygr-limit input {
-  width: 34px; height: 22px; padding: 0 2px; text-align: center;
-  border: 1px solid rgba(79,70,229,.22); border-radius: 6px;
-  background: rgba(255,255,255,.9); color: #3730a3; font-size: 11px; font-weight: 600;
-  -moz-appearance: textfield;
-}
-.zygr-limit input::-webkit-inner-spin-button,
-.zygr-limit input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-.zygr-limit input:focus-visible { outline: 2px solid var(--zygr-sky); outline-offset: 1px; }
-.zygr-limit input:disabled { cursor: not-allowed; }
-.zygr-btn.zygr-primary { color: #fff; border-color: transparent; background: linear-gradient(135deg, var(--zygr-primary), var(--zygr-sky)); }
-.zygr-btn.zygr-running { color: #fff; border-color: transparent; background: linear-gradient(135deg, #dc2626, #f59e0b); }
-.zygr-btn.zygr-ghost { color: var(--zygr-muted); border-color: var(--zygr-line); background: transparent; }
-.zygr-submit-cell { display: flex; flex-direction: row; align-items: center; gap: 6px; }
-.zygr-mini-check { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; line-height: 1; white-space: nowrap; color: var(--zygr-muted); cursor: pointer; user-select: none; }
-.zygr-mini-check input { accent-color: var(--zygr-primary); width: 12px; height: 12px; flex: none; }
-.zygr-output {
-  display: inline-flex; align-items: center; gap: 4px;
-  font-size: 10px; line-height: 1; color: var(--zygr-muted); white-space: nowrap;
-  cursor: help; user-select: none;
-}
-.zygr-output select {
-  height: 22px; padding: 0 2px; cursor: pointer;
-  border: 1px solid rgba(79,70,229,.22); border-radius: 6px;
-  background: rgba(255,255,255,.9); color: #3730a3; font-size: 11px; font-weight: 600;
-}
-.zygr-output select:focus-visible { outline: 2px solid var(--zygr-sky); outline-offset: 1px; }
-.zygr-output select:disabled { cursor: not-allowed; opacity: .6; }
-.zygr-toast {
-  position: absolute; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 2;
-  padding: 8px 14px; border-radius: 999px; background: rgba(15,23,42,.9); color: #fff; font-size: 12px;
-  animation: zygr-in .2s ease; white-space: nowrap;
-}
-.zygr-test-status { font-size: 12px; color: var(--zygr-muted); }
-.zygr-test-status.zygr-ok { color: #15803d; }
-.zygr-test-status.zygr-bad { color: #b91c1c; }
+.zp-skip input:checked + .zp-switch { background: var(--z-green); }
+.zp-skip input:checked + .zp-switch::after { transform: translateX(13px); }
+.zp-skip input:focus-visible + .zp-switch { outline: 2px solid var(--z-accent); outline-offset: 2px; }
+.zp-tools { display: flex; align-items: center; gap: 2px; }
+.zp-quiet { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; border-radius: 7px; font-size: 11px; color: var(--z-ink2); }
+.zp-quiet:hover { background: var(--z-fill); color: var(--z-ink); }
+.zp-quiet svg { width: 12px; height: 12px; }
+
+/* ---------- 弹层骨架 ---------- */
 .zygr-overlay {
-  position: fixed; inset: 0; z-index: 2147483647; display: grid; place-items: center;
-  background: rgba(15,23,42,.38); backdrop-filter: blur(4px); padding: 20px;
+  position: fixed; inset: 0; z-index: 2147483646; display: grid; place-items: center; padding: 24px;
+  background: rgba(0, 0, 0, .24);
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  animation: zo-in .24s ease;
 }
+@keyframes zo-in { from { opacity: 0; } to { opacity: 1; } }
 .zygr-dialog {
+  position: relative; width: min(880px, 100%); height: min(760px, calc(100vh - 48px));
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--z-bg-solid); border: 1px solid var(--z-hairline); border-radius: 22px;
+  box-shadow: var(--z-shadow-lg); animation: zd-in .32s var(--z-ease);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .zygr-overlay { background: rgba(0, 0, 0, .38); }
+}
+@keyframes zd-in { from { opacity: 0; transform: translateY(12px) scale(.985); } to { opacity: 1; transform: none; } }
+.zygr-dialog.zygr-help { width: min(560px, 100%); height: auto; max-height: min(82vh, 700px); }
+.zg-head { flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 20px 14px 22px; }
+.zg-head h2 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -.3px; }
+.zg-head p { margin: 3px 0 0; font-size: 11.5px; color: var(--z-ink3); }
+.zg-head .zp-iconbtn { margin-top: 2px; }
+
+/* ---------- 设置 ---------- */
+.zg-shell { flex: 1; min-height: 0; display: grid; grid-template-columns: 192px minmax(0, 1fr); }
+.zg-nav { display: flex; flex-direction: column; gap: 2px; padding: 4px 10px 12px; border-right: 1px solid var(--z-hairline); background: rgba(120, 120, 128, .045); overflow: auto; }
+.zg-navitem { display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 9px; border-radius: 9px; font-size: 12.5px; color: var(--z-ink2); text-align: left; transition: background .18s, color .18s; }
+.zg-navitem:hover { background: var(--z-fill); }
+.zg-navitem.is-active { background: var(--z-card); color: var(--z-ink); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, .07); }
+.zg-tile { width: 22px; height: 22px; flex: none; display: grid; place-items: center; border-radius: 6px; color: #fff; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .25); }
+.zg-tile svg { width: 13px; height: 13px; }
+.zg-tile.blue { background: #0a84ff; }
+.zg-tile.purple { background: #5e5ce6; }
+.zg-tile.pink { background: #ff375f; }
+.zg-tile.gray { background: #8e8e93; }
+.zg-navfoot { margin-top: auto; padding: 14px 9px 0; font-size: 10px; line-height: 1.6; color: var(--z-ink3); }
+.zg-pane { overflow: auto; padding: 8px 22px 28px; }
+
+.zg-page { display: none; align-content: start; gap: 18px; }
+.zg-page.is-active { display: grid; }
+.zg-pagehead h2 { margin: 6px 0 0; font-size: 17px; font-weight: 600; letter-spacing: -.2px; }
+.zg-pagehead p { margin: 4px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--z-ink3); }
+.zg-section { display: grid; gap: 0; }
+.zg-grouptitle { margin: 0 0 7px 2px; font-size: 11.5px; font-weight: 600; color: var(--z-ink2); }
+.zg-note { margin: 7px 2px 0; font-size: 10.5px; line-height: 1.6; color: var(--z-ink3); text-wrap: pretty; }
+.zg-group { overflow: hidden; background: var(--z-card); border-radius: 12px; box-shadow: 0 0 0 1px var(--z-hairline); }
+.zg-row { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 9px 14px; }
+.zg-row + .zg-row { border-top: 1px solid var(--z-hairline); }
+.zg-rowmain { flex: 1; min-width: 0; }
+.zg-rowlabel { display: block; font-size: 12.5px; }
+.zg-rowdesc { display: block; margin-top: 1px; font-size: 10.5px; line-height: 1.5; color: var(--z-ink3); text-wrap: pretty; }
+.zg-rowactions { display: flex; flex: none; gap: 6px; }
+.zg-rowvalue { flex: none; font-size: 12px; color: var(--z-ink2); }
+.zg-statsline { margin: 0; padding: 10px 14px; font-size: 11px; line-height: 1.65; color: var(--z-ink2); }
+
+.zg-field { display: block; padding: 12px 14px; }
+.zg-field + .zg-field { border-top: 1px solid var(--z-hairline); }
+.zg-field > label:not(.zg-drop) { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; font-size: 12px; font-weight: 600; }
+.zg-opt, .zg-req { padding: 1px 6px; border-radius: 999px; font-size: 9.5px; font-weight: 400; }
+.zg-opt { background: var(--z-fill); color: var(--z-ink3); }
+.zg-req { background: var(--z-orange-soft); color: var(--z-orange-ink); }
+
+.zg-input, .zg-field textarea, .zg-select select {
+  width: 100%; border: 1px solid transparent; border-radius: 9px; background: var(--z-fill);
+  font-size: 12.5px; transition: background .18s, box-shadow .18s, border-color .18s;
+}
+.zg-input { height: 30px; padding: 0 10px; }
+.zg-field textarea { display: block; min-height: 62px; padding: 9px 11px; line-height: 1.65; resize: vertical; }
+.zg-input:hover, .zg-field textarea:hover, .zg-select select:hover { background: var(--z-fill-2); }
+.zg-input:focus, .zg-field textarea:focus, .zg-select select:focus {
+  outline: none; background: var(--z-card); border-color: var(--z-accent); box-shadow: 0 0 0 3px var(--z-ring);
+}
+.zg-input::placeholder, .zg-field textarea::placeholder { color: var(--z-ink3); }
+.zg-num { width: 88px; flex: none; text-align: right; }
+.zg-inputwrap { position: relative; flex: 1; min-width: 0; max-width: 340px; }
+.zg-inputwrap .zg-input { padding-right: 50px; }
+.zg-inputwrap button { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); height: 24px; padding: 0 8px; border-radius: 6px; font-size: 10.5px; color: var(--z-ink2); }
+.zg-inputwrap button:hover { background: var(--z-fill); }
+.zg-select { position: relative; flex: none; width: 168px; }
+.zg-select::after {
+  content: ""; position: absolute; right: 11px; top: 50%; width: 6px; height: 6px; pointer-events: none;
+  border-right: 1.5px solid var(--z-ink3); border-bottom: 1.5px solid var(--z-ink3);
+  transform: translateY(-70%) rotate(45deg);
+}
+.zg-select select { height: 30px; padding: 0 26px 0 10px; appearance: none; -webkit-appearance: none; }
+.zg-select.wide { width: 210px; }
+
+.zg-switch { position: relative; display: inline-flex; flex: none; cursor: pointer; }
+.zg-switch input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.zg-switch-track { position: relative; width: 42px; height: 25px; border-radius: 999px; background: var(--z-fill-2); transition: background .22s var(--z-ease); }
+.zg-switch-track::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 21px; height: 21px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .28); transition: transform .22s var(--z-ease);
+}
+.zg-switch input:checked + .zg-switch-track { background: var(--z-green); }
+.zg-switch input:checked + .zg-switch-track::after { transform: translateX(17px); }
+.zg-switch input:focus-visible + .zg-switch-track { outline: 2px solid var(--z-accent); outline-offset: 2px; }
+
+.zg-seg { display: inline-flex; gap: 1px; padding: 2px; border-radius: 8px; background: var(--z-fill); }
+.zg-seg button { height: 26px; padding: 0 11px; border-radius: 6px; font-size: 11.5px; color: var(--z-ink2); white-space: nowrap; }
+.zg-seg button[aria-pressed="true"] { background: var(--z-card); color: var(--z-ink); font-weight: 600; box-shadow: var(--z-shadow-sm); }
+
+.zg-btn {
+  height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 14px;
+  border-radius: 9px; background: var(--z-fill); color: var(--z-ink); font-size: 12.5px; font-weight: 500;
+  transition: background .18s, filter .18s, transform .12s;
+}
+.zg-btn:hover { background: var(--z-fill-2); }
+.zg-btn:active { transform: scale(.985); }
+.zg-btn.primary { background: var(--z-accent); color: #fff; font-weight: 600; }
+.zg-btn.primary:hover { filter: brightness(1.06); }
+.zg-btn.ghost { background: transparent; color: var(--z-ink2); }
+.zg-btn.ghost:hover { background: var(--z-fill); color: var(--z-ink); }
+.zg-btn.danger { background: transparent; color: var(--z-red-ink); }
+.zg-btn.danger:hover { background: var(--z-red-soft); }
+.zg-btn.small { height: 28px; padding: 0 10px; font-size: 11.5px; }
+.zg-btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+
+.zg-status { font-size: 11px; line-height: 1.5; color: var(--z-ink3); }
+.zg-status.ok { color: var(--z-green-ink); }
+.zg-status.bad { color: var(--z-red-ink); }
+.zg-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.zg-inline .zg-status { margin-left: 2px; }
+
+.zg-drop {
   position: relative;
-  width: min(680px, 100%); max-height: min(82vh, 760px); display: flex; flex-direction: column;
-  border-radius: 20px; overflow: hidden; background: linear-gradient(160deg, #fff, #eef2ff);
-  border: 1px solid rgba(255,255,255,.75); box-shadow: 0 24px 70px rgba(15,23,42,.28);
-  animation: zygr-in .25s ease;
+  display: grid; place-items: center; gap: 5px; padding: 16px; text-align: center;
+  border: 1px dashed var(--z-hairline); border-radius: 10px; background: var(--z-fill);
+  font-size: 11.5px; color: var(--z-ink2); cursor: pointer; transition: background .18s, border-color .18s;
 }
-.zygr-dialog.zygr-wide { width: min(840px, 100%); }
-.zygr-dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; color: #fff; background: linear-gradient(135deg,#4f46e5,#0ea5e9); }
-.zygr-dialog-head h2 { margin: 0; font-size: 17px; }
-.zygr-dialog-body { padding: 16px 20px; overflow: auto; display: grid; gap: 14px; }
-.zygr-dialog-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--zygr-line); }
-.zygr-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--zygr-line); }
-.zygr-tab { padding: 8px 14px; border: 0; background: transparent; color: var(--zygr-muted); border-bottom: 2px solid transparent; transition: .18s; }
-.zygr-tab.zygr-active { color: var(--zygr-primary); border-color: var(--zygr-primary); }
-.zygr-section { display: grid; gap: 10px; }
-.zygr-section h3 { margin: 0; font-size: 14px; color: #3730a3; }
-.zygr-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
-.zygr-field { display: grid; gap: 5px; }
-.zygr-field label { font-size: 12px; color: var(--zygr-muted); }
-.zygr-field input, .zygr-field select, .zygr-field textarea {
-  width: 100%; padding: 8px 10px; border-radius: 9px; border: 1px solid var(--zygr-line);
-  background: rgba(255,255,255,.9); outline: none; transition: .18s;
+.zg-drop:hover { background: var(--z-fill-2); border-color: var(--z-ink3); }
+.zg-drop:focus-within { outline: 2px solid var(--z-accent); outline-offset: 2px; }
+.zg-drop svg { width: 18px; height: 18px; color: var(--z-ink3); }
+.zg-drop small { font-size: 10px; color: var(--z-ink3); }
+.zg-drop input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+.zg-lead { margin: 0; font-size: 12px; line-height: 1.7; color: var(--z-ink2); }
+.zg-bullets { padding: 4px 14px; }
+.zg-bullets ul { margin: 7px 0 8px; padding-left: 17px; display: grid; gap: 5px; }
+.zg-bullets li { font-size: 11.5px; line-height: 1.65; color: var(--z-ink2); }
+.zg-stats { display: grid; grid-template-columns: 1fr 1fr; }
+.zg-stat { padding: 11px 14px; }
+.zg-stat:nth-child(odd) { border-right: 1px solid var(--z-hairline); }
+.zg-stat:nth-child(n+3) { border-top: 1px solid var(--z-hairline); }
+.zg-stat b { display: block; font-size: 17px; font-weight: 600; letter-spacing: -.3px; }
+.zg-stat span { display: block; margin-top: 2px; font-size: 10.5px; color: var(--z-ink3); }
+
+.zg-foot { flex: none; display: flex; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--z-hairline); background: var(--z-card-t); }
+.zg-foot-left, .zg-foot-right { display: flex; align-items: center; gap: 6px; }
+.zg-foot-left { flex: 1; }
+
+/* ---------- 历史 ---------- */
+.zh-toolbar { flex: none; display: flex; align-items: center; gap: 10px; padding: 0 20px 10px; }
+.zh-search { position: relative; width: 236px; margin-left: auto; }
+.zh-search input {
+  width: 100%; height: 30px; padding: 0 10px 0 28px; border: 1px solid transparent; border-radius: 8px;
+  background: var(--z-fill); font-size: 12px; transition: background .18s, box-shadow .18s, border-color .18s;
 }
-.zygr-field input:focus, .zygr-field select:focus { border-color: var(--zygr-primary); box-shadow: 0 0 0 3px var(--zygr-glow); }
-.zygr-hint { font-size: 11px; color: var(--zygr-muted); line-height: 1.6; }
-.zygr-summary { margin: -6px 0 0; font-size: 11px; color: var(--zygr-muted); line-height: 1.6; }
-.zygr-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-[data-model-options] { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-[data-model-options] select { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid var(--zygr-line); border-radius: 8px; background: #fff; color: var(--zygr-text); font-size: 13px; }
-.zygr-list { display: grid; gap: 8px; }
-.zygr-item { display: flex; align-items: center; gap: 8px; border: 1px solid var(--zygr-line); border-radius: 12px; padding: 10px 12px; background: rgba(255,255,255,.7); cursor: pointer; transition: .18s; }
-.zygr-item:hover { transform: translateY(-1px); box-shadow: 0 8px 18px rgba(15,23,42,.08); }
-.zygr-item.zygr-selected { border-color: var(--zygr-primary); box-shadow: 0 0 0 2px var(--zygr-glow); }
-.zygr-item-main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.zygr-jump { flex: none; border: 1px solid var(--zygr-line); border-radius: 8px; padding: 3px 9px; background: #fff; color: var(--zygr-primary); font-size: 11px; line-height: 1.4; cursor: pointer; }
-.zygr-jump:hover { border-color: var(--zygr-primary); background: var(--zygr-glow); }
-.zygr-detail { white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.7; color: var(--zygr-muted); }
-.zygr-empty { text-align: center; color: var(--zygr-muted); padding: 24px; }
-.zygr-history-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 12px; align-items: start; }
-.zygr-history-list, .zygr-history-detail { max-height: 52vh; overflow: auto; }
-.zygr-history-detail { position: sticky; top: 0; }
-@media (max-width: 720px) {
-  .zygr-history-grid { grid-template-columns: 1fr; }
-  .zygr-history-list { max-height: 30vh; }
-  .zygr-history-detail { position: static; max-height: none; }
+.zh-search input:focus { outline: none; background: var(--z-card); border-color: var(--z-accent); box-shadow: 0 0 0 3px var(--z-ring); }
+.zh-search svg { position: absolute; left: 9px; top: 50%; width: 13px; height: 13px; color: var(--z-ink3); transform: translateY(-50%); pointer-events: none; }
+.zh-summary { flex: none; padding: 0 22px 9px; font-size: 10.5px; color: var(--z-ink3); }
+.zh-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 318px minmax(0, 1fr); gap: 14px; padding: 0 20px 16px; }
+.zh-list { display: grid; align-content: start; gap: 6px; overflow-y: auto; overflow-x: hidden; padding-right: 2px; }
+.zh-row {
+  display: flex; align-items: center; min-width: 0; padding: 0; border-radius: 11px;
+  background: var(--z-card); box-shadow: 0 0 0 1px var(--z-hairline);
+  transition: box-shadow .18s, transform .18s;
 }
-.zygr-cache-hint {
-  display: block; width: 100%; margin-top: 8px; padding: 5px 9px;
-  border-radius: 8px; border: 1px dashed rgba(180,83,9,.45);
-  background: rgba(251,191,36,.14); color: #b45309;
-  font-size: 11px; line-height: 1.5; text-align: left;
+.zh-row:hover { transform: translateY(-1px); box-shadow: 0 0 0 1px var(--z-hairline), 0 6px 16px -8px rgba(15, 23, 42, .35); }
+.zh-row.is-selected { box-shadow: 0 0 0 1.5px var(--z-accent); }
+.zh-row:focus-within { outline: 2px solid var(--z-accent); outline-offset: 2px; }
+.zh-select { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 9px 4px 9px 11px; border-radius: 11px 0 0 11px; text-align: left; }
+.zh-score { width: 38px; height: 38px; flex: none; display: grid; place-items: center; border-radius: 10px; background: var(--z-fill); font-size: 13px; font-weight: 600; }
+.zh-row.needs .zh-score { background: var(--z-orange-soft); color: var(--z-orange-ink); }
+.zh-main { flex: 1; min-width: 0; }
+.zh-l1 { display: block; font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zh-l2 { display: block; margin-top: 2px; font-size: 10.5px; color: var(--z-ink3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.zh-arrow { width: 13px; height: 13px; flex: none; color: var(--z-ink3); }
+.zh-jump { flex: none; margin-right: 9px; padding: 3px 7px; border-radius: 6px; background: var(--z-accent-soft); color: var(--z-accent); font-size: 10px; }
+.zh-jump:hover { filter: brightness(.97); }
+.zh-detail { overflow: auto; padding: 16px; background: var(--z-card); border-radius: 14px; box-shadow: 0 0 0 1px var(--z-hairline); }
+.zh-detailhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.zh-bigscore { margin-top: 1px; font-size: 32px; font-weight: 600; letter-spacing: -1.2px; line-height: 1.1; }
+.zh-bigscore span { margin-left: 3px; font-size: 12px; font-weight: 400; letter-spacing: 0; color: var(--z-ink3); }
+.zh-stats { margin: 12px 0 0; border-top: 1px solid var(--z-hairline); }
+.zh-statrow { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; font-size: 11.5px; }
+.zh-statrow + .zh-statrow { border-top: 1px solid var(--z-hairline); }
+.zh-statrow dt { flex: none; width: 74px; color: var(--z-ink3); font-size: 10.5px; }
+.zh-statrow dd { margin: 0; flex: 1; min-width: 0; color: var(--z-ink2); line-height: 1.6; text-wrap: pretty; }
+.zh-h4 { margin: 14px 0 2px; font-size: 11px; font-weight: 600; color: var(--z-ink3); }
+.zh-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.zh-empty { padding: 40px 12px; text-align: center; font-size: 11.5px; color: var(--z-ink3); }
+
+/* ---------- 提示条 ---------- */
+.zygr-toast {
+  position: absolute; left: 50%; bottom: 86px; z-index: 6; transform: translateX(-50%);
+  max-width: calc(100% - 28px); padding: 8px 14px; border-radius: 999px;
+  background: rgba(29, 29, 31, .9); color: #fff; font-size: 11.5px; line-height: 1.4;
+  text-align: center; pointer-events: none; box-shadow: 0 10px 28px rgba(0, 0, 0, .22);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  animation: zt-in .22s var(--z-ease);
 }
-.zygr-cache-hint:hover { background: rgba(251,191,36,.24); }
-.zygr-dialog.zygr-cache-dialog { width: min(520px, 100%); }
-.zygr-dialog-body.zygr-cache-help-body { gap: 12px; font-size: 12px; line-height: 1.7; color: var(--zygr-muted); }
-.zygr-cache-help-summary { margin: 0; color: var(--zygr-ink); }
+.zp-panel > .zygr-toast { bottom: 122px; }
+.zygr-dialog > .zygr-toast { bottom: 70px; }
+@keyframes zt-in { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+/* ---------- 缓存说明（showCacheHelp 生成的内容） ---------- */
+.zygr-cache-help-body { display: grid; gap: 12px; overflow: auto; padding: 4px 20px 20px; }
+.zygr-cache-help-summary { margin: 0; font-size: 12px; line-height: 1.7; color: var(--z-ink); }
 .zygr-cache-help-impact {
-  margin: 0; padding: 8px 10px; border-radius: 9px; line-height: 1.6;
-  background: rgba(22,163,74,.10); border: 1px solid rgba(22,163,74,.22); color: #15803d;
+  margin: 0; padding: 9px 11px; border-radius: 9px; font-size: 11.5px; line-height: 1.6;
+  background: var(--z-green-soft); color: var(--z-green-ink);
 }
 .zygr-cache-help-section { display: grid; gap: 5px; }
-.zygr-cache-help-section h3 { margin: 0; font-size: 13px; color: #3730a3; }
-.zygr-cache-help-section ul { margin: 0; padding-left: 18px; display: grid; gap: 5px; }
-@keyframes zygr-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes zygr-float { 0%,100% { transform: translate(0,0); } 50% { transform: translate(-18px,18px); } }
+.zygr-cache-help-section h3 { margin: 0; font-size: 12px; font-weight: 600; color: var(--z-ink2); }
+.zygr-cache-help-section ul { margin: 0; padding-left: 17px; display: grid; gap: 4px; }
+.zygr-cache-help-section li { font-size: 11.5px; line-height: 1.65; color: var(--z-ink2); }
+.zygr-hint { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--z-ink3); }
+
+@media (max-width: 860px) {
+  .zygr-dialog { height: min(820px, calc(100vh - 32px)); }
+  .zg-shell { grid-template-columns: 1fr; }
+  .zg-nav { flex-direction: row; overflow-x: auto; padding: 0 12px 8px; border-right: 0; border-bottom: 1px solid var(--z-hairline); }
+  .zg-navitem { height: 32px; white-space: nowrap; }
+  .zg-navfoot { display: none; }
+  .zg-pane { padding: 14px 16px 22px; }
+  .zh-body { grid-template-columns: 1fr; }
+  .zh-list { max-height: 34vh; }
+  .zh-detail { min-height: 240px; }
+}
+@media (max-width: 640px) {
+  .zygr-overlay { padding: 0; place-items: end center; }
+  .zygr-dialog { width: 100%; height: calc(100vh - 24px); border-radius: 20px 20px 0 0; }
+  .zh-toolbar { flex-wrap: wrap; }
+  .zh-search { width: 100%; margin-left: 0; }
+  .zg-row { flex-wrap: wrap; }
+  .zg-select, .zg-select.wide { width: 100%; }
+  .zg-inputwrap { max-width: none; }
+  .zg-foot { flex-wrap: wrap; }
+  .zg-seg { flex-wrap: wrap; }
+}
 @media (max-width: 520px) {
-  :host { left: 0; right: 0; bottom: 0; }
-  .zygr-panel { width: 100%; max-height: 72vh; border-radius: 18px 18px 0 0; }
-  .zygr-grid { grid-template-columns: 1fr; }
+  .zp-panel { left: 10px; right: 10px; bottom: 10px; width: auto; max-height: 78vh; border-radius: 18px; }
+  .zp-options { flex-wrap: wrap; }
+  .zp-seg { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
 }
 `;
-
   // src/ui/panel.ts
   var STATUS_LABEL = {
     legible: "\u53EF\u8FA8\u8BA4",
@@ -3685,7 +4019,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.shadow = this.host.attachShadow({ mode: "open" });
       this.shadow.innerHTML = `<style>${STYLES}</style>${this.markup()}`;
       guardEnter(this.shadow);
-      this.panel = this.q(".zygr-panel");
+      this.panel = this.q(".zp-panel");
       const version = this.shadow.querySelector("#zygr-version");
       if (version) version.textContent = `v${typeof ZYGR_VERSION === "string" ? ZYGR_VERSION : "dev"}`;
       const skipConfirm = this.shadow.querySelector("[data-opt='skip-submit-confirm']");
@@ -3695,59 +4029,105 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.bind();
     }
     markup() {
-      return `<div class="zygr-panel">
-      <header class="zygr-head">
-        <div class="zygr-brand">
-          <span class="zygr-logo">\u667A</span>
-          <div>
-            <div class="zygr-title-row">
+      const outputButtons = Object.keys(OUTPUT_MODES).map((key) => `
+          <button data-output-mode="${key}" aria-pressed="${key === "standard" ? "true" : "false"}" title="${OUTPUT_MODES[key].label}">${OUTPUT_MODE_SHORT[key] || key}</button>`).join("");
+      return `<div class="zp-panel">
+      <header class="zp-head">
+        <div class="zp-brand">
+          <span class="zp-logo" aria-hidden="true">\u667A</span>
+          <div class="zp-titles">
+            <div class="zp-titleline">
               <strong>\u667A\u9605\u6279\u6539\u52A9\u624B</strong>
-              <span class="zygr-version" id="zygr-version" title="\u5F53\u524D\u811A\u672C\u7248\u672C">v--</span>
+              <span class="zp-ver" id="zygr-version" title="\u5F53\u524D\u811A\u672C\u7248\u672C">v--</span>
             </div>
-            <small id="zygr-subtitle">\u7B49\u5F85\u8BFB\u53D6\u9898\u76EE</small>
+            <span class="zp-sub" id="zygr-subtitle">\u7B49\u5F85\u8BFB\u53D6\u9898\u76EE</span>
           </div>
         </div>
-        <div class="zygr-head-actions">
-          <button class="zygr-icon" data-act="collapse" title="\u6298\u53E0" aria-label="\u6298\u53E0">\u2014</button>
-          <button class="zygr-icon" data-act="close" title="\u5173\u95ED" aria-label="\u5173\u95ED">\xD7</button>
+        <div class="zp-header-actions">
+          <button class="zp-iconbtn" data-act="collapse" title="\u6298\u53E0" aria-label="\u6298\u53E0">
+            <svg class="zp-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <button class="zp-iconbtn" data-act="close" title="\u5173\u95ED" aria-label="\u5173\u95ED">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
         </div>
       </header>
-      <div class="zygr-body">
-        <div class="zygr-statusbar"><span id="zygr-stage">\u5C31\u7EEA</span><span id="zygr-progress" hidden></span><span class="zygr-chip" id="zygr-cache">\u5F85\u914D\u7F6E</span></div>
-        <div class="zygr-progress"><i id="zygr-bar"></i></div>
-        <section class="zygr-card"><div class="zygr-meta" id="zygr-meta">\u5C1A\u672A\u68C0\u6D4B\u5230\u9605\u5377\u9875\u9762</div><div class="zygr-thumbs" id="zygr-thumbs"></div></section>
-        <section class="zygr-card" id="zygr-result"><div class="zygr-reason">\u6279\u6539\u7ED3\u679C\u5C06\u663E\u793A\u5728\u8FD9\u91CC</div></section>
-        <div class="zygr-error" id="zygr-error" hidden></div>
+      <div class="zp-body">
+        <div class="zp-status">
+          <span class="zp-stage"><i class="zp-dot" id="zygr-dot"></i><span id="zygr-stage">\u5C31\u7EEA</span></span>
+          <span class="zp-count" id="zygr-progress" hidden></span>
+          <span class="zp-chip" id="zygr-cache">\u5F85\u914D\u7F6E</span>
+        </div>
+        <div class="zp-track"><i id="zygr-bar"></i></div>
+        <section class="zp-card" aria-label="\u5F53\u524D\u9898\u76EE">
+          <div class="zp-qhead">
+            <div class="zp-qmain">
+              <span class="zp-kicker">\u5F53\u524D\u9898\u76EE</span>
+              <div class="zp-qtitle" id="zygr-qtitle">\u672A\u8BFB\u53D6</div>
+              <div class="zp-qmeta" id="zygr-meta">\u5C1A\u672A\u68C0\u6D4B\u5230\u9605\u5377\u9875\u9762</div>
+            </div>
+          </div>
+          <div class="zp-thumbs" id="zygr-thumbs"></div>
+        </section>
+        <section class="zp-card zp-result" id="zygr-result" aria-live="polite"></section>
+        <div class="zp-error" id="zygr-error" hidden></div>
       </div>
-      <footer class="zygr-actions">
-        <button class="zygr-btn zygr-primary" data-act="grade">\u5F00\u59CB\u6279\u6539</button>
-        <div class="zygr-continuous-cell">
-          <button class="zygr-btn" data-act="continuous">\u8FDE\u7EED\u6279\u9605</button>
-          <label class="zygr-limit" title="${CONTINUOUS_LIMIT_HINT}">
-            <span>\u6700\u591A</span>
+      <footer class="zp-foot">
+        <div class="zp-actions">
+          <button class="zp-btn primary" data-act="grade">\u5F00\u59CB\u6279\u6539</button>
+          <button class="zp-btn zp-submit" data-act="submit">\u63D0\u4EA4\u7ED3\u679C</button>
+        </div>
+        <div class="zp-options">
+          <button class="zp-mini" data-act="continuous">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5l11 7-11 7z"/></svg>
+            <span>\u8FDE\u7EED\u6279\u9605</span>
+          </button>
+          <span class="zp-optlabel">\u6700\u591A</span>
+          <div class="zp-stepper" title="${CONTINUOUS_LIMIT_HINT}">
+            <button data-step="-1" aria-label="\u51CF\u5C11\u4EFD\u6570">\u2212</button>
             <input type="number" data-opt="continuous-limit" min="1" max="${CONTINUOUS_LIMIT_MAX}" step="1" value="20" aria-label="\u8FDE\u7EED\u6279\u9605\u6700\u591A\u6279\u6539\u4EFD\u6570" title="${CONTINUOUS_LIMIT_HINT}">
-            <span>\u4EFD</span>
+            <button data-step="1" aria-label="\u589E\u52A0\u4EFD\u6570">+</button>
+          </div>
+          <span class="zp-optlabel">\u4EFD</span>
+          <div class="zp-seg" role="group" aria-label="\u8F93\u51FA\u6863\u4F4D" title="${OUTPUT_MODE_HINT}">${outputButtons}
+          </div>
+        </div>
+        <div class="zp-footbar">
+          <label class="zp-skip" title="\u52FE\u9009\u540E\u63D0\u4EA4\u4E0D\u518D\u5F39\u786E\u8BA4\u6846">
+            <input type="checkbox" data-opt="skip-submit-confirm">
+            <span class="zp-switch" aria-hidden="true"></span>
+            <span>\u63D0\u4EA4\u514D\u786E\u8BA4</span>
           </label>
+          <span class="zp-tools">
+            <button class="zp-quiet" data-act="history">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+              \u5386\u53F2
+            </button>
+            <button class="zp-quiet" data-act="settings">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="7" cy="17" r="2"/></svg>
+              \u8BBE\u7F6E
+            </button>
+          </span>
         </div>
-        <div class="zygr-submit-cell">
-          <button class="zygr-btn" data-act="submit">\u63D0\u4EA4\u7ED3\u679C</button>
-          <label class="zygr-mini-check"><input type="checkbox" data-opt="skip-submit-confirm"> \u4E00\u6B21\u63D0\u4EA4\uFF08\u514D\u786E\u8BA4\uFF09</label>
-        </div>
-        <label class="zygr-output" title="${OUTPUT_MODE_HINT}">
-          <span>\u8F93\u51FA</span>
-          <select data-opt="output-mode" aria-label="\u8F93\u51FA\u6863\u4F4D" title="${OUTPUT_MODE_HINT}">
-            ${Object.keys(OUTPUT_MODES).map((key) => `<option value="${key}" title="${OUTPUT_MODES[key].label}">${OUTPUT_MODE_SHORT[key] || key}</option>`).join("")}
-          </select>
-        </label>
-        <button class="zygr-btn zygr-ghost" data-act="history">\u5386\u53F2</button>
-        <button class="zygr-btn zygr-ghost" data-act="settings">\u8BBE\u7F6E</button>
       </footer>
       <div class="zygr-toast" id="zygr-toast" hidden></div>
     </div>
     <div class="zygr-overlay" id="zygr-cache-help" hidden>
-      <div class="zygr-dialog zygr-cache-dialog">
-        <div class="zygr-dialog-head"><h2>前缀缓存未命中 · 不影响阅卷</h2><button class="zygr-icon" data-act="cache-help-close" aria-label="关闭">\xD7</button></div>
-        <div class="zygr-dialog-body zygr-cache-help-body" id="zygr-cache-help-body"></div>
+      <div class="zygr-dialog zygr-help" role="dialog" aria-modal="true" aria-labelledby="zygr-cache-help-title">
+        <header class="zg-head">
+          <div>
+            <h2 id="zygr-cache-help-title">\u524D\u7F00\u7F13\u5B58\u672A\u547D\u4E2D</h2>
+            <p>\u4E0D\u5F71\u54CD\u9605\u5377\u7ED3\u679C\uFF0C\u53EA\u5F71\u54CD\u8D39\u7528\u4E0E\u9996\u5B57\u901F\u5EA6</p>
+          </div>
+          <button class="zp-iconbtn" data-act="cache-help-close" aria-label="\u5173\u95ED">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </header>
+        <div class="zygr-cache-help-body" id="zygr-cache-help-body"></div>
+        <footer class="zg-foot">
+          <div class="zg-foot-left"></div>
+          <div class="zg-foot-right"><button class="zg-btn primary" data-act="cache-help-close">\u77E5\u9053\u4E86</button></div>
+        </footer>
       </div>
     </div>`;
     }
@@ -3767,17 +4147,31 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         } else if (target?.matches?.("[data-opt='continuous-limit']")) {
           this.setContinuousLimit(target.value);
           this.callbacks.onContinuousLimitChange?.(normalizeContinuousLimit(target.value));
-        } else if (target?.matches?.("[data-opt='output-mode']")) {
-          this.setOutputMode(target.value);
-          this.callbacks.onOutputModeChange?.(normalizeOutputMode(target.value));
         }
       });
       this.shadow.addEventListener("click", (event) => {
+        const step = event.target.closest("[data-step]");
+        if (step) {
+          if (step.disabled) return;
+          const limitInput = this.shadow.querySelector("[data-opt='continuous-limit']");
+          const next = normalizeContinuousLimit(Number(limitInput?.value || 20) + Number(step.dataset.step));
+          this.setContinuousLimit(next);
+          this.callbacks.onContinuousLimitChange?.(next);
+          return;
+        }
+        const output = event.target.closest("[data-output-mode]");
+        if (output) {
+          const value = normalizeOutputMode(output.dataset.outputMode);
+          this.setOutputMode(value);
+          this.callbacks.onOutputModeChange?.(value);
+          return;
+        }
         const button = event.target.closest("[data-act]");
         if (!button) return;
         const action = button.dataset.act;
         if (action === "collapse") {
-          this.panel.classList.toggle("zygr-collapsed");
+          const collapsed = this.panel.classList.toggle("is-collapsed");
+          button.setAttribute("aria-expanded", String(!collapsed));
         } else if (action === "close") {
           this.hide();
         } else if (action === "grade") {
@@ -3824,11 +4218,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     setQuestion(question) {
       this.renderThumbs(question?.images ?? []);
       if (!question) {
+        this.setText("zygr-qtitle", "\u672A\u8BFB\u53D6");
         this.setText("zygr-meta", "\u5C1A\u672A\u68C0\u6D4B\u5230\u9605\u5377\u9875\u9762");
         return;
       }
-      const subs = question.subQuestions.length > 0 ? ` \xB7 ${question.subQuestions.length} \u4E2A\u5C0F\u9898` : "";
-      this.setText("zygr-meta", `\u9898\u53F7 ${question.questionId}${subs} \xB7 \u6EE1\u5206 ${question.maxScore || "\u672A\u6307\u5B9A"} \xB7 \u4F5C\u7B54\u56FE\u7247 ${question.images.length} \u5F20`);
+      const subs = question.subQuestions.length > 0 ? `${question.subQuestions.length} \u4E2A\u5C0F\u9898 \xB7 ` : "";
+      this.setText("zygr-qtitle", `\u9898\u53F7 ${question.questionId}`);
+      this.setText("zygr-meta", `${subs}\u6EE1\u5206 ${question.maxScore || "\u672A\u6307\u5B9A"} \xB7 \u4F5C\u7B54\u56FE\u7247 ${question.images.length} \u5F20`);
     }
     renderThumbs(images) {
       const container = this.q("#zygr-thumbs");
@@ -3847,6 +4243,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.setText("zygr-stage", detail ? `${stage} \xB7 ${detail}` : stage);
       const progress = this.q("#zygr-bar");
       progress.style.width = stage.includes("\u7F13\u5B58\u547D\u4E2D") || stage === "\u5B8C\u6210" ? "100%" : stage.includes("\u8BC4\u5206") ? "70%" : "35%";
+      const dot = this.q("#zygr-dot");
+      dot.className = stage === "\u5B8C\u6210" ? "zp-dot ok" : stage.includes("\u505C\u6B62") ? "zp-dot warn" : "zp-dot";
     }
     setProgress(text) {
       const element = this.q("#zygr-progress");
@@ -3856,32 +4254,35 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     setCache(label, kind = "idle") {
       const chip = this.q("#zygr-cache");
       chip.textContent = label;
-      chip.className = `zygr-chip${kind === "ok" ? " zygr-ok" : kind === "warn" ? " zygr-warn" : ""}`;
+      chip.className = `zp-chip${kind === "ok" ? " ok" : kind === "warn" ? " warn" : kind === "new" ? " new" : ""}`;
     }
     setBusy(busy, label = "\u5904\u7406\u4E2D") {
-      this.shadow.querySelectorAll('.zygr-actions .zygr-btn:not([data-act="continuous"])').forEach((button) => {
+      this.shadow.querySelectorAll('.zp-foot .zp-btn:not([data-act="continuous"]), .zp-quiet, [data-output-mode]').forEach((button) => {
         button.disabled = busy;
       });
-      // 批改中锁定档位：运行中的这一份已经按旧档位发出去了，避免误以为改动能影响它。
-      const outputMode = this.shadow.querySelector("[data-opt='output-mode']");
-      if (outputMode) outputMode.disabled = busy;
       if (busy) this.setStage(label);
     }
     setAutoMode(active) {
       const button = this.q('[data-act="continuous"]');
-      button.textContent = active ? "\u505C\u6B62\u8FDE\u7EED\u6279\u9605" : "\u8FDE\u7EED\u6279\u9605";
-      button.classList.toggle("zygr-running", active);
+      const label = button.querySelector("span");
+      if (label) label.textContent = active ? "\u505C\u6B62\u8FDE\u7EED\u6279\u9605" : "\u8FDE\u7EED\u6279\u9605";
+      button.classList.toggle("running", active);
       // 运行中改上限会让人误以为当前这一轮会跟着变；锁定后提示下一次启动才生效。
       const limit = this.shadow.querySelector("[data-opt='continuous-limit']");
       if (limit) limit.disabled = active;
+      this.shadow.querySelectorAll("[data-step]").forEach((step) => {
+        step.disabled = active;
+      });
     }
     setContinuousLimit(value) {
       const limit = this.shadow.querySelector("[data-opt='continuous-limit']");
       if (limit) limit.value = String(normalizeContinuousLimit(value));
     }
     setOutputMode(value) {
-      const select = this.shadow.querySelector("[data-opt='output-mode']");
-      if (select) select.value = normalizeOutputMode(value);
+      const mode = normalizeOutputMode(value);
+      this.shadow.querySelectorAll("[data-output-mode]").forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.outputMode === mode));
+      });
     }
     showError(message) {
       const box = this.q("#zygr-error");
@@ -3897,85 +4298,123 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       const container = this.q("#zygr-result");
       container.replaceChildren();
       this.cacheMiss = result.cacheMiss || null;
-      const row = document.createElement("div");
-      row.className = "zygr-score-row";
+
+      const head = document.createElement("div");
+      head.className = "zp-scorehead";
+      const left = document.createElement("div");
+      const kicker = document.createElement("span");
+      kicker.className = "zp-kicker";
+      kicker.textContent = "\u5F97\u5206";
       const score = document.createElement("div");
-      score.className = "zygr-score zygr-score-editable";
+      score.className = "zp-score";
       const scoreInput = document.createElement("input");
       scoreInput.type = "number";
-      scoreInput.className = "zygr-score-input";
+      scoreInput.className = "zp-total";
       scoreInput.min = "0";
       scoreInput.max = String(result.maxScore || 999);
       scoreInput.step = "0.5";
       scoreInput.value = String(Math.round(result.score * 10) / 10);
       scoreInput.title = "\u53EF\u76F4\u63A5\u4FEE\u6539\u603B\u5206";
-      const unit = document.createElement("small");
-      unit.textContent = ` / ${result.maxScore || "\u2014"} \u5206`;
+      scoreInput.setAttribute("aria-label", "\u603B\u5206");
+      const unit = document.createElement("span");
+      unit.textContent = `/ ${result.maxScore || "\u2014"}`;
       score.append(scoreInput, unit);
-      const badge = document.createElement("span");
-      badge.className = `zygr-badge${result.needsReview ? " zygr-risk" : ""}`;
-      badge.textContent = `${STATUS_LABEL[result.status]}${result.needsReview ? " \xB7 \u9700\u590D\u6838" : ""}`;
-      row.append(score, badge);
-      container.appendChild(row);
-      const reason = document.createElement("div");
-      reason.className = "zygr-reason";
+      left.append(kicker, score);
+
+      const badges = document.createElement("div");
+      badges.className = "zp-badges";
+      const statusPill = document.createElement("span");
+      const statusKind = result.status === "legible" ? "ok" : result.status === "partial" ? "warn" : "bad";
+      statusPill.className = `zp-pill ${statusKind}`;
+      statusPill.textContent = STATUS_LABEL[result.status] || "\u5DF2\u8BC4\u5206";
+      badges.appendChild(statusPill);
+      if (result.needsReview) {
+        const reviewPill = document.createElement("span");
+        reviewPill.className = "zp-pill warn";
+        reviewPill.textContent = "\u9700\u590D\u6838";
+        badges.appendChild(reviewPill);
+      }
+      head.append(left, badges);
+      container.appendChild(head);
+
+      const reason = document.createElement("p");
+      reason.className = "zp-reason";
       reason.textContent = result.reason || "\u672A\u8FD4\u56DE\u8BC4\u5206\u4F9D\u636E";
       container.appendChild(reason);
+
       if (result.subScores.length > 0) {
-        const table = document.createElement("table");
-        table.className = "zygr-table";
-        const head = document.createElement("thead");
-        head.innerHTML = "<tr><th>\u5C0F\u9898</th><th>\u5F97\u5206</th><th>\u4F9D\u636E</th></tr>";
-        const body = document.createElement("tbody");
+        const list = document.createElement("div");
+        list.className = "zp-sublist";
         result.subScores.forEach((item, index) => {
-          const tr = document.createElement("tr");
-          const labelTd = document.createElement("td");
-          labelTd.textContent = `${item.label}/${item.maxScore}`;
-          const scoreTd = document.createElement("td");
+          const row = document.createElement("div");
+          row.className = "zp-subrow";
+          const main = document.createElement("div");
+          main.className = "zp-submain";
+          const label = document.createElement("span");
+          label.className = "zp-sublabel";
+          label.textContent = item.label;
+          const why = document.createElement("span");
+          why.className = "zp-subreason";
+          why.textContent = item.reason || "\u2014";
+          main.append(label, why);
+          const wrap = document.createElement("span");
+          wrap.className = "zp-subscore";
           const subInput = document.createElement("input");
           subInput.type = "number";
-          subInput.className = "zygr-score-input zygr-subscore-input";
+          subInput.className = "zp-subinput";
           subInput.min = "0";
           subInput.max = String(item.maxScore || 999);
           subInput.step = "0.5";
           subInput.value = String(Math.round(Number(item.score) * 10) / 10);
           subInput.dataset.scoreIndex = String(index);
           subInput.title = "\u53EF\u76F4\u63A5\u4FEE\u6539\u8BE5\u5C0F\u9898\u5F97\u5206";
-          scoreTd.appendChild(subInput);
-          const reasonTd = document.createElement("td");
-          reasonTd.textContent = item.reason || "\u2014";
-          tr.append(labelTd, scoreTd, reasonTd);
-          body.appendChild(tr);
+          subInput.setAttribute("aria-label", `\u5C0F\u9898 ${item.label} \u5F97\u5206`);
+          const max = document.createElement("em");
+          max.textContent = `/ ${item.maxScore || "\u2014"}`;
+          wrap.append(subInput, max);
+          row.append(main, wrap);
+          list.appendChild(row);
         });
-        table.append(head, body);
-        container.appendChild(table);
+        container.appendChild(list);
       }
+
       const reviews = [...result.reviewReasons];
       if (reviews.length > 0) {
         const note = document.createElement("div");
-        note.className = "zygr-reviews";
+        note.className = "zp-reviews";
         note.textContent = reviews.join("\uFF1B");
         container.appendChild(note);
       }
+
       const meta = document.createElement("div");
-      meta.className = "zygr-reason";
+      meta.className = "zp-meta";
+      // 多模态直评现在只有一条链路，不再显示「链路 vlm」；模型与耗时一行，token 消耗另起一行。
+      const modelLine = document.createElement("div");
+      modelLine.className = "zp-metaline";
+      modelLine.textContent = `\u6A21\u578B ${result.model} \xB7 \u8017\u65F6 ${(result.elapsedMs / 1e3).toFixed(1)}s`;
+      meta.appendChild(modelLine);
       // 用量直接取自响应里的 usage，读取它不消耗 token。
       const usage = result.usage;
       // 命中 0 也要显示，否则用户无法区分「接口没返回」和「这次没命中」。
-      const usageText = usage && (usage.prompt || usage.completion)
-        ? ` \xB7 \u8F93\u5165 ${usage.prompt}\uFF08\u524D\u7F00\u547D\u4E2D ${Number(usage.cached) || 0}\uFF09 \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`
-        : "";
-      meta.textContent = `\u94FE\u8DEF ${result.pipeline} \xB7 \u6A21\u578B ${result.model} \xB7 \u8017\u65F6 ${(result.elapsedMs / 1e3).toFixed(1)}s${usageText}`;
+      if (usage && (usage.prompt || usage.completion)) {
+        const usageLine = document.createElement("div");
+        usageLine.className = "zp-metaline";
+        usageLine.textContent = `\u8F93\u5165 ${usage.prompt}\uFF08\u524D\u7F00\u547D\u4E2D ${Number(usage.cached) || 0}\uFF09 \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`;
+        meta.appendChild(usageLine);
+      }
       container.appendChild(meta);
+
       if (this.cacheMiss) {
         const hint = document.createElement("button");
         hint.type = "button";
-        hint.className = "zygr-cache-hint";
+        hint.className = "zp-notice";
         hint.dataset.act = "cache-help";
-        hint.textContent = `\u524D\u7F00\u7F13\u5B58\u5DF2\u8FDE\u7EED ${this.cacheMiss.streak} \u6B21\u672A\u547D\u4E2D\uFF0C\u70B9\u51FB\u67E5\u770B\u539F\u56E0`;
+        hint.innerHTML = `<span></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>`;
+        const hintText = hint.querySelector("span");
+        if (hintText) hintText.textContent = `\u524D\u7F00\u7F13\u5B58\u5DF2\u8FDE\u7EED ${this.cacheMiss.streak} \u6B21\u672A\u547D\u4E2D\uFF0C\u70B9\u51FB\u67E5\u770B\u539F\u56E0`;
         container.appendChild(hint);
       }
-      this.setCache(result.cacheHit ? "\u7F13\u5B58\u547D\u4E2D" : "\u65B0\u7ED3\u679C", result.cacheHit ? "ok" : result.needsReview ? "warn" : "idle");
+      this.setCache(result.cacheHit ? "\u7F13\u5B58\u547D\u4E2D" : "\u65B0\u7ED3\u679C", result.cacheHit ? "ok" : "new");
       this.setStage("\u5B8C\u6210");
     }
     // 未命中解释：只用本地累计的计数与估算值，不重新发请求。
@@ -4047,15 +4486,15 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       container.replaceChildren();
       this.cacheMiss = null;
       this.hideCacheHelp();
-      const note = document.createElement("div");
-      note.className = "zygr-reason";
-      note.textContent = "\u6279\u6539\u7ED3\u679C\u5C06\u663E\u793A\u5728\u8FD9\u91CC";
-      container.appendChild(note);
+      const empty = document.createElement("div");
+      empty.className = "zp-empty";
+      empty.innerHTML = `<span class="zp-empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.7 4.4L18 9l-4.3 1.6L12 15l-1.7-4.4L6 9l4.3-1.6z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg></span><strong>\u6279\u6539\u7ED3\u679C\u5C06\u663E\u793A\u5728\u8FD9\u91CC</strong><p>\u8BFB\u53D6\u4F5C\u7B54\u56FE\u540E\uFF0C\u6309\u5F53\u524D\u9898\u76EE\u7684\u53C2\u8003\u7B54\u6848\u4E0E\u8BC4\u5206\u6807\u51C6\u76F4\u63A5\u8BC4\u5206\u3002</p>`;
+      container.appendChild(empty);
       this.setStage("\u5C31\u7EEA");
     }
     getScoreEdits() {
-      const total = this.shadow.querySelector(".zygr-score-input[data-score-index=''], .zygr-score-editable .zygr-score-input");
-      const subInputs = [...this.shadow.querySelectorAll(".zygr-subscore-input")];
+      const total = this.shadow.querySelector(".zp-total");
+      const subInputs = [...this.shadow.querySelectorAll(".zp-subinput")];
       const subScores = subInputs.map((input) => Number(input.value));
       return {
         total: total && total.value.trim() !== "" ? Number(total.value) : null,
@@ -4072,7 +4511,6 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       }, 2400);
     }
   };
-
   // src/ui/history.ts
   // 能否在阅卷页定位：必须有学号（旧记录没存学号就没法在记录列表里对上号）。
   function canJumpRecord(entry) {
@@ -4084,6 +4522,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     const confirmed = entry.confirmedScore === void 0 || entry.confirmedScore === null ? "" : `\uFF08\u786E\u8BA4 ${entry.confirmedScore} \u5206\uFF09`;
     const note = entry.reviewNote ? ` \xB7 ${entry.reviewNote}` : "";
     return entry.reviewedAt ? `\u5DF2\u590D\u6838${confirmed}${note}` : "\u672A\u590D\u6838";
+  }
+  // 列表列宽有限，日期压到「月-日 时:分」；详情里仍保留完整语义。
+  function compactTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "\u2014";
+    const pad = (number) => String(number).padStart(2, "0");
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
   // 历史里可能有坏记录（早期版本写进过 result: null）：补齐成一个可渲染的占位，
   // 否则 render 里读 entry.result.score 会直接抛错，整个面板打不开。
@@ -4115,6 +4560,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.callbacks = callbacks;
       this.entries = [];
       this.selectedId = "";
+      this.reviewFilter = "all";
       this.host = document.createElement("div");
       this.host.className = "zygr-host";
       this.shadow = this.host.attachShadow({ mode: "open" });
@@ -4123,27 +4569,46 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.bind();
     }
     markup() {
-      return `<div class="zygr-overlay" hidden><div class="zygr-dialog zygr-wide">
-      <div class="zygr-dialog-head"><h2>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u5386\u53F2\u8BB0\u5F55</h2><button class="zygr-icon" data-act="close" aria-label="\u5173\u95ED">\xD7</button></div>
-      <div class="zygr-dialog-body">
-        <div class="zygr-row">
-          <select data-filter="review" aria-label="\u590D\u6838\u7B5B\u9009"><option value="">\u5168\u90E8\u72B6\u6001</option><option value="review">\u9700\u590D\u6838</option><option value="normal">\u6B63\u5E38</option></select>
-          <input data-filter="keyword" type="search" placeholder="\u641C\u7D22\u9898\u53F7\u6216\u4F9D\u636E" aria-label="\u641C\u7D22">
+      return `<div class="zygr-overlay" hidden>
+      <div class="zygr-dialog" role="dialog" aria-modal="true" aria-labelledby="zygr-history-title">
+        <header class="zg-head">
+          <div>
+            <h2 id="zygr-history-title">\u5386\u53F2\u8BB0\u5F55</h2>
+            <p id="zygr-history-sub">\u5171 0 \u6761</p>
+          </div>
+          <button class="zp-iconbtn" data-act="close" aria-label="\u5173\u95ED">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </header>
+        <div class="zh-toolbar">
+          <div class="zg-seg" data-seg="history" role="group" aria-label="\u590D\u6838\u7B5B\u9009">
+            <button data-review="all" aria-pressed="true">\u5168\u90E8</button>
+            <button data-review="review" aria-pressed="false">\u9700\u590D\u6838</button>
+            <button data-review="normal" aria-pressed="false">\u6B63\u5E38</button>
+          </div>
+          <div class="zh-search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+            <input data-filter="keyword" type="search" placeholder="\u641C\u7D22\u9898\u53F7\u6216\u8BC4\u5206\u4F9D\u636E" aria-label="\u641C\u7D22\u5386\u53F2">
+          </div>
         </div>
-        <div class="zygr-summary" data-summary></div>
-        <div class="zygr-history-grid">
-          <div class="zygr-history-list"><div class="zygr-list" data-list></div></div>
-          <div class="zygr-card zygr-history-detail" data-detail><div class="zygr-empty">\u9009\u62E9\u4E00\u6761\u8BB0\u5F55\u67E5\u770B\u8BE6\u60C5</div></div>
+        <div class="zh-summary" data-summary></div>
+        <div class="zh-body">
+          <div class="zh-list" data-list></div>
+          <div class="zh-detail" data-detail><div class="zh-empty">\u9009\u62E9\u4E00\u6761\u8BB0\u5F55\u67E5\u770B\u8BE6\u60C5</div></div>
         </div>
+        <footer class="zg-foot">
+          <div class="zg-foot-left">
+            <button class="zg-btn small danger" data-act="clear">\u6E05\u7A7A\u5386\u53F2</button>
+          </div>
+          <div class="zg-foot-right">
+            <button class="zg-btn small" data-act="csv">\u5BFC\u51FA CSV</button>
+            <button class="zg-btn small" data-act="html">\u5BFC\u51FA HTML</button>
+            <button class="zg-btn small primary" data-act="next-review">\u4E0B\u4E00\u6761\u9700\u590D\u6838</button>
+            <button class="zg-btn small ghost" data-act="close">\u5173\u95ED</button>
+          </div>
+        </footer>
       </div>
-      <div class="zygr-dialog-foot">
-        <button class="zygr-btn zygr-ghost" data-act="clear">\u6E05\u7A7A\u5386\u53F2</button>
-        <button class="zygr-btn" data-act="csv">\u5BFC\u51FA CSV</button>
-        <button class="zygr-btn" data-act="html">\u5BFC\u51FA HTML</button>
-        <button class="zygr-btn zygr-primary" data-act="next-review">\u4E0B\u4E00\u6761\u9700\u590D\u6838</button>
-        <button class="zygr-btn zygr-ghost" data-act="close">\u5173\u95ED</button>
-      </div>
-    </div></div>`;
+    </div>`;
     }
     q(selector) {
       const element = this.shadow.querySelector(selector);
@@ -4153,6 +4618,15 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     bind() {
       this.shadow.addEventListener("click", (event) => {
         const target = event.target;
+        const reviewButton = target.closest("[data-review]");
+        if (reviewButton) {
+          this.reviewFilter = reviewButton.dataset.review || "all";
+          this.shadow.querySelectorAll("[data-review]").forEach((item) => {
+            item.setAttribute("aria-pressed", String(item === reviewButton));
+          });
+          this.render();
+          return;
+        }
         const action = target.closest("[data-act]")?.dataset.act;
         if (action === "close") this.hide();
         else if (action === "clear") this.callbacks.onClear();
@@ -4172,18 +4646,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         if (item?.dataset.id) {
           this.selectedId = item.dataset.id;
           this.render();
-          this.q("[data-detail]").scrollTop = 0;
         }
       });
       this.shadow.addEventListener("input", () => this.render());
       this.shadow.addEventListener("change", () => this.render());
     }
     filtered() {
-      const review = this.q("[data-filter='review']").value;
       const keyword = this.q("[data-filter='keyword']").value.trim().toLowerCase();
       return this.entries.filter((entry) => {
-        if (review === "review" && !entry.result.needsReview) return false;
-        if (review === "normal" && entry.result.needsReview) return false;
+        if (this.reviewFilter === "review" && !entry.result.needsReview) return false;
+        if (this.reviewFilter === "normal" && entry.result.needsReview) return false;
         if (keyword && !`${entry.question.questionId} ${entry.result.reason}`.toLowerCase().includes(keyword)) return false;
         return true;
       });
@@ -4192,27 +4664,54 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       const list = this.q("[data-list]");
       list.replaceChildren();
       const entries = this.filtered();
+      const reviewCount = this.entries.filter((entry) => entry.result.needsReview).length;
+      this.q("#zygr-history-sub").textContent = `\u5171 ${this.entries.length} \u6761 \xB7 ${reviewCount} \u6761\u9700\u590D\u6838`;
       // 汇总只统计当前筛选结果，方便核对某个范围内的输入/输出与命中情况。
       this.q("[data-summary]").textContent = summaryText(entries);
+      if (!entries.some((entry) => entry.id === this.selectedId)) {
+        this.selectedId = entries.length ? entries[0].id : "";
+      }
       if (entries.length === 0) {
         const empty = document.createElement("div");
-        empty.className = "zygr-empty";
+        empty.className = "zh-empty";
         empty.textContent = "\u6682\u65E0\u7B26\u5408\u6761\u4EF6\u7684\u8BB0\u5F55";
         list.appendChild(empty);
       }
       for (const entry of entries) {
         const item = document.createElement("div");
-        item.className = "zygr-item";
-        if (entry.id === this.selectedId) item.classList.add("zygr-selected");
+        item.className = "zh-row";
+        if (entry.result.needsReview) item.classList.add("needs");
+        if (entry.id === this.selectedId) item.classList.add("is-selected");
         item.dataset.id = entry.id;
-        const text = document.createElement("div");
-        text.className = "zygr-item-main";
-        text.textContent = `${new Date(entry.createdAt).toLocaleString("zh-CN")} \xB7 \u9898\u53F7 ${entry.question.questionId} \xB7 ${entry.result.score}/${entry.result.maxScore} \xB7 ${entry.result.pipeline}${entry.result.needsReview ? " \xB7 \u9700\u590D\u6838" : ""}`;
-        item.appendChild(text);
+
+        const select = document.createElement("button");
+        select.type = "button";
+        select.className = "zh-select";
+        select.setAttribute("aria-pressed", String(entry.id === this.selectedId));
+        select.setAttribute("aria-label", `\u9898\u53F7 ${entry.question.questionId}\uFF0C${entry.result.score} \u5206\uFF0C${entry.result.needsReview ? "\u9700\u590D\u6838" : "\u5DF2\u6B63\u5E38"}`);
+
+        const score = document.createElement("span");
+        score.className = "zh-score";
+        score.textContent = String(entry.result.score);
+
+        const main = document.createElement("span");
+        main.className = "zh-main";
+        const line1 = document.createElement("span");
+        line1.className = "zh-l1";
+        line1.textContent = `\u9898\u53F7 ${entry.question.questionId}`;
+        const line2 = document.createElement("span");
+        line2.className = "zh-l2";
+        const reviewed = entry.reviewedAt ? " \xB7 \u5DF2\u590D\u6838" : "";
+        line2.textContent = `${compactTime(entry.createdAt)} \xB7 ${entry.result.score}/${entry.result.maxScore}${entry.result.needsReview ? " \xB7 \u9700\u590D\u6838" : ""}${reviewed}`;
+        main.append(line1, line2);
+        select.append(score, main);
+        item.appendChild(select);
+
         // 单条记录上就能直接跳回阅卷页，不必先展开详情。
         if (canJumpRecord(entry)) {
           const jump = document.createElement("button");
-          jump.className = "zygr-jump";
+          jump.type = "button";
+          jump.className = "zh-jump";
           jump.dataset.act = "jump";
           jump.textContent = "\u5B9A\u4F4D";
           jump.title = "\u5728\u9605\u5377\u9875\u56DE\u8BC4\u8FD9\u4E00\u4EFD\u5377\u5B50";
@@ -4228,58 +4727,69 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       const entry = this.entries.find((item) => item.id === this.selectedId);
       if (!entry) {
         const empty = document.createElement("div");
-        empty.className = "zygr-empty";
+        empty.className = "zh-empty";
         empty.textContent = "\u9009\u62E9\u4E00\u6761\u8BB0\u5F55\u67E5\u770B\u8BE6\u60C5";
         container.appendChild(empty);
         return;
       }
-      const detail = document.createElement("div");
-      detail.className = "zygr-detail";
       const usage = entryUsage(entry);
-      const lines = [
-        `\u9898\u53F7\uFF1A${entry.question.questionId}`,
-        `\u94FE\u8DEF / \u6A21\u578B\uFF1A${entry.result.pipeline} / ${entry.result.model}`,
-        `\u7ED3\u679C\uFF1A${entry.result.score} / ${entry.result.maxScore}\uFF08${entry.result.status}\uFF09`,
-        `\u7528\u91CF\uFF1A\u8F93\u5165 ${usage.prompt}\uFF08\u524D\u7F00\u547D\u4E2D ${usage.cached}\uFF09 \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`,
-        `\u7F13\u5B58 / \u8017\u65F6\uFF1A${entryHitText(entry)} / ${entryElapsed(entry)}s`,
-        `\u4F9D\u636E\uFF1A${entry.result.reason || "\u65E0"}`,
-        `\u590D\u6838\uFF1A${entry.result.reviewReasons.join("\uFF1B") || "\u65E0"}`,
-        `\u5C0F\u9898\uFF1A${entry.result.subScores.map((item) => `${item.label} ${item.score}/${item.maxScore}`).join("\uFF1B") || "\u65E0"}`,
-        `\u5B9A\u4F4D\uFF1A${entry.question.identity?.userCode ? `\u5B66\u53F7 ${entry.question.identity.userCode} \xB7 \u8BD5\u5377 ${entry.question.identity.markingPaperId ? "\u5DF2\u8BB0\u5F55" : "\u672A\u8BB0\u5F55"}` : "\u4E0D\u652F\u6301\uFF08\u65E7\u8BB0\u5F55\u6CA1\u5B58\u5B66\u53F7\uFF09"}`,
-        `\u590D\u6838\u7ED3\u679C\uFF1A${reviewText(entry)}`
-      ];
-      detail.textContent = lines.join("\n");
-      container.appendChild(detail);
+      const identity = entry.question.identity || {};
+      const hitText = `${entryHitText(entry)} / ${entryElapsed(entry)}s`;
+      const usageText = `\u8F93\u5165 ${usage.prompt}\uFF08\u524D\u7F00\u547D\u4E2D ${usage.cached}\uFF09 \xB7 \u8F93\u51FA ${usage.completion}${usage.reasoning ? `\uFF08\u542B\u601D\u8003 ${usage.reasoning}\uFF09` : ""}`;
+      const locationText = identity.userCode
+        ? `\u5B66\u53F7 ${escapeHtml(identity.userCode)} \xB7 \u8BD5\u5377 ${identity.markingPaperId ? "\u5DF2\u8BB0\u5F55" : "\u672A\u8BB0\u5F55"}`
+        : "\u4E0D\u652F\u6301\uFF08\u65E7\u8BB0\u5F55\u6CA1\u5B58\u5B66\u53F7\uFF09";
+      const subRows = (entry.result.subScores || []).map((item) => `
+        <div class="zp-subrow">
+          <div class="zp-submain"><span class="zp-sublabel">${escapeHtml(item.label)}</span><span class="zp-subreason">${escapeHtml(item.reason || "\u2014")}</span></div>
+          <span class="zp-subscore"><span class="zp-pill">${escapeHtml(item.score)} / ${escapeHtml(item.maxScore)}</span></span>
+        </div>`).join("");
+      container.innerHTML = `
+        <div class="zh-detailhead">
+          <div>
+            <span class="zp-kicker">\u9898\u53F7 ${escapeHtml(entry.question.questionId)}</span>
+            <div class="zh-bigscore">${escapeHtml(entry.result.score)}<span>/ ${escapeHtml(entry.result.maxScore)} \u5206</span></div>
+          </div>
+          ${entry.result.needsReview ? '<span class="zp-pill warn">\u9700\u590D\u6838</span>' : '<span class="zp-pill ok">\u6B63\u5E38</span>'}
+        </div>
+        <p class="zp-reason">${escapeHtml(entry.result.reason || "\u65E0")}</p>
+        <dl class="zh-stats">
+          <div class="zh-statrow"><dt>\u6A21\u578B</dt><dd>${escapeHtml(entry.result.model)}</dd></div>
+          <div class="zh-statrow"><dt>\u7F13\u5B58 / \u8017\u65F6</dt><dd>${escapeHtml(hitText)}</dd></div>
+          <div class="zh-statrow"><dt>\u7528\u91CF</dt><dd>${usageText}</dd></div>
+          <div class="zh-statrow"><dt>\u5B9A\u4F4D</dt><dd>${locationText}</dd></div>
+          <div class="zh-statrow"><dt>\u590D\u6838</dt><dd>${escapeHtml(reviewText(entry))}</dd></div>
+        </dl>
+        <h4 class="zh-h4">\u5C0F\u9898</h4>
+        <div class="zp-sublist" style="margin-top:2px">${subRows || '<div class="zp-reason">\u65E0</div>'}</div>
+        <div class="zh-actions">
+          <button class="zg-btn small primary" data-act="detail-jump" ${canJumpRecord(entry) ? "" : "disabled"} title="${canJumpRecord(entry) ? "\u5728\u9605\u5377\u9875\u56DE\u8BC4\u8FD9\u4E00\u4EFD\u5377\u5B50" : "\u8BE5\u8BB0\u5F55\u6CA1\u6709\u5B66\u53F7\uFF0C\u65E0\u6CD5\u5B9A\u4F4D"}">\u5B9A\u4F4D\u5230\u8BE5\u5377</button>
+          <button class="zg-btn small" data-act="detail-review">${entry.reviewedAt ? "\u4FEE\u6539\u590D\u6838\u5907\u6CE8" : "\u6807\u8BB0\u5DF2\u590D\u6838"}</button>
+          <button class="zg-btn small ghost" data-act="detail-score">\u8BB0\u5F55\u786E\u8BA4\u5206</button>
+        </div>`;
+
+      const jumpButton = container.querySelector('[data-act="detail-jump"]');
+      if (jumpButton) jumpButton.addEventListener("click", () => this.callbacks.onJump?.(entry));
       // 复核留痕：备注与确认分都写回历史，导出时一并带出。
-      const actions = document.createElement("div");
-      actions.className = "zygr-row";
-      const reviewButton = document.createElement("button");
-      reviewButton.className = "zygr-btn zygr-ghost";
-      reviewButton.textContent = entry.reviewedAt ? "\u4FEE\u6539\u590D\u6838\u5907\u6CE8" : "\u6807\u8BB0\u5DF2\u590D\u6838";
-      reviewButton.addEventListener("click", () => {
-        const note = window.prompt("\u590D\u6838\u5907\u6CE8\uFF08\u53EF\u7559\u7A7A\uFF09", entry.reviewNote || "");
-        if (note === null) return;
-        this.callbacks.onReview?.(entry.id, { reviewedAt: Date.now(), reviewNote: note.trim() });
-      });
-      const scoreButton = document.createElement("button");
-      scoreButton.className = "zygr-btn zygr-ghost";
-      scoreButton.textContent = "\u8BB0\u5F55\u786E\u8BA4\u5206";
-      scoreButton.addEventListener("click", () => {
-        const raw = window.prompt("\u786E\u8BA4\u5206\u6570", String(entry.confirmedScore ?? entry.result.score));
-        if (raw === null) return;
-        const value = Number(raw);
-        if (!Number.isFinite(value)) return;
-        const max = Number(entry.result.maxScore) || 999;
-        this.callbacks.onReview?.(entry.id, { confirmedScore: Math.min(Math.max(value, 0), max) });
-      });
-      const jumpButton = document.createElement("button");
-      jumpButton.className = "zygr-btn zygr-primary";
-      jumpButton.textContent = "\u5B9A\u4F4D\u5230\u8BE5\u5377";
-      jumpButton.disabled = !canJumpRecord(entry);
-      jumpButton.title = canJumpRecord(entry) ? "\u5728\u9605\u5377\u9875\u56DE\u8BC4\u8FD9\u4E00\u4EFD\u5377\u5B50" : "\u8BE5\u8BB0\u5F55\u6CA1\u6709\u5B66\u53F7\uFF0C\u65E0\u6CD5\u5B9A\u4F4D";
-      jumpButton.addEventListener("click", () => this.callbacks.onJump?.(entry));
-      actions.append(jumpButton, reviewButton, scoreButton);
-      container.appendChild(actions);
+      const reviewButton = container.querySelector('[data-act="detail-review"]');
+      if (reviewButton) {
+        reviewButton.addEventListener("click", () => {
+          const note = window.prompt("\u590D\u6838\u5907\u6CE8\uFF08\u53EF\u7559\u7A7A\uFF09", entry.reviewNote || "");
+          if (note === null) return;
+          this.callbacks.onReview?.(entry.id, { reviewedAt: Date.now(), reviewNote: note.trim() });
+        });
+      }
+      const scoreButton = container.querySelector('[data-act="detail-score"]');
+      if (scoreButton) {
+        scoreButton.addEventListener("click", () => {
+          const raw = window.prompt("\u786E\u8BA4\u5206\u6570", String(entry.confirmedScore ?? entry.result.score));
+          if (raw === null) return;
+          const value = Number(raw);
+          if (!Number.isFinite(value)) return;
+          const max = Number(entry.result.maxScore) || 999;
+          this.callbacks.onReview?.(entry.id, { confirmedScore: Math.min(Math.max(value, 0), max) });
+        });
+      }
     }
     // 复核队列：把「需复核且还没标记」的记录按当前筛选排成一条队，一条条定位过去。
     nextReviewEntry() {
@@ -4316,7 +4826,6 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       if (!this.q(".zygr-overlay").hidden) this.render();
     }
   };
-
   // src/ui/settings.ts
   function getPath(source, path) {
     return path.split(".").reduce((value, key) => {
@@ -4351,118 +4860,327 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.bind();
     }
     markup() {
-      const field = (label, path, type = "text") => `
-      <div class="zygr-field"><label>${label}</label><input data-field="${path}" type="${type}"></div>`;
-      const area = (label, path, hint = "") => `
-      <div class="zygr-field"><label>${label}</label><textarea data-field="${path}" rows="6"></textarea>${hint ? `<span class="zygr-hint">${hint}</span>` : ""}</div>`;
-      const select = (label, path, options) => `
-      <div class="zygr-field"><label>${label}</label><select data-field="${path}">
-        ${options.map(([value, text]) => `<option value="${value}">${text}</option>`).join("")}
-      </select></div>`;
-      const platformSelect = (label, path) => `
-      <div class="zygr-field"><label>${label}</label><select data-field="${path}" data-platform-select></select></div>`;
-      return `<div class="zygr-overlay" hidden><div class="zygr-dialog zygr-wide">
-      <div class="zygr-dialog-head"><h2>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u8BBE\u7F6E</h2><button class="zygr-icon" data-act="close" aria-label="\u5173\u95ED">\xD7</button></div>
-      <div class="zygr-dialog-body">
-        <div class="zygr-tabs">
-          <button class="zygr-tab zygr-active" data-tab="context">\u6279\u6539\u4E0A\u4E0B\u6587</button>
-          <button class="zygr-tab" data-tab="api">\u63A5\u53E3\u4E0E\u94FE\u8DEF</button>
-          <button class="zygr-tab" data-tab="generator">\u8BC4\u5206\u6807\u51C6\u751F\u6210</button>
-          <button class="zygr-tab" data-tab="advanced">\u9AD8\u7EA7</button>
+      const fieldRow = (label, path, type = "text", extra = "") => `
+        <div class="zg-row">
+          <div class="zg-rowmain"><span class="zg-rowlabel">${label}</span></div>
+          <input class="zg-input zg-num" data-field="${path}" type="${type}" aria-label="${label}" ${extra}>
+        </div>`;
+      const area = (label, path, rows, placeholder, badge = "") => `
+        <div class="zg-field">
+          <label>${label}${badge}</label>
+          <textarea data-field="${path}" rows="${rows}" placeholder="${placeholder}"></textarea>
+        </div>`;
+      return `<div class="zygr-overlay" hidden>
+      <div class="zygr-dialog" role="dialog" aria-modal="true" aria-labelledby="zygr-settings-title">
+        <header class="zg-head">
+          <div>
+            <h2 id="zygr-settings-title">\u8BBE\u7F6E</h2>
+            <p>\u667A\u9605\u6279\u6539\u52A9\u624B \xB7 \u914D\u7F6E\u53EA\u4FDD\u5B58\u5728\u672C\u673A</p>
+          </div>
+          <button class="zp-iconbtn" data-act="close" aria-label="\u5173\u95ED">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </header>
+
+        <div class="zg-shell">
+          <nav class="zg-nav" aria-label="\u8BBE\u7F6E\u5206\u533A" role="tablist">
+            <button class="zg-navitem is-active" data-tab="context" role="tab" aria-selected="true">
+              <span class="zg-tile blue" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h9a3 3 0 013 3v13H8a3 3 0 01-3-3z"/><path d="M8 4v13a3 3 0 00-3 3"/></svg></span>
+              \u6279\u6539\u4E0A\u4E0B\u6587
+            </button>
+            <button class="zg-navitem" data-tab="api" role="tab" aria-selected="false">
+              <span class="zg-tile purple" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3v4M15 3v4M7 7h10v3a5 5 0 01-10 0zM12 15v6"/></svg></span>
+              \u63A5\u53E3\u4E0E\u94FE\u8DEF
+            </button>
+            <button class="zg-navitem" data-tab="generator" role="tab" aria-selected="false">
+              <span class="zg-tile pink" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.7 4.4L18 9l-4.3 1.6L12 15l-1.7-4.4L6 9l4.3-1.6z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8z"/></svg></span>
+              \u8BC4\u5206\u6807\u51C6\u751F\u6210
+            </button>
+            <button class="zg-navitem" data-tab="advanced" role="tab" aria-selected="false">
+              <span class="zg-tile gray" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h14M5 12h14M5 18h14"/><circle cx="9" cy="6" r="2" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="2" fill="currentColor" stroke="none"/><circle cx="8" cy="18" r="2" fill="currentColor" stroke="none"/></svg></span>
+              \u9AD8\u7EA7
+            </button>
+            <div class="zg-navfoot">\u6240\u6709\u914D\u7F6E\u4E0E\u8BB0\u5F55\u53EA\u5B58\u5728\u6D4F\u89C8\u5668\u672C\u5730\uFF0C\u4E0D\u4E0A\u4F20\u670D\u52A1\u5668\u3002\u6E05\u7A7A\u6570\u636E\u540E\u9700\u91CD\u65B0\u586B\u5199\u3002</div>
+          </nav>
+
+          <div class="zg-pane">
+            <div class="zg-page is-active" data-page="context">
+              <div class="zg-pagehead">
+                <h2>\u6279\u6539\u4E0A\u4E0B\u6587</h2>
+                <p>\u9898\u53F7\u3001\u6EE1\u5206\u4E0E\u5C0F\u9898\u7531\u9605\u5377\u9875\u8BFB\u53D6\uFF1B\u8FD9\u91CC\u7684\u53C2\u8003\u7B54\u6848\u4E0E\u8BC4\u5206\u6807\u51C6\u4F1A\u968F\u6BCF\u6B21\u6279\u6539\u53D1\u9001\u7ED9\u6A21\u578B\u3002</p>
+              </div>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u9898\u76EE\u4E0E\u9605\u5377\u4F9D\u636E</h3>
+                <div class="zg-group">
+                  ${area("\u9898\u76EE\u5185\u5BB9", "context.question", 3, "\u7559\u7A7A\u65F6\u4F7F\u7528\u9875\u9762\u9898\u53F7\uFF0C\u586B\u5199\u540E\u80FD\u63D0\u9AD8\u5224\u65AD\u7CBE\u5EA6", '<span class="zg-opt">\u53EF\u9009</span>')}
+                  ${area("\u53C2\u8003\u7B54\u6848", "context.answer", 5, "", '<span class="zg-req">\u5FC5\u586B</span>')}
+                  ${area("\u8BC4\u5206\u6807\u51C6", "context.rubric", 6, "", '<span class="zg-req">\u5FC5\u586B</span>')}
+                </div>
+                <p class="zg-note">\u6EE1\u5206\u4E0D\u5FC5\u624B\u5DE5\u7EF4\u62A4\uFF1A\u6279\u6539\u524D\u4F1A\u8BFB\u9875\u9762\uFF0C\u4E0D\u4E00\u81F4\u65F6\u81EA\u52A8\u5199\u56DE\u5E76\u63D0\u793A\u4E00\u884C\uFF0C\u4E0D\u518D\u963B\u65AD\u6279\u6539\u3002</p>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u57FA\u672C\u53C2\u6570</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u672C\u65B9\u6848\u6EE1\u5206</span><span class="zg-rowdesc">\u4E0E\u9875\u9762\u4E0D\u4E00\u81F4\u65F6\u81EA\u52A8\u540C\u6B65</span></div>
+                    <input class="zg-input zg-num" data-field="context.maxScore" type="number" aria-label="\u672C\u65B9\u6848\u6EE1\u5206">
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u5B66\u79D1</span><span class="zg-rowdesc">\u7528\u4E8E\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\u4E0E\u5224\u5206\u53E3\u5F84</span></div>
+                    <span class="zg-select">
+                      <select data-field="context.subject" aria-label="\u5B66\u79D1">
+                        <option value="">\u4E0D\u6307\u5B9A\uFF08\u6309\u624B\u52A8\u53C2\u6570\uFF09</option>
+                        ${Object.keys(RUBRIC_SUBJECTS).map((name) => `<option value="${name}">${name}</option>`).join("")}
+                      </select>
+                    </span>
+                  </div>
+                </div>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u6807\u51C6\u5E93</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u672C\u9898\u6807\u51C6</span><span class="zg-rowdesc">\u6309\u300C\u8BD5\u5377 + \u9898\u53F7\u300D\u5206\u69FD\u4FDD\u5B58</span></div>
+                    <div class="zg-rowactions">
+                      <button class="zg-btn small" data-act="rubric-save">\u4FDD\u5B58</button>
+                      <button class="zg-btn small ghost" data-act="rubric-load">\u8F7D\u5165</button>
+                      <button class="zg-btn small ghost" data-act="rubric-clear">\u6E05\u7A7A</button>
+                    </div>
+                  </div>
+                </div>
+                <p class="zg-note">\u5207\u5230\u5176\u5B83\u9898\u53F7\u65F6\u4F1A\u81EA\u52A8\u5B58\u4E0B\u5F53\u524D\u8FD9\u4EFD\u3001\u5E76\u8F7D\u5165\u90A3\u9053\u9898\u5DF2\u5B58\u7684\u6807\u51C6\uFF1B\u6CA1\u5B58\u8FC7\u5219\u6E05\u7A7A\u7B54\u6848\u4E0E\u6807\u51C6\uFF0C\u907F\u514D\u62FF\u9519\u7B54\u6848\u3002</p>
+              </section>
+            </div>
+
+            <div class="zg-page" data-page="api" hidden>
+              <div class="zg-pagehead">
+                <h2>\u63A5\u53E3\u4E0E\u94FE\u8DEF</h2>
+                <p>\u8BC4\u5206\u53EA\u8D70\u591A\u6A21\u6001\u76F4\u8BC4\uFF1A\u628A\u4F5C\u7B54\u56FE\u76F4\u63A5\u4EA4\u7ED9\u89C6\u89C9\u6A21\u578B\uFF0C\u4E0D\u505A OCR \u4E2D\u8F6C\u3002</p>
+              </div>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u5E73\u53F0\u9884\u8BBE</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u5E73\u53F0</span><span class="zg-rowdesc">\u5207\u6362\u4F1A\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u4F4F\u7684 Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F</span></div>
+                    <span class="zg-select wide"><select data-field="pipeline.vlm.platform" data-platform-select aria-label="\u5E73\u53F0\u9884\u8BBE"></select></span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u63A5\u53E3\u5730\u5740</span></div>
+                    <input class="zg-input" data-field="pipeline.vlm.endpoint" style="max-width:340px" aria-label="\u63A5\u53E3\u5730\u5740">
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">API Key</span></div>
+                    <span class="zg-inputwrap">
+                      <input class="zg-input" data-field="pipeline.vlm.apiKey" type="password" aria-label="API Key">
+                      <button data-act="toggle-key" aria-label="\u663E\u793A\u6216\u9690\u85CF API Key">\u663E\u793A</button>
+                    </span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u6A21\u578B</span><span class="zg-rowdesc">\u5FC5\u987B\u652F\u6301\u56FE\u7247\u8F93\u5165</span></div>
+                    <input class="zg-input" data-field="pipeline.vlm.model" style="max-width:200px" aria-label="\u6A21\u578B\u540D\u79F0">
+                  </div>
+                  <div class="zg-row" data-model-options hidden>
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u6A21\u578B\u5217\u8868</span><span class="zg-rowdesc">\u9009\u62E9\u4E00\u4E2A\u586B\u5165\u4E0A\u65B9\u6A21\u578B</span></div>
+                    <span class="zg-select"><select data-field-model-picker aria-label="\u9009\u62E9\u6A21\u578B"></select></span>
+                    <button class="zg-btn small" data-act="apply-model">\u4F7F\u7528</button>
+                  </div>
+                </div>
+                <div class="zg-inline" style="margin-top:8px">
+                  <button class="zg-btn small" data-act="fetch-models">\u83B7\u53D6\u6A21\u578B\u5217\u8868</button>
+                  <span class="zg-status" data-status="models"></span>
+                  <button class="zg-btn small" data-test="vlm">\u6D4B\u8BD5\u591A\u6A21\u6001</button>
+                  <span class="zg-status" data-status="vlm"></span>
+                </div>
+                <p class="zg-note">\u5E73\u53F0\u4E0D\u652F\u6301\u5728\u7EBF\u5217\u8868\u65F6\u53EA\u63D0\u793A\u624B\u52A8\u586B\u5199\uFF0C\u4E0D\u4F1A\u62A5\u9519\u4E2D\u65AD\u3002</p>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u601D\u8003\u6A21\u5F0F</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u601D\u8003\u7A0B\u5EA6</span><span class="zg-rowdesc">\u9ED8\u8BA4\u5173\u95ED\uFF0C\u957F\u94FE\u63A8\u7406\u6A21\u578B\u53EF\u80FD\u9700\u6570\u5341\u79D2</span></div>
+                    <div class="zg-seg" data-seg="thinking" role="group" aria-label="\u601D\u8003\u6A21\u5F0F">
+                      <button data-value="off" aria-pressed="true" title="${thinkingLevelLabel("off")}">${thinkingLevelLabel("off")}</button>
+                      <button data-value="auto" aria-pressed="false" title="${thinkingLevelLabel("auto")}">${thinkingLevelLabel("auto").replace(/\uFF08.*$/, "")}</button>
+                    </div>
+                    <select data-field="pipeline.thinkingMode" hidden aria-hidden="true" tabindex="-1">
+                      <option value="off">${thinkingLevelLabel("off")}</option>
+                      <option value="auto">${thinkingLevelLabel("auto")}</option>
+                    </select>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u751F\u6548\u68C0\u6D4B</span><span class="zg-rowdesc">GLM-5.3 \u7B49\u6A21\u578B\u4F1A\u5F3A\u5236\u601D\u8003\uFF0C\u9009\u5173\u95ED\u4E5F\u6309\u6A21\u578B\u9ED8\u8BA4\u8FD0\u884C</span></div>
+                    <button class="zg-btn small" data-act="test-thinking">\u6D4B\u8BD5</button>
+                    <span class="zg-status" data-status="thinking"></span>
+                  </div>
+                </div>
+                <p class="zg-note">\u80FD\u4E0D\u80FD\u5173\u95ED\u53D6\u51B3\u4E8E\u6A21\u578B\u800C\u4E0D\u662F\u5E73\u53F0\uFF1B\u5982\u679C\u8FD4\u56DE\u201C\u4E0D\u652F\u6301\u5173\u95ED\u601D\u8003\u201D\uFF0C\u7A0B\u5E8F\u4F1A\u81EA\u52A8\u8BC6\u522B\u5E76\u8BB0\u4F4F\uFF0C\u4E0B\u6B21\u4E0D\u518D\u91CD\u590D\u8BD5\u9519\u3002</p>
+              </section>
+            </div>
+
+            <div class="zg-page" data-page="generator" hidden>
+              <div class="zg-pagehead">
+                <h2>\u8BC4\u5206\u6807\u51C6\u751F\u6210</h2>
+                <p>\u9009\u5B66\u79D1\u4E0E\u9898\u578B\uFF0C\u586B\u5199\u9898\u76EE\u4E0E\u5B66\u6821\u6807\u51C6\u7B54\u6848\uFF0C\u8BA9\u6A21\u578B\u751F\u6210\u7ED3\u6784\u5316\u8BC4\u5206\u6807\u51C6\u3002\u4F1A\u6D88\u8D39\u4E00\u6B21\u771F\u5B9E\u8BF7\u6C42\u3002</p>
+              </div>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u751F\u6210\u6761\u4EF6</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u5B66\u79D1</span></div>
+                    <span class="zg-select"><select data-gen="subject" aria-label="\u5B66\u79D1">${Object.keys(RUBRIC_SUBJECTS).map((name) => `<option value="${name}">${name}</option>`).join("")}</select></span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u9898\u578B</span></div>
+                    <span class="zg-select"><select data-gen="type" aria-label="\u9898\u578B"></select></span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u6EE1\u5206</span><span class="zg-rowdesc">\u7559\u7A7A\u5219\u7531 AI \u5EFA\u8BAE</span></div>
+                    <input class="zg-input zg-num" type="number" data-gen="maxScore" min="0" step="0.5" aria-label="\u6EE1\u5206">
+                  </div>
+                </div>
+                <p class="zg-note" data-gen="rule-hint"></p>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u9898\u76EE\u4E0E\u6807\u51C6\u7B54\u6848</h3>
+                <div class="zg-group">
+                  <div class="zg-field">
+                    <label>\u9898\u76EE <span class="zg-opt">\u4F5C\u6587\u7C7B\u5FC5\u586B</span></label>
+                    <textarea data-gen="question" rows="3" placeholder="\u53EF\u7C98\u8D34\u9898\u76EE\u6587\u5B57\uFF0C\u6216\u7559\u7A7A\u4EC5\u7528\u56FE\u7247"></textarea>
+                  </div>
+                  <div class="zg-field">
+                    <label>\u5B66\u6821\u6807\u51C6\u7B54\u6848</label>
+                    <textarea data-gen="answer" rows="4" placeholder="\u5316\u5B66\u5F0F\u3001\u516C\u5F0F\u7B26\u53F7\u53EF\u76F4\u63A5\u7C98\u8D34"></textarea>
+                  </div>
+                  <div class="zg-field">
+                    <label>\u6807\u51C6\u7B54\u6848\u56FE\u7247 <span class="zg-opt">\u53EF\u591A\u9009</span></label>
+                    <label class="zg-drop">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M8 8l4-4 4 4M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+                      <span>\u70B9\u51FB\u9009\u62E9\u56FE\u7247</span>
+                      <small>\u652F\u6301\u591A\u5F20\uFF0C\u6309\u987A\u5E8F\u53D1\u9001\u7ED9\u6A21\u578B</small>
+                      <input type="file" data-gen="images" accept="image/*" multiple>
+                    </label>
+                    <p class="zg-note" data-gen-thumbs></p>
+                  </div>
+                </div>
+                <div class="zg-inline" style="margin-top:8px">
+                  <button class="zg-btn primary" data-act="gen-run">\u751F\u6210\u8BC4\u5206\u6807\u51C6</button>
+                  <span class="zg-status" data-status="gen"></span>
+                </div>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u751F\u6210\u7ED3\u679C</h3>
+                <div class="zg-group">
+                  <div class="zg-field">
+                    <label>\u53EF\u76F4\u63A5\u7F16\u8F91\uFF0C\u786E\u8BA4\u65E0\u8BEF\u540E\u4E00\u952E\u586B\u5165</label>
+                    <textarea data-gen="result" rows="10" placeholder="\u751F\u6210\u7684\u6807\u51C6\u4F1A\u51FA\u73B0\u5728\u8FD9\u91CC"></textarea>
+                  </div>
+                </div>
+                <div class="zg-inline" style="margin-top:8px">
+                  <button class="zg-btn" data-act="gen-apply">\u4E00\u952E\u586B\u5165\u6279\u6539\u4E0A\u4E0B\u6587</button>
+                  <button class="zg-btn ghost" data-act="gen-copy">\u590D\u5236</button>
+                  <button class="zg-btn ghost" data-act="gen-clear">\u6E05\u7A7A</button>
+                </div>
+              </section>
+            </div>
+
+            <div class="zg-page" data-page="advanced" hidden>
+              <div class="zg-pagehead">
+                <h2>\u9AD8\u7EA7</h2>
+                <p>\u56FE\u7247\u3001\u7F13\u5B58\u3001\u9650\u6D41\u4E0E\u7528\u91CF\u3002\u6539\u9519\u8FD9\u91CC\u4E0D\u4F1A\u5F04\u574F\u6570\u636E\uFF0C\u4F46\u53EF\u80FD\u8BA9\u6279\u6539\u53D8\u6162\u6216\u53D8\u8D35\u3002</p>
+              </div>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u56FE\u7247\u4E0E\u63D0\u793A\u8BCD</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u56FE\u7247\u7CBE\u5EA6</span><span class="zg-rowdesc">\u624B\u5199\u5185\u5BB9\u5EFA\u8BAE\u9AD8\u7CBE\u5EA6</span></div>
+                    <div class="zg-seg" data-seg="detail" role="group" aria-label="\u56FE\u7247\u7CBE\u5EA6">
+                      <button data-value="high" aria-pressed="true">\u9AD8</button>
+                      <button data-value="auto" aria-pressed="false">\u81EA\u52A8</button>
+                      <button data-value="low" aria-pressed="false">\u4F4E</button>
+                    </div>
+                    <select data-field="image.detail" hidden aria-hidden="true" tabindex="-1">
+                      <option value="high">\u9AD8\u7CBE\u5EA6</option>
+                      <option value="auto">\u81EA\u52A8</option>
+                      <option value="low">\u4F4E\u7CBE\u5EA6</option>
+                    </select>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u56FE\u7247\u957F\u8FB9\u4E0A\u9650</span><span class="zg-rowdesc">\u53EA\u7B49\u6BD4\u7F29\u5C0F\uFF0C\u7EDD\u4E0D\u653E\u5927</span></div>
+                    <input class="zg-input zg-num" data-field="image.maxEdge" type="number" aria-label="\u56FE\u7247\u957F\u8FB9\u4E0A\u9650">
+                    <span class="zg-rowvalue">px</span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">JPEG \u8D28\u91CF</span><span class="zg-rowdesc">\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF0C\u53EA\u5F71\u54CD\u4F53\u79EF</span></div>
+                    <input class="zg-input zg-num" data-field="image.quality" type="number" step="0.01" aria-label="JPEG \u8D28\u91CF">
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u5386\u53F2\u4FDD\u7559\u6761\u6570</span></div>
+                    <input class="zg-input zg-num" data-field="historyLimit" type="number" aria-label="\u5386\u53F2\u4FDD\u7559\u6761\u6570">
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u7F13\u5B58\u6709\u6548\u671F</span><span class="zg-rowdesc">\u8D85\u671F\u540E\u540C\u9898\u540C\u56FE\u9700\u91CD\u65B0\u8BF7\u6C42</span></div>
+                    <input class="zg-input zg-num" data-field="cacheTtlDays" type="number" aria-label="\u7F13\u5B58\u6709\u6548\u671F">
+                    <span class="zg-rowvalue">\u5929</span>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u7F13\u5B58\u6761\u6570\u4E0A\u9650</span><span class="zg-rowdesc">\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000</span></div>
+                    <input class="zg-input zg-num" data-field="cacheMaxEntries" type="number" aria-label="\u7F13\u5B58\u6761\u6570\u4E0A\u9650">
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565</span><span class="zg-rowdesc">\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px</span></div>
+                    <label class="zg-switch">
+                      <input type="checkbox" data-field="image.autoBySubject" aria-label="\u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565">
+                      <span class="zg-switch-track" aria-hidden="true"></span>
+                    </label>
+                  </div>
+                </div>
+                <p class="zg-note">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u8F93\u51FA\u6863\u4F4D\u5DF2\u79FB\u5230\u4E3B\u9762\u677F\u5E95\u90E8\u3002</p>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u7D2F\u8BA1\u7528\u91CF</h3>
+                <div class="zg-group"><p class="zg-statsline" data-stats>\u7D2F\u8BA1\u7528\u91CF\uFF1A\u6682\u65E0</p></div>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u9650\u901F\u4E0E\u8D85\u65F6</h3>
+                <div class="zg-group">
+                  ${fieldRow("\u5E76\u53D1\u4E0A\u9650", "pipeline.maxConcurrent", "number")}
+                  ${fieldRow("RPM \u9884\u7B97", "pipeline.maxRpm", "number")}
+                  ${fieldRow("TPM \u9884\u7B97", "pipeline.maxTpm", "number")}
+                  ${fieldRow("\u8BF7\u6C42\u8D85\u65F6", "pipeline.timeoutMs", "number")}
+                </div>
+                <p class="zg-note">\u6240\u6709\u914D\u7F6E\u4EC5\u4FDD\u5B58\u5728\u5F53\u524D\u6CB9\u7334\u73AF\u5883\u4E2D\uFF0C\u4E0D\u4F1A\u8BFB\u53D6\u65E7\u63D2\u4EF6\u914D\u7F6E\uFF1B\u6E05\u7A7A\u6570\u636E\u540E\u9700\u91CD\u65B0\u586B\u5199\u3002</p>
+              </section>
+              <section class="zg-section">
+                <h3 class="zg-grouptitle">\u6570\u636E</h3>
+                <div class="zg-group">
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u91CD\u7F6E\u4E3A\u9ED8\u8BA4\u914D\u7F6E</span><span class="zg-rowdesc">\u542B\u63A5\u53E3\u5730\u5740\u4E0E\u56FE\u7247\u53C2\u6570\uFF0CAPI Key \u4E5F\u4F1A\u6E05\u7A7A</span></div>
+                    <button class="zg-btn small danger" data-act="reset">\u91CD\u7F6E</button>
+                  </div>
+                  <div class="zg-row">
+                    <div class="zg-rowmain"><span class="zg-rowlabel">\u6E05\u7A7A\u5168\u90E8\u6570\u636E</span><span class="zg-rowdesc">\u5386\u53F2\u3001\u7F13\u5B58\u3001\u6807\u51C6\u5E93\u4E0E\u914D\u7F6E\u4E00\u5E76\u5220\u9664</span></div>
+                    <button class="zg-btn small danger" data-act="clear">\u6E05\u7A7A</button>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </div>
         </div>
 
-        <div class="zygr-section" data-page="context">
-          <h3>\u9898\u76EE\u4E0E\u8BC4\u5377\u4F9D\u636E</h3>
-          <p class="zygr-hint">\u9898\u53F7\u3001\u6EE1\u5206\u4E0E\u5C0F\u9898\u7531\u667A\u5B66\u7F51\u9605\u5377\u9875\u8BFB\u53D6\uFF1B\u8FD9\u91CC\u586B\u5199\u7684\u53C2\u8003\u7B54\u6848\u4E0E\u8BC4\u5206\u6807\u51C6\u4F1A\u968F\u6BCF\u6B21\u6279\u6539\u53D1\u9001\u7ED9\u6A21\u578B\u3002\u9898\u76EE\u5185\u5BB9\u53EF\u7559\u7A7A\uFF0C\u7559\u7A7A\u65F6\u4F7F\u7528\u9875\u9762\u9898\u53F7\u3002</p>
-          ${area("\u9898\u76EE\u5185\u5BB9\uFF08\u53EF\u9009\uFF09", "context.question")}
-          ${area("\u53C2\u8003\u7B54\u6848", "context.answer", "\u5FC5\u586B")}
-          ${area("\u8BC4\u5206\u6807\u51C6", "context.rubric", "\u5FC5\u586B")}
-          <div class="zygr-grid">
-            ${field("\u672C\u65B9\u6848\u6EE1\u5206", "context.maxScore", "number")}
-            ${select("\u5B66\u79D1\uFF08\u7528\u4E8E\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF09", "context.subject", [["", "\u4E0D\u6307\u5B9A\uFF08\u6309\u624B\u52A8\u53C2\u6570\uFF09"], ...Object.keys(RUBRIC_SUBJECTS).map((name) => [name, name])])}
+        <footer class="zg-foot">
+          <div class="zg-foot-left">
+            <button class="zg-btn small ghost" data-act="export">\u5BFC\u51FA\u914D\u7F6E</button>
+            <button class="zg-btn small ghost" data-act="import">\u5BFC\u5165\u914D\u7F6E</button>
           </div>
-          <h3>\u6807\u51C6\u5E93\uFF08\u6309\u9898\u53F7\u5206\u522B\u4FDD\u5B58\uFF09</h3>
-          <div class="zygr-row">
-            <button class="zygr-btn zygr-ghost" data-act="rubric-save">\u4FDD\u5B58\u672C\u9898\u6807\u51C6</button>
-            <button class="zygr-btn zygr-ghost" data-act="rubric-load">\u8F7D\u5165\u672C\u9898\u6807\u51C6</button>
-            <button class="zygr-btn zygr-ghost" data-act="rubric-clear">\u6E05\u7A7A\u672C\u9898\u6807\u51C6</button>
+          <div class="zg-foot-right">
+            <button class="zg-btn" data-act="cancel">\u5173\u95ED</button>
+            <button class="zg-btn primary" data-act="save">\u4FDD\u5B58\u914D\u7F6E</button>
           </div>
-          <p class="zygr-hint">\u5207\u5230\u5176\u5B83\u9898\u53F7\u65F6\u4F1A\u81EA\u52A8\u5B58\u4E0B\u5F53\u524D\u8FD9\u4EFD\u3001\u5E76\u8F7D\u5165\u90A3\u9053\u9898\u5DF2\u5B58\u7684\u6807\u51C6\uFF1B\u4E0A\u9762\u4E09\u4E2A\u6309\u94AE\u7528\u4E8E\u624B\u52A8\u5B58\u53D6\u3002</p>
-        </div>
-
-        <div class="zygr-section" data-page="api" hidden>
-          <h3>\u5E73\u53F0\u9884\u8BBE</h3>
-          <p class="zygr-hint">\u9009\u62E9\u5E73\u53F0\u4F1A\u586B\u5165\u63A5\u53E3\u5730\u5740\uFF0C\u5E76\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F\u3002\u5176\u4ED6\u5E73\u53F0\u8BF7\u9009\u300C\u81EA\u5B9A\u4E49\uFF08\u624B\u52A8\u586B\u5199\uFF09\u300D\u3002</p>
-
-          <h3>\u591A\u6A21\u6001\u76F4\u8BC4</h3>
-          <p class="zygr-hint">\u8BC4\u5206\u53EA\u4F7F\u7528\u591A\u6A21\u6001\u89C6\u89C9\u6A21\u578B\uFF1A\u76F4\u63A5\u8BFB\u53D6\u4F5C\u7B54\u56FE\u7247\u5E76\u6309\u8BC4\u5206\u6807\u51C6\u8F93\u51FA JSON\u3002\u6A21\u578B\u5FC5\u987B\u652F\u6301\u56FE\u7247\u8F93\u516E\u3002</p>
-          ${select("\u601D\u8003\u6A21\u5F0F", "pipeline.thinkingMode", [["off", thinkingLevelLabel("off")], ["auto", thinkingLevelLabel("auto")]])}
-          <div class="zygr-row"><button class="zygr-btn zygr-ghost" data-act="test-thinking">\u6D4B\u8BD5\u5F53\u524D\u601D\u8003\u6A21\u5F0F\u662F\u5426\u751F\u6548</button><span class="zygr-test-status" data-status="thinking"></span></div>
-          <p class="zygr-hint">\u9ED8\u8BA4\u5173\u95ED\u601D\u8003\uFF0C\u754C\u9762\u53EA\u7ED9\u4E24\u6863\uFF1A\u300C\u5173\u95ED\u601D\u8003\u300D\u4E0E\u300C\u6A21\u578B\u9ED8\u8BA4\u300D\uFF08\u4E0D\u4F20\u5F3A\u5EA6\u53C2\u6570\uFF09\u3002\u80FD\u4E0D\u80FD\u5173\u95ED\u53D6\u51B3\u4E8E\u6A21\u578B\u800C\u4E0D\u662F\u5E73\u53F0\uFF1A\u5DF2\u77E5 GLM-5.3\u3001GLM-5.3-FLASH \u5F3A\u5236\u601D\u8003\uFF0C\u9009\u5173\u95ED\u4E5F\u4E0D\u4F1A\u62A5\u9519\uFF0C\u4F1A\u76F4\u63A5\u6309\u6A21\u578B\u9ED8\u8BA4\u8FD0\u884C\uFF1B\u5176\u5B83\u6A21\u578B\u5982\u679C\u8FD4\u56DE\u201C\u4E0D\u652F\u6301\u5173\u95ED\u601D\u8003\u201D\uFF0C\u7A0B\u5E8F\u4F1A\u81EA\u52A8\u8BC6\u522B\u5E76\u8BB0\u4F4F\uFF0C\u4E0B\u6B21\u4E0D\u518D\u91CD\u590D\u8BD5\u9519\u3002</p>
-
-          ${platformSelect("\u5E73\u53F0\u9884\u8BBE", "pipeline.vlm.platform")}
-          <h3>\u591A\u6A21\u6001\u670D\u52A1</h3>
-          <div class="zygr-grid">
-            ${field("\u63A5\u53E3\u5730\u5740", "pipeline.vlm.endpoint")}${field("API Key", "pipeline.vlm.apiKey", "password")}
-            ${field("\u6A21\u578B", "pipeline.vlm.model")}
-          </div>
-          <p class="zygr-hint">\u586B OpenAI \u517C\u5BB9 Chat Completions \u5730\u5740\u4E0E\u89C6\u89C9\u6A21\u578B\u540D\u3002</p>
-          <div class="zygr-row"><button class="zygr-btn" data-act="fetch-models">\u83B7\u53D6\u6A21\u578B\u5217\u8868</button><span class="zygr-test-status" data-status="models"></span></div>
-          <div data-model-options hidden><select data-field-model-picker aria-label="\u9009\u62E9\u6A21\u578B"></select><button class="zygr-btn" data-act="apply-model">\u4F7F\u7528\u6240\u9009\u6A21\u578B</button></div>
-          <div class="zygr-row"><button class="zygr-btn" data-test="vlm">\u6D4B\u8BD5\u591A\u6A21\u6001</button><span class="zygr-test-status" data-status="vlm"></span></div>
-        </div>
-
-        <div class="zygr-section" data-page="generator" hidden>
-          <h3>\u8BC4\u5206\u6807\u51C6\u751F\u6210\u5668</h3>
-          <p class="zygr-hint">\u9009\u5B66\u79D1\u4E0E\u9898\u578B\uFF0C\u586B\u5199\u9898\u76EE\u4E0E\u5B66\u6821\u6807\u51C6\u7B54\u6848\uFF08\u6587\u5B57\u6216\u56FE\u7247\u4EFB\u9009\uFF09\uFF0C\u8BA9 AI \u751F\u6210\u7ED3\u6784\u5316\u8BC4\u5206\u6807\u51C6\u3002\u751F\u6210\u540E\u53EF\u76F4\u63A5\u7F16\u8F91\uFF0C\u786E\u8BA4\u65E0\u8BEF\u540E\u4E00\u952E\u586B\u5165\u300C\u6279\u6539\u4E0A\u4E0B\u6587 \xB7 \u8BC4\u5206\u6807\u51C6\u300D\u3002\u4F7F\u7528\u4E0E\u6279\u6539\u76F8\u540C\u7684\u591A\u6A21\u6001\u670D\u52A1\uFF0C\u4F1A\u6D88\u8D39\u4E00\u6B21\u771F\u5B9E\u8BF7\u6C42\u3002</p>
-          <div class="zygr-grid">
-            <div class="zygr-field"><label>\u5B66\u79D1</label><select data-gen="subject">${Object.keys(RUBRIC_SUBJECTS).map((name) => `<option value="${name}">${name}</option>`).join("")}</select></div>
-            <div class="zygr-field"><label>\u9898\u578B</label><select data-gen="type"></select></div>
-            <p class="zygr-hint" data-gen="rule-hint"></p>
-            <div class="zygr-field"><label>\u6EE1\u5206\uFF08\u53EF\u9009\uFF09</label><input type="number" data-gen="maxScore" min="0" step="0.5" placeholder="\u7559\u7A7A\u5219\u7531 AI \u5EFA\u8BAE"></div>
-          </div>
-          <div class="zygr-field" data-gen-field><label>\u9898\u76EE\uFF08\u4F5C\u6587\u7C7B\u5FC5\u586B\uFF0C\u5176\u4ED6\u53EF\u9009\uFF09</label><textarea data-gen="question" rows="3" placeholder="\u53EF\u7C98\u8D34\u9898\u76EE\u6587\u5B57\uFF0C\u6216\u7559\u7A7A\u4EC5\u7528\u56FE\u7247"></textarea></div>
-          <div class="zygr-field" data-gen-field><label>\u5B66\u6821\u6807\u51C6\u7B54\u6848\uFF08\u6587\u5B57\uFF09</label><textarea data-gen="answer" rows="4" placeholder="\u53EF\u7C98\u8D34\u6807\u51C6\u7B54\u6848\u6587\u5B57\uFF0C\u5316\u5B66\u5F0F\u3001\u516C\u5F0F\u7B26\u53F7\u53EF\u76F4\u63A5\u7C98\u8D34"></textarea></div>
-          <div class="zygr-field" data-gen-field><label>\u6807\u51C6\u7B54\u6848\u56FE\u7247\uFF08\u53EF\u591A\u9009\uFF09</label><input type="file" data-gen="images" accept="image/*" multiple><div data-gen-thumbs class="zygr-row"></div></div>
-          <div class="zygr-row"><button class="zygr-btn zygr-primary" data-act="gen-run">\u751F\u6210\u8BC4\u5206\u6807\u51C6</button><span class="zygr-test-status" data-status="gen"></span></div>
-          <div class="zygr-field" data-gen-field><label>\u751F\u6210\u7ED3\u679C\uFF08\u53EF\u76F4\u63A5\u7F16\u8F91\uFF09</label><textarea data-gen="result" rows="14" placeholder="\u751F\u6210\u540E\u5728\u6B64\u4FEE\u6539\uFF0C\u786E\u8BA4\u65E0\u8BEF\u540E\u70B9\u300C\u4E00\u952E\u586B\u5165\u300D"></textarea></div>
-          <div class="zygr-row"><button class="zygr-btn" data-act="gen-apply">\u4E00\u952E\u586B\u5165\u9898\u76EE\u3001\u53C2\u8003\u7B54\u6848\u3001\u8BC4\u5206\u6807\u51C6</button><button class="zygr-btn zygr-ghost" data-act="gen-copy">\u590D\u5236\u7ED3\u679C</button><button class="zygr-btn zygr-ghost" data-act="gen-clear">\u6E05\u7A7A</button></div>
-        </div>
-
-        <div class="zygr-section" data-page="advanced" hidden>
-          <h3>\u56FE\u7247\u4E0E\u63D0\u793A\u8BCD</h3>
-          <div class="zygr-grid">
-            ${select("\u56FE\u7247\u7CBE\u5EA6", "image.detail", [["high", "\u9AD8\u7CBE\u5EA6\uFF08\u63A8\u8350\uFF0C\u624B\u5199\u5FC5\u9009\uFF09"], ["auto", "\u81EA\u52A8\uFF08\u7531\u5E73\u53F0\u51B3\u5B9A\uFF09"], ["low", "\u4F4E\u7CBE\u5EA6\uFF08\u4EC5\u9009\u62E9/\u586B\u7A7A\u5224\u5BF9\u9519\uFF09"]])}
-            ${field("\u56FE\u7247\u957F\u8FB9\u4E0A\u9650\uFF08px\uFF09", "image.maxEdge", "number")}
-            ${field("JPEG \u8D28\u91CF\uFF080.5-1\uFF09", "image.quality", "number")}
-            ${field("\u5386\u53F2\u4FDD\u7559\u6761\u6570", "historyLimit", "number")}
-            ${field("\u7F13\u5B58\u6709\u6548\u671F\uFF08\u5929\uFF09", "cacheTtlDays", "number")}
-            ${field("\u7F13\u5B58\u6761\u6570\u4E0A\u9650", "cacheMaxEntries", "number")}
-          </div>
-          <label class="zygr-row"><input type="checkbox" data-field="image.autoBySubject"> \u6309\u5B66\u79D1\u81EA\u52A8\u5957\u7528\u56FE\u7247\u7B56\u7565\uFF08\u5DF2\u9009\u5B66\u79D1\u65F6\u751F\u6548\uFF09</label>
-          <p class="zygr-hint">\u56FE\u7247 token \u53EA\u53D7\u5C3A\u5BF8\u4E0E\u7CBE\u5EA6\u5F71\u54CD\uFF0CJPEG \u8D28\u91CF\u4E0D\u5F71\u54CD\u8BA1\u8D39\uFF1B\u4F4E\u7CBE\u5EA6\u4E0E\u4F4E\u5206\u8FA8\u7387\u4F1A\u81EA\u52A8\u6807\u8BB0\u4EBA\u5DE5\u590D\u6838\u3002\u8F93\u51FA\u6863\u4F4D\u5DF2\u79FB\u5230\u4E3B\u9762\u677F\u5E95\u90E8\uFF0C\u76F4\u63A5\u5F71\u54CD\u8F93\u51FA token\uFF1A\u7B80\u7565\u6700\u7701\u3001\u6807\u51C6\u9002\u4E2D\u3001\u8BE6\u7EC6\u6700\u8D35\u3002\u7F13\u5B58\u6761\u6570\u4E0A\u9650\u9ED8\u8BA4 2000\uFF0C\u53CC\u8BC4\u5927\u5377\u53EF\u63D0\u5230 3000\u3002\u5B66\u79D1\u7B56\u7565\uFF08\u6570\u5B66/\u7269\u7406/\u5316\u5B66 1600px\uFF0C\u8BED\u6587/\u82F1\u8BED/\u751F\u7269 1440px\uFF0C\u5386\u53F2/\u653F\u6CBB/\u5730\u7406 1280px\uFF0C\u5747\u4E3A\u9AD8\u7CBE\u5EA6\uFF09\u4F18\u5148\u4E8E\u624B\u52A8\u5C3A\u5BF8\u3002\u56FE\u7247\u53EA\u6309\u957F\u8FB9\u7B49\u6BD4\u7F29\u5C0F\uFF0C\u7EDD\u4E0D\u653E\u5927\uFF1A\u539F\u56FE\u672C\u6765\u5C31\u5C0F\u4E8E\u8BE5\u957F\u8FB9\u65F6\u4FDD\u6301\u539F\u59CB\u50CF\u7D20\uFF0C\u4EA4\u7ED9\u670D\u52A1\u5546\u5F52\u4E00\u5316\u4E5F\u4E0D\u4F1A\u4E22\u4FE1\u606F\u3002</p>
-          <p class="zygr-hint" data-stats>\u7D2F\u8BA1\u7528\u91CF\uFF1A\u6682\u65E0</p>
-          <h3>\u9650\u901F\u4E0E\u8D85\u65F6</h3>
-          <div class="zygr-grid">
-            ${field("\u5E76\u53D1\u4E0A\u9650", "pipeline.maxConcurrent", "number")}
-            ${field("RPM \u9884\u7B97", "pipeline.maxRpm", "number")}
-            ${field("TPM \u9884\u7B97", "pipeline.maxTpm", "number")}
-            ${field("\u8BF7\u6C42\u8D85\u65F6\uFF08\u6BEB\u79D2\uFF09", "pipeline.timeoutMs", "number")}
-          </div>
-          <p class="zygr-hint">\u6240\u6709\u914D\u7F6E\u4EC5\u4FDD\u5B58\u5728\u5F53\u524D\u6CB9\u7334\u73AF\u5883\u4E2D\uFF0C\u4E0D\u4F1A\u8BFB\u53D6\u65E7\u63D2\u4EF6\u914D\u7F6E\uFF1B\u6E05\u7A7A\u6570\u636E\u540E\u9700\u91CD\u65B0\u586B\u5199\u3002</p>
-        </div>
+        </footer>
+        <input type="file" data-config-file accept="application/json,.json" hidden>
+        <div class="zygr-toast" data-toast hidden></div>
       </div>
-      <div class="zygr-dialog-foot">
-        <button class="zygr-btn zygr-ghost" data-act="export">\u5BFC\u51FA\u914D\u7F6E</button>
-        <button class="zygr-btn zygr-ghost" data-act="import">\u5BFC\u5165\u914D\u7F6E</button>
-        <button class="zygr-btn zygr-ghost" data-act="reset">\u91CD\u7F6E\u9ED8\u8BA4</button>
-        <button class="zygr-btn zygr-ghost" data-act="clear">\u6E05\u7A7A\u6570\u636E</button>
-        <button class="zygr-btn" data-act="cancel">\u5173\u95ED</button>
-        <button class="zygr-btn zygr-primary" data-act="save">\u4FDD\u5B58\u914D\u7F6E</button>
-      </div>
-      <input type="file" data-config-file accept="application/json,.json" hidden>
-      <div class="zygr-toast" data-toast hidden></div>
-    </div></div>`;
+    </div>`;
     }
     q(selector) {
       const element = this.shadow.querySelector(selector);
@@ -4474,10 +5192,31 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         const target = event.target;
         const tab = target.closest("[data-tab]");
         if (tab) {
-          this.shadow.querySelectorAll("[data-tab]").forEach((item) => item.classList.toggle("zygr-active", item === tab));
-          this.shadow.querySelectorAll("[data-page]").forEach((page) => {
-            page.hidden = page.getAttribute("data-page") !== tab.dataset.tab;
+          this.shadow.querySelectorAll("[data-tab]").forEach((item) => {
+            const active = item === tab;
+            item.classList.toggle("is-active", active);
+            item.setAttribute("aria-selected", String(active));
           });
+          this.shadow.querySelectorAll("[data-page]").forEach((page) => {
+            const active = page.getAttribute("data-page") === tab.dataset.tab;
+            page.hidden = !active;
+            page.classList.toggle("is-active", active);
+          });
+          this.q(".zg-pane").scrollTop = 0;
+          return;
+        }
+        const segButton = target.closest(".zg-seg button");
+        if (segButton) {
+          const seg = segButton.parentElement;
+          seg.querySelectorAll("button").forEach((item) => {
+            item.setAttribute("aria-pressed", String(item === segButton));
+          });
+          const select = seg.dataset.seg === "thinking"
+            ? this.shadow.querySelector('[data-field="pipeline.thinkingMode"]')
+            : seg.dataset.seg === "detail"
+              ? this.shadow.querySelector('[data-field="image.detail"]')
+              : null;
+          if (select) select.value = segButton.dataset.value;
           return;
         }
         const test = target.closest("[data-test]");
@@ -4486,6 +5225,15 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           return;
         }
         const action = target.closest("[data-act]")?.dataset.act;
+        if (action === "toggle-key") {
+          const input = this.shadow.querySelector('[data-field="pipeline.vlm.apiKey"]');
+          if (input) {
+            const show = input.type === "password";
+            input.type = show ? "text" : "password";
+            target.textContent = show ? "\u9690\u85CF" : "\u663E\u793A";
+          }
+          return;
+        }
         if (action === "gen-run") {
           void this.generateRubric();
           return;
@@ -4545,7 +5293,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
           if (maxScoreField) maxScoreField.value = "";
           this.rubricImages = [];
           const thumbs = this.shadow.querySelector("[data-gen-thumbs]");
-          if (thumbs) thumbs.innerHTML = "";
+          if (thumbs) thumbs.textContent = "";
           return;
         }
         if (action === "fetch-models") {
@@ -4602,10 +5350,24 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         }
       });
     }
+    // 分段控件只是显示层，真正的值仍写在隐藏的 select 里，getDraft / show / applyPlatform 不必改。
+    syncSegments() {
+      [["thinking", '[data-field="pipeline.thinkingMode"]'], ["detail", '[data-field="image.detail"]']].forEach(([name, selector]) => {
+        const select = this.shadow.querySelector(selector);
+        const seg = this.shadow.querySelector(`[data-seg="${name}"]`);
+        if (!select || !seg) return;
+        seg.querySelectorAll("button").forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.value === select.value));
+        });
+      });
+    }
     // 思考只保留两档，历史配置里的 low/high/max 在回填时收敛为「模型默认」。
     clampThinkingSelect() {
       const element = this.shadow.querySelector('[data-field="pipeline.thinkingMode"]');
-      if (element instanceof HTMLSelectElement) element.value = clampThinkingLevel("", element.value);
+      if (element instanceof HTMLSelectElement) {
+        element.value = clampThinkingLevel("", element.value);
+        this.syncSegments();
+      }
     }
     // 累计用量来自本地计数，不触发任何请求。
     refreshStats() {
@@ -4667,6 +5429,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       // 历史记忆里可能是 low/high/max，统一收敛为「模型默认」。
       if (thinkingElement) thinkingElement.value = clampThinkingLevel(id, rememberedThinking || thinkingElement.value || "off");
       if (preset.endpoint) setField(`${base}.endpoint`, preset.endpoint);
+      this.syncSegments();
       this.toast(`\u5DF2\u5207\u6362\u5230\u300C${preset.label}\u300D\uFF0C\u5DF2\u6062\u590D\u8BE5\u5E73\u53F0\u8BB0\u5F55\u7684 API Key\u3001\u6A21\u578B\u4E0E\u601D\u8003\u6A21\u5F0F`);
     }
     exportConfig() {
@@ -4706,7 +5469,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       const setStatus = (text, state = "") => {
         if (!status) return;
         status.textContent = text;
-        status.className = `zygr-test-status${state ? ` zygr-${state}` : ""}`;
+        status.className = `zg-status${state ? ` ${state}` : ""}`;
       };
       setStatus("\u83B7\u53D6\u4E2D\u2026");
       try {
@@ -4776,7 +5539,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       const setStatus = (text, state = "") => {
         if (!status) return;
         status.textContent = text;
-        status.className = `zygr-test-status${state ? ` zygr-${state}` : ""}`;
+        status.className = `zg-status${state ? ` ${state}` : ""}`;
       };
       const value = (key) => String(this.shadow.querySelector(`[data-gen="${key}"]`)?.value ?? "").trim();
       const payload = {
@@ -4815,7 +5578,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       const setStatus = (text, state = "") => {
         if (!status) return;
         status.textContent = text;
-        status.className = `zygr-test-status${state ? ` zygr-${state}` : ""}`;
+        status.className = `zg-status${state ? ` ${state}` : ""}`;
       };
       const startedAt = Date.now();
       setStatus("\u6D4B\u8BD5\u4E2D\u2026 0s\uFF08\u957F\u94FE\u63A8\u7406\u6A21\u578B\u53EF\u80FD\u9700\u6570\u5341\u79D2\uFF09");
@@ -4844,20 +5607,20 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       const setStatus = (text, state = "") => {
         if (!status) return;
         status.textContent = text;
-        status.className = `zygr-test-status${state ? ` zygr-${state}` : ""}`;
+        status.className = `zg-status${state ? ` ${state}` : ""}`;
       };
       setStatus("\u6D4B\u8BD5\u4E2D\u2026");
       if (button) button.disabled = true;
       this.toast("\u6B63\u5728\u6D4B\u8BD5\u8FDE\u63A5\u2026");
       try {
         const ok = await this.callbacks.onTest(draft);
-        const message = ok ? "\u8FDE\u63A5\u6B63\u5E38" : "\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u914D\u7F6E";
+        const message = ok ? "\u56FE\u7247\u8BFB\u53D6\u6B63\u5E38" : "\u8FDE\u63A5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u914D\u7F6E";
         setStatus(message, ok ? "ok" : "bad");
         this.toast(message);
       } catch (error) {
         const message = error instanceof Error ? error.message : "\u8FDE\u63A5\u5931\u8D25";
         const providerMessage = error?.providerMessage ? String(error.providerMessage) : "";
-        const detail = error?.configSummary ? ` | 实际配置: ${error.configSummary}` : "";
+        const detail = error?.configSummary ? ` | \u5B9E\u9645\u914D\u7F6E: ${error.configSummary}` : "";
         setStatus(message + detail, "bad");
         this.toast(providerMessage ? providerMessage.slice(0, 120) : message.slice(0, 120));
       } finally {
@@ -4885,7 +5648,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         const draft = this.getDraft();
         const saved = loadConfig();
         if (sameRubricContext(draft.context, saved.context)) return true;
-        return window.confirm("批改上下文（题目 / 参考答案 / 评分标准）有未保存的修改，确定关闭？");
+        return window.confirm("\u6279\u6539\u4E0A\u4E0B\u6587\uFF08\u9898\u76EE / \u53C2\u8003\u7B54\u6848 / \u8BC4\u5206\u6807\u51C6\uFF09\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u5173\u95ED\uFF1F");
       } catch {
         return true;
       }
@@ -4913,7 +5676,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
         else element.value = value === void 0 || value === null ? "" : String(value);
       });
       this.clampThinkingSelect();
+      this.syncSegments();
       const keyElement = this.shadow.querySelector('[data-field="pipeline.vlm.apiKey"]');
+      // 钥匙默认遮住：只在本次打开期间允许「显示」，重新打开时回到密码态。
+      if (keyElement instanceof HTMLInputElement) keyElement.type = "password";
+      const reveal = this.shadow.querySelector('[data-act="toggle-key"]');
+      if (reveal) reveal.textContent = "\u663E\u793A";
       const modelElement = this.shadow.querySelector('[data-field="pipeline.vlm.model"]');
       if (keyElement) keyElement.dataset.platformBound = boundPlatform;
       if (modelElement) modelElement.dataset.platformBound = boundPlatform;
@@ -4925,7 +5693,6 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       this.q(".zygr-overlay").hidden = true;
     }
   };
-
   // src/main.ts
   function buildLimiter(config) {
     return new RateLimiter({
@@ -4957,6 +5724,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
     let lastSubmitAt = 0;
     const SUBMIT_COOLDOWN = 1500;
     const forcedNotified = new Set();
+    // 每个「平台 + 地址 + 模型」只做一次读图校验，避免每次批改都多花一次请求。
+    const visionVerified = new Set();
     let autoMode = false;
     let autoStopRequested = false;
     // 复核队列：从「下一条需复核」进入后，提交完自动标记并跳到下一条待复核的卷子。
@@ -5150,6 +5919,16 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       if (!service.endpoint.trim() || !service.model.trim()) return false;
       return testConnection(service, serviceLimiter);
     }
+    // 首次用某个模型批改前先做一次读图校验。文本模型在这一步就会被挡住，
+    // 既不会写出一条 0 分历史，也不会让连续批阅一路批下去。
+    async function ensureVisionSupport() {
+      const service = config.pipeline.vlm;
+      const key = `${service.platform}|${service.endpoint}|${service.model}`;
+      if (visionVerified.has(key)) return;
+      panel.setStage("校验图片读取能力", service.model);
+      await testConnection(service, limiter);
+      visionVerified.add(key);
+    }
     async function runGrade2() {
       if (busy) return false;
       if (!currentQuestion || !markingDoc) {
@@ -5172,6 +5951,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
       panel.setBusy(true);
       panel.clearError();
       try {
+        await ensureVisionSupport();
         panel.setStage("\u7B49\u5F85\u4F5C\u7B54\u56FE\u7247\u7A33\u5B9A");
         let images = await gatherAnswerImages();
         if (images.length === 0) {
